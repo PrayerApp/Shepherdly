@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   // Look up the access code
   const { data: accessCode, error } = await admin
     .from('access_codes')
-    .select('id, user_id, app_users!inner(id, email, is_active)')
+    .select('id, user_id, code, is_active')
     .eq('code', code.trim().toUpperCase())
     .eq('is_active', true)
     .single()
@@ -20,7 +20,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid or inactive access code.' }, { status: 401 })
   }
 
-  const appUser = accessCode.app_users as unknown as { id: string; email: string; is_active: boolean }
+  // Look up the linked app user
+  const { data: appUser, error: userError } = await admin
+    .from('app_users')
+    .select('id, email, is_active')
+    .eq('id', accessCode.user_id)
+    .single()
+
+  if (userError || !appUser) {
+    return NextResponse.json({ error: 'No account linked to this code.' }, { status: 401 })
+  }
 
   if (!appUser.is_active) {
     return NextResponse.json({ error: 'Your account has been deactivated.' }, { status: 403 })
