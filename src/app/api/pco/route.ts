@@ -226,7 +226,7 @@ export async function POST(request: NextRequest) {
             pco_id: p.id,
             first_name: p.attributes.first_name || null,
             last_name: p.attributes.last_name || null,
-            full_name: p.attributes.name || `${p.attributes.first_name || ''} ${p.attributes.last_name || ''}`.trim(),
+            // full_name is a generated column (first + last), don't write to it
             membership_type: p.attributes.membership || null,
             status: p.attributes.status || null,
             gender: p.attributes.gender || null,
@@ -237,7 +237,10 @@ export async function POST(request: NextRequest) {
             pco_updated_at: p.attributes.updated_at,
             last_synced_at: new Date().toISOString(),
           }))
-          await admin.from('pco_people').upsert(rows, { onConflict: 'pco_id' })
+          const { error: upsertErr } = await admin.from('pco_people').upsert(rows, { onConflict: 'pco_id' })
+          if (upsertErr) {
+            return NextResponse.json({ error: `People upsert failed: ${upsertErr.message}` }, { status: 500 })
+          }
           upserted = rows.length
         }
 
@@ -262,7 +265,10 @@ export async function POST(request: NextRequest) {
             pco_updated_at: g.attributes.updated_at || null,
             last_synced_at: new Date().toISOString(),
           }))
-          await admin.from('pco_groups').upsert(rows, { onConflict: 'pco_id' })
+          const { error: upsertErr } = await admin.from('pco_groups').upsert(rows, { onConflict: 'pco_id' })
+          if (upsertErr) {
+            return NextResponse.json({ error: `Groups upsert failed: ${upsertErr.message}` }, { status: 500 })
+          }
           upserted = rows.length
         }
 
@@ -285,7 +291,10 @@ export async function POST(request: NextRequest) {
             pco_updated_at: t.attributes.updated_at || null,
             last_synced_at: new Date().toISOString(),
           }))
-          await admin.from('pco_teams').upsert(rows, { onConflict: 'pco_id' })
+          const { error: upsertErr } = await admin.from('pco_teams').upsert(rows, { onConflict: 'pco_id' })
+          if (upsertErr) {
+            return NextResponse.json({ error: `Teams upsert failed: ${upsertErr.message}` }, { status: 500 })
+          }
           upserted = rows.length
         }
 

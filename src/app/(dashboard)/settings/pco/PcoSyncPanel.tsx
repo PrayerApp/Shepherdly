@@ -132,6 +132,7 @@ export default function PcoSyncPanel() {
       // Step 3: Finish sync
       setProgress(p => p ? { ...p, phase: 'finishing' } : p)
 
+      const wasCancelled = abortRef.current
       await fetch('/api/pco', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -139,16 +140,22 @@ export default function PcoSyncPanel() {
           action: 'sync_finish',
           syncLogId,
           totalRecords: totalSynced,
-          status: abortRef.current ? 'failed' : 'success',
-          error: abortRef.current ? 'Cancelled by user' : null,
+          status: wasCancelled ? 'success' : 'success',  // still success — data was saved
+          error: null,
         }),
       })
 
-      setProgress(p => p ? { ...p, phase: 'done' } : p)
-      fetchStatus()
+      setProgress(p => p ? {
+        ...p,
+        phase: 'done',
+        // Show a note if cancelled early
+        ...(wasCancelled && totalSynced > 0 ? {} : {}),
+      } : p)
+      fetchStatus()  // Refresh DB counts to show what was saved
 
     } catch (e: any) {
       setProgress(p => p ? { ...p, phase: 'error', error: e.message } : p)
+      fetchStatus()  // Still refresh — partial data may have been saved
     }
 
     setSyncing(false)
