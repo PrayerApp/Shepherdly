@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
   const action = request.nextUrl.searchParams.get('action') || 'status'
   const admin = createAdminClient()
 
-  const { data: settings } = await admin.from('church_settings').select('*').single()
+  const { data: settings } = await admin.from('church_settings').select('*').limit(1).single()
   if (!settings) return NextResponse.json({ error: 'No church settings found' }, { status: 404 })
 
   if (action === 'validate') {
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json()
   const admin = createAdminClient()
-  const { data: settings } = await admin.from('church_settings').select('*').single()
+  const { data: settings } = await admin.from('church_settings').select('*').limit(1).single()
   if (!settings) return NextResponse.json({ error: 'No church settings' }, { status: 404 })
 
   // ── Save credentials ──────────────────────────────────────────
