@@ -52,8 +52,6 @@ export default function PcoSyncPanel() {
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [progress, setProgress] = useState<SyncProgress | null>(null)
-  const [purging, setPurging] = useState(false)
-  const [purgeConfirm, setPurgeConfirm] = useState(false)
   const abortRef = useRef(false)
 
   const fetchStatus = useCallback(async () => {
@@ -198,28 +196,6 @@ export default function PcoSyncPanel() {
 
   const handleCancel = () => { abortRef.current = true }
 
-  /* ── Purge handler ─────────────────────────────────────────── */
-  const handlePurge = async () => {
-    setPurging(true)
-    try {
-      const res = await fetch('/api/pco', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'purge' }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || 'Purge failed')
-      }
-      setPurgeConfirm(false)
-      setProgress(null)
-      fetchStatus()
-    } catch (e: any) {
-      alert(`Failed to purge: ${e.message}`)
-    }
-    setPurging(false)
-  }
-
   /* ── Loading state ─────────────────────────────────────────── */
   if (loading) {
     return (
@@ -279,9 +255,9 @@ export default function PcoSyncPanel() {
         )}
       </div>
 
-      {/* ── Live progress ──────────────────────────────────────── */}
+      {/* ── Active sync progress ──────────────────────────────── */}
       {progress && progress.phase !== 'done' && progress.phase !== 'error' && (
-        <div className="rounded-lg p-4 mb-5" style={{ background: 'var(--primary-light)' }}>
+        <div className="rounded-lg p-4 mb-4" style={{ background: 'var(--primary-light)' }}>
           <div className="flex items-center gap-2 mb-3">
             <div className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin"
               style={{ borderColor: 'var(--green-300)', borderTopColor: 'var(--green-700)' }} />
@@ -293,12 +269,11 @@ export default function PcoSyncPanel() {
             </span>
           </div>
 
-          {/* Per-category progress */}
+          {/* Per-category progress bars */}
           {categories.map(cat => {
             const catResources = resourcesByCategory[cat.key] || []
             if (catResources.length === 0) return null
 
-            // Category-level totals
             const catSynced = catResources.reduce((sum, r) => sum + (progress.resources[r.key]?.synced || 0), 0)
             const catTotal = catResources.reduce((sum, r) => sum + (progress.resources[r.key]?.total || 0), 0)
             const catPct = catTotal > 0 ? Math.min(100, (catSynced / catTotal) * 100) : 0
@@ -314,24 +289,6 @@ export default function PcoSyncPanel() {
                   <div className="h-full rounded-full transition-all duration-300"
                     style={{ width: `${catPct}%`, background: 'var(--green-600)' }} />
                 </div>
-
-                {/* Individual resources within category (collapsed, small text) */}
-                {catResources.length > 1 && (
-                  <div className="mt-1 ml-2 space-y-0.5">
-                    {catResources.map(r => {
-                      const rp = progress.resources[r.key]
-                      if (!rp || rp.total === 0) return null
-                      const isActiveRes = r.key === progress.currentResourceKey
-                      return (
-                        <div key={r.key} className="flex justify-between text-xs sans"
-                          style={{ color: 'var(--green-700)', opacity: isActiveRes ? 1 : 0.7, fontSize: '0.65rem' }}>
-                          <span>{r.label}</span>
-                          <span>{rp.synced.toLocaleString()} / {rp.total.toLocaleString()}</span>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
               </div>
             )
           })}
@@ -342,18 +299,18 @@ export default function PcoSyncPanel() {
         </div>
       )}
 
-      {/* ── Success message ────────────────────────────────────── */}
+      {/* ── Success toast ──────────────────────────────────────── */}
       {progress?.phase === 'done' && (
-        <div className="rounded-lg px-4 py-3 text-sm sans mb-5 flex items-center gap-2"
+        <div className="rounded-lg px-4 py-3 text-sm sans mb-4 flex items-center gap-2"
           style={{ background: '#f0fdf4', color: 'var(--green-800)' }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
           Sync complete &mdash; {progress.totalSynced.toLocaleString()} records synced
         </div>
       )}
 
-      {/* ── Error message ──────────────────────────────────────── */}
+      {/* ── Error toast ────────────────────────────────────────── */}
       {progress?.phase === 'error' && (
-        <div className="rounded-lg px-4 py-3 text-sm sans mb-5 flex items-center gap-2"
+        <div className="rounded-lg px-4 py-3 text-sm sans mb-4 flex items-center gap-2"
           style={{ background: 'var(--danger-light)', color: '#991b1b' }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
@@ -362,100 +319,45 @@ export default function PcoSyncPanel() {
         </div>
       )}
 
-      {/* ── Record counts by category ──────────────────────────── */}
-      <div className="space-y-3 mb-5">
-        {categories.map(cat => {
-          const catResources = resourcesByCategory[cat.key] || []
-          const catTotal = catResources.reduce((sum, r) => sum + (status.counts[r.key] || 0), 0)
-
-          return (
-            <div key={cat.key} className="rounded-lg p-3" style={{ background: 'var(--background-subtle)' }}>
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{cat.label}</span>
-                <span className="text-lg font-serif" style={{ color: 'var(--primary)' }}>{catTotal.toLocaleString()}</span>
-              </div>
-              {catResources.length > 1 && (
-                <div className="flex flex-wrap gap-x-4 gap-y-0.5">
-                  {catResources.map(r => (
-                    <span key={r.key} className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-                      {r.label}: {(status.counts[r.key] || 0).toLocaleString()}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          )
-        })}
-        <div className="text-right">
-          <span className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-            Total: {totalRecords.toLocaleString()} records
-          </span>
-        </div>
-      </div>
-
-      {/* ── Last sync info ─────────────────────────────────────── */}
-      {status.lastSync ? (
-        <div className="rounded-lg p-4 mb-4" style={{ background: 'var(--background-subtle)' }}>
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-2 h-2 rounded-full"
-              style={{ background: status.lastSync.status === 'success' ? 'var(--success)' : status.lastSync.status === 'running' ? 'var(--gold-500)' : 'var(--danger)' }} />
-            <span className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>
-              Last sync: {status.lastSync.status === 'success' ? 'Completed' : status.lastSync.status === 'running' ? 'In progress' : 'Failed'}
+      {/* ── Synced record summary ──────────────────────────────── */}
+      {totalRecords > 0 ? (
+        <div className="rounded-lg p-4" style={{ background: 'var(--primary-light)' }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm sans font-medium" style={{ color: 'var(--green-800)' }}>
+              {totalRecords.toLocaleString()} records synced
             </span>
+            {status.lastSync?.completed_at && (
+              <span className="text-xs sans" style={{ color: 'var(--green-700)' }}>
+                Last synced {formatRelativeTime(status.lastSync.completed_at)}
+              </span>
+            )}
           </div>
-          <div className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-            {status.lastSync.completed_at
-              ? formatRelativeTime(status.lastSync.completed_at)
-              : status.lastSync.started_at
-                ? `Started ${formatRelativeTime(status.lastSync.started_at)}`
-                : ''}
-            {status.lastSync.records_synced > 0 && ` \u00b7 ${status.lastSync.records_synced.toLocaleString()} records`}
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {categories.map(cat => {
+              const catResources = resourcesByCategory[cat.key] || []
+              const catTotal = catResources.reduce((sum, r) => sum + (status.counts[r.key] || 0), 0)
+              if (catTotal === 0) return null
+              return (
+                <span key={cat.key} className="text-xs sans" style={{ color: 'var(--green-700)' }}>
+                  {cat.label}: {catTotal.toLocaleString()}
+                </span>
+              )
+            })}
           </div>
-          {status.lastSync.error_message && (
-            <div className="text-xs sans mt-1" style={{ color: 'var(--danger)' }}>
+          {status.lastSync?.error_message && (
+            <div className="text-xs sans mt-2" style={{ color: 'var(--danger)' }}>
               {status.lastSync.error_message}
             </div>
           )}
         </div>
       ) : !progress && (
-        <div className="rounded-lg p-4 text-center mb-4" style={{ background: 'var(--background-subtle)' }}>
+        <div className="rounded-lg p-4 text-center" style={{ background: 'var(--background-subtle)' }}>
           <p className="text-sm sans" style={{ color: 'var(--foreground-muted)' }}>
             No syncs yet. Hit &ldquo;Sync Now&rdquo; to import your PCO data.
           </p>
         </div>
       )}
 
-      {/* ── Delete all PCO data ────────────────────────────────── */}
-      <div className="border-t pt-4" style={{ borderColor: 'var(--border)' }}>
-        {!purgeConfirm ? (
-          <button
-            onClick={() => setPurgeConfirm(true)}
-            disabled={syncing}
-            className="text-xs sans font-medium px-3 py-1.5 rounded-lg border transition-colors"
-            style={{ borderColor: 'var(--neutral-300)', color: 'var(--foreground-muted)' }}>
-            Delete All PCO Data
-          </button>
-        ) : (
-          <div className="flex items-center gap-3">
-            <span className="text-xs sans" style={{ color: 'var(--danger)' }}>
-              This will permanently delete all synced PCO data. Are you sure?
-            </span>
-            <button
-              onClick={handlePurge}
-              disabled={purging}
-              className="text-xs sans font-bold px-3 py-1.5 rounded-lg"
-              style={{ background: 'var(--danger)', color: 'white' }}>
-              {purging ? 'Deleting\u2026' : 'Yes, Delete'}
-            </button>
-            <button
-              onClick={() => setPurgeConfirm(false)}
-              className="text-xs sans px-3 py-1.5 rounded-lg border"
-              style={{ borderColor: 'var(--neutral-300)', color: 'var(--foreground-muted)' }}>
-              Cancel
-            </button>
-          </div>
-        )}
-      </div>
     </div>
   )
 }

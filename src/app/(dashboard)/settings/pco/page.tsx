@@ -3,6 +3,7 @@ import PcoConnectionStatus from './PcoConnectionStatus'
 import PcoSettingsForm from './PcoSettingsForm'
 import PcoAutoSyncSettings from './PcoAutoSyncSettings'
 import PcoSyncPanel from './PcoSyncPanel'
+import PcoPurgeSection from './PcoPurgeSection'
 
 export default async function PcoSettingsPage() {
   const supabase = await createClient()
@@ -79,6 +80,11 @@ export default async function PcoSettingsPage() {
           <PcoAutoSyncSettings />
           <PcoSyncPanel />
         </div>
+      </div>
+
+      {/* Danger zone — full width, below everything */}
+      <div className="mt-8">
+        <PcoPurgeSection />
       </div>
     </div>
   )
