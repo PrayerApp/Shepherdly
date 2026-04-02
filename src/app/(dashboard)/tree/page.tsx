@@ -1,12 +1,9 @@
-export default function Page() {
+import ShepherdTree from '@/components/tree/ShepherdTree'
+
+export default function TreePage() {
   return (
-    <div className="p-8">
-      <h1 className="text-3xl font-serif" style={{ color: 'var(--primary)' }}>
-        Coming Soon
-      </h1>
-      <p className="mt-2 sans text-sm" style={{ color: 'var(--muted-foreground)' }}>
-        This page is being built.
-      </p>
+    <div className="h-screen flex flex-col overflow-hidden">
+      <ShepherdTree />
     </div>
   )
 }
