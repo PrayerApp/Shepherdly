@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import PcoSettingsForm from './PcoSettingsForm'
+import PcoSyncPanel from './PcoSyncPanel'
 
 export default async function PcoSettingsPage() {
   const supabase = await createClient()
@@ -57,7 +58,12 @@ export default async function PcoSettingsPage() {
         </p>
       </div>
 
-      <PcoSettingsForm settings={settings} />
+      <PcoSettingsForm hasExistingCreds={!!(settings?.pco_app_id && settings?.pco_app_secret)} />
+
+      {/* Sync section */}
+      <div className="mt-8">
+        <PcoSyncPanel />
+      </div>
     </div>
   )
 }
