@@ -3,32 +3,33 @@ import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
-  const { code } = await request.json()
+  const { code, email } = await request.json()
   if (!code?.trim()) return NextResponse.json({ error: 'Code is required' }, { status: 400 })
+  if (!email?.trim()) return NextResponse.json({ error: 'Email is required' }, { status: 400 })
 
   const admin = createAdminClient()
 
-  // Look up the access code
-  const { data: accessCode, error } = await admin
-    .from('access_codes')
-    .select('id, user_id, code, is_active')
-    .eq('code', code.trim().toUpperCase())
-    .eq('is_active', true)
+  // Look up the church by invite code
+  const { data: church, error } = await admin
+    .from('churches')
+    .select('id, name, invite_code')
+    .ilike('invite_code', code.trim().toUpperCase())
     .single()
 
-  if (error || !accessCode) {
-    return NextResponse.json({ error: 'Invalid or inactive access code.' }, { status: 401 })
+  if (error || !church) {
+    return NextResponse.json({ error: 'Invalid invite code.' }, { status: 401 })
   }
 
-  // Look up the linked app user
+  // Look up the user by email in this church
   const { data: appUser, error: userError } = await admin
-    .from('app_users')
-    .select('id, email, is_active')
-    .eq('id', accessCode.user_id)
+    .from('users')
+    .select('id, user_id, email, is_active, church_id')
+    .eq('email', email.trim().toLowerCase())
+    .eq('church_id', church.id)
     .single()
 
   if (userError || !appUser) {
-    return NextResponse.json({ error: 'No account linked to this code.' }, { status: 401 })
+    return NextResponse.json({ error: 'No account found for this email at this church.' }, { status: 401 })
   }
 
   if (!appUser.is_active) {
@@ -45,9 +46,6 @@ export async function POST(request: NextRequest) {
   if (linkError || !linkData) {
     return NextResponse.json({ error: 'Failed to create session.' }, { status: 500 })
   }
-
-  // Update last_used_at
-  await admin.from('access_codes').update({ last_used_at: new Date().toISOString() }).eq('id', accessCode.id)
 
   // Extract token and exchange for session
   const url = new URL(linkData.properties.action_link)

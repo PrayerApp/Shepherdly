@@ -6,15 +6,13 @@ import type { UserRole } from '@/types'
 
 interface TreeNode {
   id: string
-  full_name: string | null
+  name: string
   email: string
   role: UserRole
-  avatar_url: string | null
-  supervisor_id: string | null
-  flock_count: number
-  checkin_count: number
-  is_me: boolean
-  is_active: boolean
+  supervisorId: string | null
+  flockCount: number
+  lastCheckin: string | null
+  isCurrentUser: boolean
 }
 
 interface LayoutNode extends TreeNode {
@@ -37,8 +35,8 @@ function buildTree(nodes: TreeNode[]): LayoutNode[] {
 
   const roots: LayoutNode[] = []
   for (const n of map.values()) {
-    if (n.supervisor_id && map.has(n.supervisor_id)) {
-      map.get(n.supervisor_id)!.children.push(n)
+    if (n.supervisorId && map.has(n.supervisorId)) {
+      map.get(n.supervisorId)!.children.push(n)
     } else {
       roots.push(n)
     }
@@ -85,19 +83,28 @@ function getAllEdges(nodes: LayoutNode[]): { from: LayoutNode; to: LayoutNode }[
   const map = new Map(nodes.map(n => [n.id, n]))
   const edges: { from: LayoutNode; to: LayoutNode }[] = []
   for (const n of nodes) {
-    if (n.supervisor_id && map.has(n.supervisor_id)) {
-      edges.push({ from: map.get(n.supervisor_id)!, to: n })
+    if (n.supervisorId && map.has(n.supervisorId)) {
+      edges.push({ from: map.get(n.supervisorId)!, to: n })
     }
   }
   return edges
 }
 
 function healthColor(node: TreeNode): string {
-  if (node.flock_count === 0) return '#94a3b8'
-  const ratio = Math.min(node.checkin_count / Math.max(node.flock_count, 1), 1)
-  if (ratio >= 0.8) return '#4a7c59'
-  if (ratio >= 0.5) return '#c17f3e'
-  return '#9b3a3a'
+  if (node.flockCount === 0) return '#94a3b8'
+  if (!node.lastCheckin) return '#9b3a3a' // no check-in ever
+  const daysSince = Math.floor((Date.now() - new Date(node.lastCheckin).getTime()) / (1000 * 60 * 60 * 24))
+  if (daysSince <= 7) return '#4a7c59'   // green — recent
+  if (daysSince <= 30) return '#c17f3e'  // orange — needs attention
+  return '#9b3a3a'                        // red — at risk
+}
+
+function checkinLabel(node: TreeNode): string {
+  if (!node.lastCheckin) return 'No check-ins'
+  const daysSince = Math.floor((Date.now() - new Date(node.lastCheckin).getTime()) / (1000 * 60 * 60 * 24))
+  if (daysSince === 0) return 'Today'
+  if (daysSince === 1) return '1 day ago'
+  return `${daysSince}d ago`
 }
 
 export default function ShepherdTree() {
@@ -291,7 +298,7 @@ export default function ShepherdTree() {
               const color = ROLE_COLORS[node.role] || '#6b4c2a'
               const health = healthColor(node)
               const isSelected = selected?.id === node.id
-              const initials = (node.full_name || node.email)
+              const initials = (node.name || node.email)
                 .split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
 
               return (
@@ -318,8 +325,8 @@ export default function ShepherdTree() {
                     x={0} y={0}
                     width={NODE_W} height={NODE_H}
                     rx={10}
-                    fill={node.is_me ? color : 'white'}
-                    stroke={isSelected ? color : node.is_me ? color : 'var(--border)'}
+                    fill={node.isCurrentUser ? color : 'white'}
+                    stroke={isSelected ? color : node.isCurrentUser ? color : 'var(--border)'}
                     strokeWidth={isSelected ? 2.5 : 1}
                     filter="url(#shadow)"
                   />
@@ -333,34 +340,34 @@ export default function ShepherdTree() {
 
                   {/* Avatar circle */}
                   <circle cx={28} cy={NODE_H / 2} r={18}
-                    fill={node.is_me ? 'rgba(255,255,255,0.2)' : color + '18'} />
+                    fill={node.isCurrentUser ? 'rgba(255,255,255,0.2)' : color + '18'} />
                   <text x={28} y={NODE_H / 2 + 1}
                     textAnchor="middle" dominantBaseline="middle"
                     fontSize={11} fontWeight="600" fontFamily="system-ui"
-                    fill={node.is_me ? 'white' : color}>
+                    fill={node.isCurrentUser ? 'white' : color}>
                     {initials}
                   </text>
 
                   {/* Name */}
                   <text x={52} y={NODE_H / 2 - 9}
                     fontSize={12} fontWeight="600" fontFamily="Georgia, serif"
-                    fill={node.is_me ? 'white' : 'var(--foreground)'}
+                    fill={node.isCurrentUser ? 'white' : 'var(--foreground)'}
                     style={{ maxWidth: NODE_W - 60 }}>
-                    {(node.full_name || node.email).slice(0, 18)}{(node.full_name || node.email).length > 18 ? '…' : ''}
+                    {(node.name || node.email).slice(0, 18)}{(node.name || node.email).length > 18 ? '…' : ''}
                   </text>
 
                   {/* Role */}
                   <text x={52} y={NODE_H / 2 + 6}
                     fontSize={10} fontFamily="system-ui"
-                    fill={node.is_me ? 'rgba(255,255,255,0.75)' : 'var(--muted-foreground)'}>
+                    fill={node.isCurrentUser ? 'rgba(255,255,255,0.75)' : 'var(--muted-foreground)'}>
                     {ROLE_LABELS[node.role]}
                   </text>
 
                   {/* Flock count */}
                   <text x={52} y={NODE_H / 2 + 19}
                     fontSize={9} fontFamily="system-ui"
-                    fill={node.is_me ? 'rgba(255,255,255,0.6)' : 'var(--muted-foreground)'}>
-                    🐑 {node.flock_count} · ✅ {node.checkin_count} this month
+                    fill={node.isCurrentUser ? 'rgba(255,255,255,0.6)' : 'var(--muted-foreground)'}>
+                    🐑 {node.flockCount} · {checkinLabel(node)}
                   </text>
                 </g>
               )
@@ -376,11 +383,11 @@ export default function ShepherdTree() {
               <div className="flex items-center gap-3">
                 <div className="w-11 h-11 rounded-full flex items-center justify-center text-sm font-semibold sans"
                   style={{ background: ROLE_COLORS[selected.role] + '20', color: ROLE_COLORS[selected.role] }}>
-                  {(selected.full_name || selected.email).split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()}
+                  {(selected.name || selected.email).split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()}
                 </div>
                 <div>
                   <div className="font-serif text-base" style={{ color: 'var(--primary)' }}>
-                    {selected.full_name || 'No name'}
+                    {selected.name || 'No name'}
                   </div>
                   <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>
                     {selected.email}
@@ -400,11 +407,11 @@ export default function ShepherdTree() {
             {/* Stats */}
             <div className="grid grid-cols-2 gap-3 mb-4">
               <div className="rounded-xl p-3 text-center" style={{ background: 'var(--muted)' }}>
-                <div className="text-2xl font-serif" style={{ color: 'var(--primary)' }}>{selected.flock_count}</div>
+                <div className="text-2xl font-serif" style={{ color: 'var(--primary)' }}>{selected.flockCount}</div>
                 <div className="text-xs sans mt-0.5" style={{ color: 'var(--muted-foreground)' }}>In Flock</div>
               </div>
               <div className="rounded-xl p-3 text-center" style={{ background: 'var(--muted)' }}>
-                <div className="text-2xl font-serif" style={{ color: healthColor(selected) }}>{selected.checkin_count}</div>
+                <div className="text-sm font-serif" style={{ color: healthColor(selected) }}>{checkinLabel(selected)}</div>
                 <div className="text-xs sans mt-0.5" style={{ color: 'var(--muted-foreground)' }}>Check-ins (30d)</div>
               </div>
             </div>
@@ -414,16 +421,17 @@ export default function ShepherdTree() {
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>Flock Health</span>
                 <span className="text-xs sans" style={{ color: healthColor(selected) }}>
-                  {selected.flock_count === 0 ? 'No flock assigned' :
-                    selected.checkin_count / selected.flock_count >= 0.8 ? 'Healthy' :
-                    selected.checkin_count / selected.flock_count >= 0.5 ? 'Needs attention' : 'At risk'}
+                  {selected.flockCount === 0 ? 'No flock assigned' :
+                    !selected.lastCheckin ? 'No check-ins' :
+                    (Date.now() - new Date(selected.lastCheckin).getTime()) / 86400000 <= 7 ? 'Healthy' :
+                    (Date.now() - new Date(selected.lastCheckin).getTime()) / 86400000 <= 30 ? 'Needs attention' : 'At risk'}
                 </span>
               </div>
               <div className="h-2 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
                 <div className="h-full rounded-full transition-all"
                   style={{
-                    width: selected.flock_count === 0 ? '0%' :
-                      `${Math.min(100, (selected.checkin_count / selected.flock_count) * 100)}%`,
+                    width: selected.flockCount === 0 || !selected.lastCheckin ? '0%' :
+                      `${Math.max(0, Math.min(100, 100 - ((Date.now() - new Date(selected.lastCheckin).getTime()) / 86400000 / 30 * 100)))}%`,
                     background: healthColor(selected)
                   }} />
               </div>

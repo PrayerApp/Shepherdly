@@ -4,7 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
-import type { AppUser } from '@/types'
+import type { User } from '@/types'
 
 const ROLE_LABELS: Record<string, string> = {
   super_admin: 'Administrator',
@@ -26,6 +26,7 @@ const NAV_ITEMS = [
   { href: '/people', label: 'My Flock', icon: PeopleIcon },
   { href: '/checkins', label: 'Check-ins', icon: CheckIcon },
   { href: '/surveys', label: 'Surveys', icon: SurveyIcon },
+  { href: '/mir', label: 'Impact Reports', icon: MirIcon },
 ]
 
 const SETTINGS_ITEMS = [
@@ -33,7 +34,7 @@ const SETTINGS_ITEMS = [
   { href: '/settings/pco', label: 'PCO Connection', icon: SyncIcon, roles: ['super_admin'] },
 ]
 
-export default function Sidebar({ user }: { user: AppUser }) {
+export default function Sidebar({ user }: { user: User }) {
   const pathname = usePathname()
   const router = useRouter()
 
@@ -113,11 +114,11 @@ export default function Sidebar({ user }: { user: AppUser }) {
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium sans shrink-0"
             style={{ background: ROLE_COLORS[user.role] || 'var(--accent)', color: 'white' }}>
-            {(user.full_name || user.email).charAt(0).toUpperCase()}
+            {(user.name || user.email).charAt(0).toUpperCase()}
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-white text-sm font-medium sans truncate">
-              {user.full_name || 'Set your name'}
+              {user.name || 'Set your name'}
             </div>
             <div className="text-xs sans" style={{ color: 'rgba(255,255,255,0.5)' }}>
               {ROLE_LABELS[user.role]}
@@ -166,6 +167,9 @@ function UsersIcon({ size }: { size: number }) {
 }
 function SyncIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+}
+function MirIcon({ size }: { size: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
 }
 function SignOutIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>

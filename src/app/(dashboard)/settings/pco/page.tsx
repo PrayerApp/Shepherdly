@@ -7,13 +7,23 @@ import PcoPurgeSection from './PcoPurgeSection'
 
 export default async function PcoSettingsPage() {
   const supabase = await createClient()
-  const { data: settings } = await supabase
-    .from('church_settings')
-    .select('*')
+  const { data: { user } } = await supabase.auth.getUser()
+
+  const { data: appUser } = await supabase
+    .from('users')
+    .select('church_id')
+    .eq('user_id', user!.id)
+    .single()
+
+  const { data: credentials } = await supabase
+    .from('planning_center_credentials')
+    .select('id, app_id, app_secret, is_active, last_synced_at')
+    .eq('church_id', appUser?.church_id!)
+    .eq('is_active', true)
     .limit(1)
     .single()
 
-  const hasCreds = !!(settings?.pco_app_id && settings?.pco_app_secret)
+  const hasCreds = !!(credentials?.app_id && credentials?.app_secret)
 
   return (
     <div className="p-8">

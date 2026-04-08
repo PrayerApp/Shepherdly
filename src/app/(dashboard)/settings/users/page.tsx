@@ -2,20 +2,18 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { ROLE_ORDER, ROLE_LABELS, ROLE_COLORS } from '@/types'
-import type { AppUser, UserRole } from '@/types'
+import type { User, UserRole } from '@/types'
 
-interface UserWithHierarchy extends AppUser {
-  user_hierarchy: { supervisor_id: string | null }[] | null
-}
+type UserRow = User
 
 const inputClass = "w-full px-4 py-2.5 rounded-lg border text-sm sans outline-none"
 const inputStyle = { borderColor: 'var(--border)', background: 'var(--muted)', color: 'var(--foreground)' }
 
 export default function UsersPage() {
-  const [users, setUsers] = useState<UserWithHierarchy[]>([])
+  const [users, setUsers] = useState<UserRow[]>([])
   const [loading, setLoading] = useState(true)
   const [showInvite, setShowInvite] = useState(false)
-  const [editUser, setEditUser] = useState<UserWithHierarchy | null>(null)
+  const [editUser, setEditUser] = useState<UserRow | null>(null)
   const [search, setSearch] = useState('')
   const [filterRole, setFilterRole] = useState<UserRole | 'all'>('all')
 
@@ -32,7 +30,7 @@ export default function UsersPage() {
   const filtered = users.filter(u => {
     const matchRole = filterRole === 'all' || u.role === filterRole
     const matchSearch = !search ||
-      u.full_name?.toLowerCase().includes(search.toLowerCase()) ||
+      u.name?.toLowerCase().includes(search.toLowerCase()) ||
       u.email.toLowerCase().includes(search.toLowerCase())
     return matchRole && matchSearch
   })
@@ -40,13 +38,11 @@ export default function UsersPage() {
   const grouped = ROLE_ORDER.reduce((acc, role) => {
     acc[role] = filtered.filter(u => u.role === role)
     return acc
-  }, {} as Record<UserRole, UserWithHierarchy[]>)
+  }, {} as Record<UserRole, UserRow[]>)
 
-  const getSupervisorName = (u: UserWithHierarchy) => {
-    const supId = u.user_hierarchy?.[0]?.supervisor_id
-    if (!supId) return null
-    const sup = users.find(x => x.id === supId)
-    return sup?.full_name || sup?.email || null
+  const getSupervisorName = (u: UserRow) => {
+    // Supervisor lookup not yet implemented (requires people.shepherd_id mapping)
+    return null
   }
 
   return (
@@ -100,12 +96,12 @@ export default function UsersPage() {
                       style={{ borderTop: i > 0 ? '1px solid var(--border)' : 'none' }}>
                       <div className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium sans shrink-0"
                         style={{ background: ROLE_COLORS[role] + '20', color: ROLE_COLORS[role] }}>
-                        {(u.full_name || u.email).charAt(0).toUpperCase()}
+                        {(u.name || u.email).charAt(0).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium sans text-sm" style={{ color: 'var(--foreground)' }}>
-                            {u.full_name || <span style={{ color: 'var(--muted-foreground)' }}>No name set</span>}
+                            {u.name || <span style={{ color: 'var(--muted-foreground)' }}>No name set</span>}
                           </span>
                           {!u.is_active && (
                             <span className="text-xs sans px-1.5 py-0.5 rounded" style={{ background: '#fef2f2', color: 'var(--danger)' }}>
@@ -146,7 +142,7 @@ export default function UsersPage() {
   )
 }
 
-function InviteModal({ users, onClose, onSuccess }: { users: UserWithHierarchy[]; onClose: () => void; onSuccess: () => void }) {
+function InviteModal({ users, onClose, onSuccess }: { users: UserRow[]; onClose: () => void; onSuccess: () => void }) {
   const [email, setEmail] = useState('')
   const [fullName, setFullName] = useState('')
   const [role, setRole] = useState<UserRole>('leader')
@@ -163,7 +159,7 @@ function InviteModal({ users, onClose, onSuccess }: { users: UserWithHierarchy[]
     const res = await fetch('/api/users/invite', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, full_name: fullName, role, supervisor_id: supervisorId || null }),
+      body: JSON.stringify({ email, name: fullName, role, /* supervisor_id not yet implemented */ }),
     })
     const data = await res.json()
     if (data.error) { setError(data.error); setLoading(false) } else onSuccess()
@@ -189,7 +185,7 @@ function InviteModal({ users, onClose, onSuccess }: { users: UserWithHierarchy[]
           <Field label="Reports To">
             <select value={supervisorId} onChange={e => setSupervisorId(e.target.value)} className={inputClass} style={inputStyle}>
               <option value="">— None —</option>
-              {eligibleSupervisors.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email} ({ROLE_LABELS[u.role]})</option>)}
+              {eligibleSupervisors.map(u => <option key={u.id} value={u.id}>{u.name || u.email} ({ROLE_LABELS[u.role]})</option>)}
             </select>
           </Field>
         )}
@@ -200,11 +196,11 @@ function InviteModal({ users, onClose, onSuccess }: { users: UserWithHierarchy[]
   )
 }
 
-function EditModal({ user, users, onClose, onSuccess }: { user: UserWithHierarchy; users: UserWithHierarchy[]; onClose: () => void; onSuccess: () => void }) {
-  const [fullName, setFullName] = useState(user.full_name || '')
+function EditModal({ user, users, onClose, onSuccess }: { user: UserRow; users: UserRow[]; onClose: () => void; onSuccess: () => void }) {
+  const [fullName, setFullName] = useState(user.name || '')
   const [role, setRole] = useState<UserRole>(user.role)
   const [isActive, setIsActive] = useState(user.is_active)
-  const [supervisorId, setSupervisorId] = useState(user.user_hierarchy?.[0]?.supervisor_id || '')
+  const [supervisorId, setSupervisorId] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -217,7 +213,7 @@ function EditModal({ user, users, onClose, onSuccess }: { user: UserWithHierarch
     const res = await fetch(`/api/users/${user.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_name: fullName, role, is_active: isActive, supervisor_id: supervisorId || null }),
+      body: JSON.stringify({ name: fullName, role, is_active: isActive, /* supervisor_id not yet implemented */ }),
     })
     const data = await res.json()
     if (data.error) { setError(data.error); setLoading(false) } else onSuccess()
@@ -238,7 +234,7 @@ function EditModal({ user, users, onClose, onSuccess }: { user: UserWithHierarch
           <Field label="Reports To">
             <select value={supervisorId} onChange={e => setSupervisorId(e.target.value)} className={inputClass} style={inputStyle}>
               <option value="">— None —</option>
-              {eligibleSupervisors.map(u => <option key={u.id} value={u.id}>{u.full_name || u.email} ({ROLE_LABELS[u.role]})</option>)}
+              {eligibleSupervisors.map(u => <option key={u.id} value={u.id}>{u.name || u.email} ({ROLE_LABELS[u.role]})</option>)}
             </select>
           </Field>
         )}

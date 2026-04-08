@@ -5,25 +5,31 @@ import { PcoClient, createPcoClient } from '@/lib/pco'
 import {
   SYNC_RESOURCES, SYNC_CATEGORIES, PCO_TABLES,
   getResourceCount, fetchResourcePage,
-  getNestedResourceInfo, fetchNestedPage,
-  type NestedCursor,
 } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
 
-/** Helper: require super_admin, return admin client + settings */
-async function requireAdmin(request?: NextRequest) {
+/** Helper: require super_admin, return admin client + credentials + church */
+async function requireAdmin() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) throw new Error('Unauthorized')
 
   const { data: appUser } = await supabase
-    .from('app_users').select('role').eq('id', user.id).single()
+    .from('users').select('id, role, church_id').eq('user_id', user.id).single()
   if (appUser?.role !== 'super_admin') throw new Error('Admin only')
 
   const admin = createAdminClient()
-  const { data: settings } = await admin.from('church_settings').select('*').limit(1).single()
 
-  return { user, admin, settings }
+  // Get PCO credentials for this church
+  const { data: credentials } = await admin
+    .from('planning_center_credentials')
+    .select('*')
+    .eq('church_id', appUser.church_id!)
+    .eq('is_active', true)
+    .limit(1)
+    .single()
+
+  return { user, admin, appUser, credentials, churchId: appUser.church_id }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -31,27 +37,30 @@ async function requireAdmin(request?: NextRequest) {
 // ═══════════════════════════════════════════════════════════════
 export async function GET(request: NextRequest) {
   try {
-    const { admin, settings } = await requireAdmin(request)
+    const { admin, credentials, churchId } = await requireAdmin()
     const action = request.nextUrl.searchParams.get('action') || 'status'
 
     if (action === 'validate') {
-      if (!settings?.pco_app_id || !settings?.pco_app_secret) {
+      if (!credentials?.app_id || !credentials?.app_secret) {
         return NextResponse.json({ valid: false, error: 'No credentials saved' })
       }
-      const client = createPcoClient(settings.pco_app_id, settings.pco_app_secret)
+      const client = createPcoClient(credentials.app_id, credentials.app_secret)
       return NextResponse.json(await client.validate())
     }
 
     if (action === 'status') {
       const { data: lastSync } = await admin
-        .from('sync_logs').select('*')
+        .from('pco_sync_log').select('*')
+        .eq('church_id', churchId!)
         .order('started_at', { ascending: false }).limit(1).single()
 
-      // Count all resource tables (skip tables that don't exist)
       const counts: Record<string, number> = {}
       for (const res of SYNC_RESOURCES) {
         try {
-          const { count } = await admin.from(res.table).select('*', { count: 'exact', head: true })
+          const { count } = await admin
+            .from(res.table)
+            .select('*', { count: 'exact', head: true })
+            .eq('church_id', churchId!)
           counts[res.key] = count || 0
         } catch {
           counts[res.key] = 0
@@ -59,7 +68,7 @@ export async function GET(request: NextRequest) {
       }
 
       return NextResponse.json({
-        hasCredentials: !!(settings?.pco_app_id && settings?.pco_app_secret),
+        hasCredentials: !!(credentials?.app_id && credentials?.app_secret),
         lastSync: lastSync || null,
         counts,
         categories: SYNC_CATEGORIES,
@@ -68,9 +77,15 @@ export async function GET(request: NextRequest) {
     }
 
     if (action === 'auto_sync_settings') {
+      const { data: settings } = await admin
+        .from('app_settings')
+        .select('key, value')
+        .in('key', ['pco_sync_enabled', 'pco_sync_frequency'])
+
+      const settingsMap = Object.fromEntries((settings || []).map(s => [s.key, s.value]))
       return NextResponse.json({
-        enabled: settings?.pco_sync_enabled ?? false,
-        frequency: (settings as any)?.pco_sync_frequency ?? 'daily',
+        enabled: settingsMap.pco_sync_enabled === 'true',
+        frequency: settingsMap.pco_sync_frequency || 'daily',
       })
     }
 
@@ -86,7 +101,7 @@ export async function GET(request: NextRequest) {
 // ═══════════════════════════════════════════════════════════════
 export async function POST(request: NextRequest) {
   try {
-    const { user, admin, settings } = await requireAdmin(request)
+    const { user, admin, appUser, credentials, churchId } = await requireAdmin()
     const body = await request.json()
 
     // ── Save credentials ───────────────────────────────────────
@@ -96,116 +111,105 @@ export async function POST(request: NextRequest) {
 
       const testClient = new PcoClient({
         appId: appId.trim(),
-        appSecret: appSecret?.trim() || tryDecrypt(settings?.pco_app_secret),
+        appSecret: appSecret?.trim() || tryDecrypt(credentials?.app_secret),
       })
       const validation = await testClient.validate()
       if (!validation.valid) {
         return NextResponse.json({ error: `Invalid credentials: ${validation.error}` }, { status: 400 })
       }
 
-      const updates: Record<string, any> = {
-        pco_app_id: encrypt(appId.trim()),
-        updated_at: new Date().toISOString(),
-      }
-      if (appSecret?.trim()) updates.pco_app_secret = encrypt(appSecret.trim())
+      const encAppId = encrypt(appId.trim())
+      const encAppSecret = appSecret?.trim() ? encrypt(appSecret.trim()) : undefined
 
-      const { error } = await admin.from('church_settings').update(updates).eq('id', settings!.id)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (credentials) {
+        // Update existing
+        const updates: Record<string, any> = { app_id: encAppId }
+        if (encAppSecret) updates.app_secret = encAppSecret
+        const { error } = await admin.from('planning_center_credentials').update(updates).eq('id', credentials.id)
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      } else {
+        // Create new
+        const { error } = await admin.from('planning_center_credentials').insert({
+          user_id: user.id,
+          app_id: encAppId,
+          app_secret: encAppSecret || '',
+          church_id: churchId,
+          is_active: true,
+        })
+        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      }
       return NextResponse.json({ success: true, orgName: validation.orgName })
     }
 
     // ── Save auto-sync settings ────────────────────────────────
     if (body.action === 'save_auto_sync') {
-      const { error } = await admin.from('church_settings').update({
-        pco_sync_enabled: !!body.enabled,
-        pco_sync_frequency: body.frequency || 'daily',
-        updated_at: new Date().toISOString(),
-      }).eq('id', settings!.id)
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      await admin.from('app_settings').upsert(
+        { key: 'pco_sync_enabled', value: String(!!body.enabled) },
+        { onConflict: 'key' }
+      )
+      await admin.from('app_settings').upsert(
+        { key: 'pco_sync_frequency', value: body.frequency || 'daily' },
+        { onConflict: 'key' }
+      )
       return NextResponse.json({ success: true })
     }
 
     // ── Start sync ─────────────────────────────────────────────
     if (body.action === 'sync_start') {
-      if (!settings?.pco_app_id || !settings?.pco_app_secret) {
+      if (!credentials?.app_id || !credentials?.app_secret) {
         return NextResponse.json({ error: 'No PCO credentials configured' }, { status: 400 })
       }
 
-      const client = createPcoClient(settings.pco_app_id, settings.pco_app_secret)
+      const client = createPcoClient(credentials.app_id, credentials.app_secret)
 
       const resourceInfo: Record<string, {
         pcoCount: number
         dbCount: number
         toSync: number
         updatedSince: string | null
-        isNested: boolean
-        cursor?: NestedCursor
+        isNested?: boolean
       }> = {}
 
       for (const res of SYNC_RESOURCES) {
-        // Get DB count
         let dbCount = 0
         try {
-          const { count } = await admin.from(res.table).select('*', { count: 'exact', head: true })
+          const { count } = await admin
+            .from(res.table)
+            .select('*', { count: 'exact', head: true })
+            .eq('church_id', churchId!)
           dbCount = count || 0
         } catch { /* table might not exist */ }
 
-        if (res.nested) {
-          // Nested resource — get parent list and estimated count
-          try {
-            const { totalCount, cursor } = await getNestedResourceInfo(client, res, admin)
-            resourceInfo[res.key] = {
-              pcoCount: totalCount,
-              dbCount,
-              toSync: totalCount, // always sync all for nested (cursor handles incremental)
-              updatedSince: null,
-              isNested: true,
-              cursor,
-            }
-          } catch {
-            // Table/endpoint might not exist — skip gracefully
-            resourceInfo[res.key] = {
-              pcoCount: 0, dbCount: 0, toSync: 0,
-              updatedSince: null, isNested: true,
-            }
-          }
-        } else {
-          // Flat resource
+        {
           const pcoCount = await getResourceCount(client, res)
 
           let toSync: number
           let updatedSince: string | null = null
 
           if (res.supportsUpdatedSince) {
-            // Incremental: only fetch records modified since last sync
-            updatedSince = await getLastPcoUpdated(admin, res.table)
+            updatedSince = await getLastUpdated(admin, res.table, churchId!)
             toSync = updatedSince
               ? await getResourceCount(client, res, updatedSince)
               : pcoCount
           } else {
-            // No updatedSince filter — compare counts
-            // Skip if PCO count matches DB count (nothing new)
             toSync = pcoCount === dbCount ? 0 : pcoCount
           }
 
           resourceInfo[res.key] = {
-            pcoCount,
-            dbCount,
-            toSync,
-            updatedSince,
-            isNested: false,
+            pcoCount, dbCount, toSync, updatedSince, isNested: false,
           }
         }
       }
 
       const { data: syncLog } = await admin
-        .from('sync_logs')
+        .from('pco_sync_log')
         .insert({
+          sync_type: 'manual',
           status: 'running',
-          triggered_by: user.id,
           started_at: new Date().toISOString(),
           records_synced: 0,
-          details: { resourceInfo },
+          credential_id: credentials.id,
+          church_id: churchId,
         })
         .select().single()
 
@@ -214,54 +218,18 @@ export async function POST(request: NextRequest) {
 
     // ── Sync one page ──────────────────────────────────────────
     if (body.action === 'sync_page') {
-      const { resourceKey, offset = 0, syncLogId, updatedSince, cursor } = body
+      const { resourceKey, offset = 0, syncLogId, updatedSince } = body
       const resource = SYNC_RESOURCES.find(r => r.key === resourceKey)
       if (!resource) return NextResponse.json({ error: 'Invalid resource' }, { status: 400 })
-      if (!settings?.pco_app_id || !settings?.pco_app_secret) {
+      if (!credentials?.app_id || !credentials?.app_secret) {
         return NextResponse.json({ error: 'No credentials' }, { status: 400 })
       }
 
-      const client = createPcoClient(settings.pco_app_id, settings.pco_app_secret)
-
-      // ── Nested resources (cursor-based) ──────────────────────
-      if (resource.nested && cursor) {
-        const { rows, hasMore, nextCursor, upsertedEstimate } = await fetchNestedPage(
-          client, resource, cursor as NestedCursor, 100,
-        )
-
-        let upserted = 0
-        if (rows.length > 0) {
-          const { error: upsertErr } = await admin
-            .from(resource.table)
-            .upsert(rows, { onConflict: 'pco_id' })
-
-          if (upsertErr) {
-            // Table might not exist — non-fatal
-            return NextResponse.json({
-              error: `${resource.label}: ${upsertErr.message}`,
-              upserted: 0,
-              hasMore: false,
-              nextCursor: null,
-            }, { status: 500 })
-          }
-          upserted = rows.length
-        }
-
-        if (syncLogId && upserted > 0) {
-          await incrementSyncLog(admin, syncLogId, upserted)
-        }
-
-        return NextResponse.json({
-          upserted,
-          hasMore,
-          nextCursor,
-        })
-      }
+      const client = createPcoClient(credentials.app_id, credentials.app_secret)
 
       // ── Replace strategy (memberships) ───────────────────────
       if (resource.syncStrategy === 'replace' && offset === 0) {
-        // Delete all existing rows before inserting fresh data
-        await admin.from(resource.table).delete().neq('id', '00000000-0000-0000-0000-000000000000')
+        await admin.from(resource.table).delete().eq('church_id', churchId!)
       }
 
       // ── Flat resources (offset-based) ────────────────────────
@@ -271,8 +239,17 @@ export async function POST(request: NextRequest) {
 
       let upserted = 0
       if (rows.length > 0) {
+        // Resolve PCO IDs to UUIDs for membership tables
+        let resolvedRows = rows
+        if (resource.key === 'group_memberships') {
+          resolvedRows = await resolveGroupMembershipIds(admin, rows, churchId!)
+        }
+
+        // Add church_id to all rows
+        const rowsWithChurch = resolvedRows.map(r => ({ ...r, church_id: churchId }))
+
         if (resource.syncStrategy === 'replace') {
-          const { error: insertErr } = await admin.from(resource.table).insert(rows)
+          const { error: insertErr } = await admin.from(resource.table).insert(rowsWithChurch)
           if (insertErr) {
             return NextResponse.json({
               error: `${resource.label} insert failed: ${insertErr.message}`,
@@ -281,7 +258,7 @@ export async function POST(request: NextRequest) {
         } else {
           const { error: upsertErr } = await admin
             .from(resource.table)
-            .upsert(rows, { onConflict: 'pco_id' })
+            .upsert(rowsWithChurch, { onConflict: resource.onConflict })
           if (upsertErr) {
             return NextResponse.json({
               error: `${resource.label} upsert failed: ${upsertErr.message}`,
@@ -296,10 +273,7 @@ export async function POST(request: NextRequest) {
       }
 
       return NextResponse.json({
-        upserted,
-        hasMore,
-        nextOffset: hasMore ? offset + 100 : null,
-        totalCount,
+        upserted, hasMore, nextOffset: hasMore ? offset + 100 : null, totalCount,
       })
     }
 
@@ -307,17 +281,28 @@ export async function POST(request: NextRequest) {
     if (body.action === 'sync_finish') {
       const { syncLogId, totalRecords, status: syncStatus, error: syncError } = body
       if (syncLogId) {
-        await admin.from('sync_logs').update({
+        await admin.from('pco_sync_log').update({
           status: syncStatus || 'success',
           completed_at: new Date().toISOString(),
           records_synced: totalRecords || 0,
           error_message: syncError || null,
         }).eq('id', syncLogId)
       }
-      if (syncStatus !== 'failed') {
-        await admin.from('church_settings').update({
-          pco_last_sync: new Date().toISOString(),
-        }).eq('id', settings!.id)
+      if (syncStatus !== 'failed' && credentials) {
+        await admin.from('planning_center_credentials').update({
+          last_synced_at: new Date().toISOString(),
+        }).eq('id', credentials.id)
+
+        // Post-sync: recalculate attendance counts and engagement scores
+        try {
+          const thirtyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+            .toISOString().split('T')[0]
+          await admin.rpc('update_attendance_counts', { since_date: thirtyDaysAgo })
+          await admin.rpc('update_engagement_scores')
+        } catch (e) {
+          // Non-fatal — scores will be stale until next sync
+          console.error('Post-sync score update failed:', e)
+        }
       }
       return NextResponse.json({ success: true })
     }
@@ -326,10 +311,14 @@ export async function POST(request: NextRequest) {
     if (body.action === 'purge') {
       for (const table of PCO_TABLES) {
         try {
-          await admin.from(table).delete().neq('id', '00000000-0000-0000-0000-000000000000')
+          await admin.from(table).delete().eq('church_id', churchId!)
         } catch { /* table might not exist */ }
       }
-      await admin.from('church_settings').update({ pco_last_sync: null }).eq('id', settings!.id)
+      if (credentials) {
+        await admin.from('planning_center_credentials').update({
+          last_synced_at: null,
+        }).eq('id', credentials.id)
+      }
       return NextResponse.json({ success: true })
     }
 
@@ -340,24 +329,66 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function getLastPcoUpdated(admin: any, table: string): Promise<string | null> {
+async function getLastUpdated(admin: any, table: string, churchId: string): Promise<string | null> {
   const { data } = await admin
-    .from(table).select('pco_updated_at')
-    .order('pco_updated_at', { ascending: false }).limit(1).single()
-  return data?.pco_updated_at || null
+    .from(table).select('updated_at')
+    .eq('church_id', churchId)
+    .order('updated_at', { ascending: false }).limit(1).single()
+  return data?.updated_at || null
 }
 
 async function incrementSyncLog(admin: any, syncLogId: string, count: number) {
-  const { data: log } = await admin.from('sync_logs')
+  const { data: log } = await admin.from('pco_sync_log')
     .select('records_synced').eq('id', syncLogId).single()
   if (log) {
-    await admin.from('sync_logs')
+    await admin.from('pco_sync_log')
       .update({ records_synced: (log.records_synced || 0) + count })
       .eq('id', syncLogId)
   }
 }
 
-function tryDecrypt(value: string | null): string {
+function tryDecrypt(value: string | null | undefined): string {
   if (!value) return ''
   try { return decrypt(value) } catch { return value }
+}
+
+/** Resolve PCO IDs to DB UUIDs for group membership rows */
+async function resolveGroupMembershipIds(
+  admin: any,
+  rows: Record<string, any>[],
+  churchId: string,
+): Promise<Record<string, any>[]> {
+  // Collect unique PCO IDs
+  const personPcoIds = [...new Set(rows.map(r => r._person_pco_id).filter(Boolean))]
+  const groupPcoIds = [...new Set(rows.map(r => r._group_pco_id).filter(Boolean))]
+
+  // Batch lookup people
+  const { data: people } = await admin
+    .from('people')
+    .select('id, pco_id')
+    .eq('church_id', churchId)
+    .in('pco_id', personPcoIds)
+
+  const personMap = new Map((people || []).map((p: any) => [p.pco_id, p.id]))
+
+  // Batch lookup groups
+  const { data: groups } = await admin
+    .from('groups')
+    .select('id, pco_id')
+    .eq('church_id', churchId)
+    .in('pco_id', groupPcoIds)
+
+  const groupMap = new Map((groups || []).map((g: any) => [g.pco_id, g.id]))
+
+  // Map rows, skipping any where we can't resolve IDs
+  return rows
+    .map(r => {
+      const personId = personMap.get(r._person_pco_id)
+      const groupId = groupMap.get(r._group_pco_id)
+      if (!personId || !groupId) return null
+
+      const { _person_pco_id, _group_pco_id, ...rest } = r
+      return { ...rest, person_id: personId, group_id: groupId }
+    })
+    .filter(Boolean) as Record<string, any>[]
 }

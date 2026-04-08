@@ -5,23 +5,24 @@ import { useRouter } from 'next/navigation'
 
 export default function LoginPage() {
   const [code, setCode] = useState('')
+  const [email, setEmail] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
+  const codeRef = useRef<HTMLInputElement>(null)
   const router = useRouter()
 
-  useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => { codeRef.current?.focus() }, [])
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (code.trim().length < 4) return
+    if (code.trim().length < 4 || !email.trim()) return
     setLoading(true)
     setError('')
 
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: code.trim() }),
+      body: JSON.stringify({ code: code.trim(), email: email.trim() }),
     })
 
     const data = await res.json()
@@ -54,7 +55,6 @@ export default function LoginPage() {
         <div className="text-center mb-10">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl mb-4"
             style={{ background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(8px)' }}>
-            {/* Leaf icon */}
             <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
               <path d="M16 4C16 4 26 10 26 20C26 26 20 28 16 28C12 28 6 26 6 20C6 10 16 4 16 4Z"
                 fill="rgba(106,184,142,0.4)" stroke="white" strokeWidth="1.5"/>
@@ -79,18 +79,18 @@ export default function LoginPage() {
             border: '1px solid rgba(255,255,255,0.15)',
             boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
           }}>
-          <h2 className="text-xl font-serif mb-1 text-white">Enter your access code</h2>
+          <h2 className="text-xl font-serif mb-1 text-white">Sign in</h2>
           <p className="text-sm sans mb-6" style={{ color: 'rgba(255,255,255,0.55)' }}>
-            Your code was given to you by a church administrator.
+            Enter your church invite code and email address.
           </p>
 
           <form onSubmit={handleLogin} className="space-y-4">
             <input
-              ref={inputRef}
+              ref={codeRef}
               type="text"
               value={code}
               onChange={e => setCode(e.target.value.toUpperCase())}
-              placeholder="e.g. ABC12345"
+              placeholder="Invite code"
               maxLength={12}
               autoComplete="off"
               autoCorrect="off"
@@ -104,6 +104,20 @@ export default function LoginPage() {
               }}
             />
 
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="Email address"
+              autoComplete="email"
+              className="w-full px-4 py-3 rounded-lg text-sm sans outline-none transition-all"
+              style={{
+                background: 'rgba(255,255,255,0.1)',
+                border: `1px solid ${error ? '#ef4444' : 'rgba(255,255,255,0.2)'}`,
+                color: 'white',
+              }}
+            />
+
             {error && (
               <p className="text-sm sans rounded-lg px-3 py-2 text-center"
                 style={{ background: 'rgba(220,74,74,0.15)', color: '#fca5a5' }}>
@@ -113,7 +127,7 @@ export default function LoginPage() {
 
             <button
               type="submit"
-              disabled={loading || code.trim().length < 4}
+              disabled={loading || code.trim().length < 4 || !email.trim()}
               className="w-full py-3 px-4 rounded-lg text-sm font-semibold sans transition-all disabled:opacity-40"
               style={{
                 background: 'rgba(255,255,255,0.95)',
