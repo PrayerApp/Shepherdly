@@ -314,11 +314,12 @@ export async function POST(request: NextRequest) {
           await admin.from(table).delete().eq('church_id', churchId!)
         } catch { /* table might not exist */ }
       }
+      // Delete credentials entirely so the page resets to setup state
       if (credentials) {
-        await admin.from('planning_center_credentials').update({
-          last_synced_at: null,
-        }).eq('id', credentials.id)
+        await admin.from('planning_center_credentials').delete().eq('id', credentials.id)
       }
+      // Clear sync logs
+      await admin.from('pco_sync_log').delete().eq('church_id', churchId!)
       return NextResponse.json({ success: true })
     }
 

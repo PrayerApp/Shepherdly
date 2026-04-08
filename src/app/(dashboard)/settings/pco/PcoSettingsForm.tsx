@@ -1,8 +1,10 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 
 export default function PcoSettingsForm({ hasExistingCreds }: { hasExistingCreds: boolean }) {
+  const router = useRouter()
   const [appId, setAppId] = useState('')
   const [appSecret, setAppSecret] = useState('')
   const [saving, setSaving] = useState(false)
@@ -31,6 +33,7 @@ export default function PcoSettingsForm({ hasExistingCreds }: { hasExistingCreds
         setResult({ type: 'success', message: data.orgName ? `Connected to ${data.orgName}` : 'Credentials verified and saved!' })
         setAppId('')
         setAppSecret('')
+        router.refresh() // re-render server component so sync panel picks up new creds
       } else {
         setResult({ type: 'error', message: data.error || 'Failed to save credentials.' })
       }

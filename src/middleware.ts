@@ -21,20 +21,22 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  // Use getSession() for fast local JWT check (no network round-trip).
+  // The layout's getUser() call does the authoritative server-side check.
+  const { data: { session } } = await supabase.auth.getSession()
 
   const { pathname } = request.nextUrl
 
   // Public routes
   if (pathname.startsWith('/login') || pathname.startsWith('/auth') || pathname.startsWith('/api/auth')) {
-    if (user && pathname === '/login') {
+    if (session && pathname === '/login') {
       return NextResponse.redirect(new URL('/dashboard', request.url))
     }
     return supabaseResponse
   }
 
   // Protected routes — redirect to login if not authenticated
-  if (!user) {
+  if (!session) {
     return NextResponse.redirect(new URL('/login', request.url))
   }
 

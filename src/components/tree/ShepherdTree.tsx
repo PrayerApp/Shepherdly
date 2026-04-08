@@ -165,11 +165,19 @@ export default function ShepherdTree() {
     setTransform(t => ({ ...t, x: t.x + dx / t.scale, y: t.y + dy / t.scale }))
   }
   const onMouseUp = () => { dragging.current = false }
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault()
-    const delta = e.deltaY > 0 ? 0.9 : 1.1
-    setTransform(t => ({ ...t, scale: Math.min(2, Math.max(0.3, t.scale * delta)) }))
-  }
+
+  // Attach wheel handler natively with { passive: false } to allow preventDefault
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? 0.9 : 1.1
+      setTransform(t => ({ ...t, scale: Math.min(2, Math.max(0.3, t.scale * delta)) }))
+    }
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheel)
+  }, [])
 
   if (loading) return (
     <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--muted-foreground)' }}>
@@ -257,7 +265,6 @@ export default function ShepherdTree() {
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
           onMouseLeave={onMouseUp}
-          onWheel={onWheel}
         >
           <defs>
             <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">

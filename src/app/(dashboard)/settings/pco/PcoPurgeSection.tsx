@@ -1,8 +1,10 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 
 export default function PcoPurgeSection() {
+  const router = useRouter()
   const [purging, setPurging] = useState(false)
   const [purgeConfirm, setPurgeConfirm] = useState(false)
   const [result, setResult] = useState<'success' | 'error' | null>(null)
@@ -22,8 +24,7 @@ export default function PcoPurgeSection() {
       }
       setPurgeConfirm(false)
       setResult('success')
-      // Reload the page so sync panel refreshes counts
-      setTimeout(() => window.location.reload(), 1500)
+      router.refresh() // re-render server component so all panels reset
     } catch {
       setResult('error')
     }

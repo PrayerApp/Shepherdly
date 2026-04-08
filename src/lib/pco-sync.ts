@@ -14,10 +14,11 @@ export interface SyncResource {
   category: string
   table: string           // actual supabase table name
   endpoint: string        // PCO API path
+  queryParams?: Record<string, string>  // extra query params (e.g. include=emails)
   supportsUpdatedSince: boolean
   syncStrategy: 'upsert' | 'replace'
   onConflict: string      // column(s) for upsert conflict resolution
-  mapRow: (item: any) => Record<string, any>
+  mapRow: (item: any, included?: any[]) => Record<string, any>
 }
 
 export const SYNC_CATEGORIES = [
@@ -35,18 +36,33 @@ export const SYNC_RESOURCES: SyncResource[] = [
     category: 'people',
     table: 'people',
     endpoint: '/people/v2/people',
+    queryParams: { 'include': 'emails,phone_numbers' },
     supportsUpdatedSince: true,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
-    mapRow: (p) => ({
-      pco_id: p.id,
-      name: [p.attributes.first_name, p.attributes.last_name].filter(Boolean).join(' ') || 'Unknown',
-      email: null, // emails come from a sub-resource; set null for now
-      membership_type: p.attributes.membership || 'attender',
-      status: p.attributes.status || 'active',
-      is_active: p.attributes.status !== 'inactive',
-      is_leader: false, // will be updated when we process group memberships
-    }),
+    mapRow: (p, included) => {
+      // Find primary email/phone from included resources
+      const emails = (included || []).filter(
+        (i: any) => i.type === 'Email' && i.relationships?.person?.data?.id === p.id
+      )
+      const primaryEmail = emails.find((e: any) => e.attributes.primary) || emails[0]
+
+      const phones = (included || []).filter(
+        (i: any) => i.type === 'PhoneNumber' && i.relationships?.person?.data?.id === p.id
+      )
+      const primaryPhone = phones.find((ph: any) => ph.attributes.primary) || phones[0]
+
+      return {
+        pco_id: p.id,
+        name: [p.attributes.first_name, p.attributes.last_name].filter(Boolean).join(' ') || 'Unknown',
+        email: primaryEmail?.attributes?.address || '',
+        phone: primaryPhone?.attributes?.number || null,
+        membership_type: p.attributes.membership || 'attender',
+        status: p.attributes.status || 'active',
+        is_active: p.attributes.status !== 'inactive',
+        is_leader: false,
+      }
+    },
   },
 
   // ── Groups ─────────────────────────────────────────────────
@@ -165,6 +181,7 @@ export async function fetchResourcePage(
   const params: Record<string, string> = {
     per_page: String(perPage),
     offset: String(offset),
+    ...(resource.queryParams || {}),
   }
   if (updatedSince && resource.supportsUpdatedSince) {
     params['where[updated_at][gte]'] = updatedSince
@@ -173,7 +190,8 @@ export async function fetchResourcePage(
 
   const result = await client.get(resource.endpoint, params)
   const data = result.data || []
-  const rows = data.map(resource.mapRow)
+  const included = result.included || []
+  const rows = data.map((item: any) => resource.mapRow(item, included))
 
   return {
     rows,
