@@ -188,6 +188,12 @@ ON CONFLICT (person_id) DO NOTHING;
 -- STEP 5: Drop PII and computed columns from people
 -- ────────────────────────────────────────────────────────────
 
+-- Drop old views that depend on columns we're removing
+DROP VIEW IF EXISTS active_unconnected_people CASCADE;
+DROP VIEW IF EXISTS care_coverage_summary CASCADE;
+DROP VIEW IF EXISTS weekly_attendance_trend CASCADE;
+DROP VIEW IF EXISTS context_summary CASCADE;
+
 ALTER TABLE people DROP COLUMN IF EXISTS email;
 ALTER TABLE people DROP COLUMN IF EXISTS phone;
 ALTER TABLE people DROP COLUMN IF EXISTS birth_date;
