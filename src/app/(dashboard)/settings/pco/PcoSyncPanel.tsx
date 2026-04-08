@@ -96,7 +96,7 @@ export default function PcoSyncPanel() {
           dbCount: info.dbCount,
           syncedThisRun: 0,
           toSync: info.toSync,
-          skipped: info.toSync === 0,
+          skipped: info.toSync === 0,  // nested resources have toSync=-1, never skipped
         }
       }
 
@@ -119,10 +119,11 @@ export default function PcoSyncPanel() {
 
         let resourceSynced = 0
 
-        if (info.isNested && info.cursor) {
+        if (info.isNested) {
           // ── Cursor-based nested pagination ──────────────────
-          let cursor = info.cursor
-          while (cursor) {
+          // cursor may be null on first call — server builds it lazily
+          let cursor = info.cursor || null
+          while (true) {
             if (abortRef.current) break
 
             const pageRes = await fetch('/api/pco', {

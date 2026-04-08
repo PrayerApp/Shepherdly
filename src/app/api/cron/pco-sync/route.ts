@@ -4,7 +4,7 @@ import {
   SYNC_RESOURCES,
   getResourceCount, fetchResourcePage,
   getNestedResourceInfo, fetchNestedPage,
-  resolvePcoIds,
+  resolvePcoIds, linkForeignKeys,
 } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -140,18 +140,7 @@ export async function GET(request: NextRequest) {
 
     // Post-sync: link FK columns
     try {
-      const { data: groupTypes } = await admin
-        .from('group_types').select('id, pco_id').eq('church_id', churchId!)
-      for (const gt of groupTypes || []) {
-        await admin.from('groups').update({ group_type_id: gt.id })
-          .eq('church_id', churchId!).eq('pco_group_type_id', gt.pco_id)
-      }
-      const { data: serviceTypes } = await admin
-        .from('service_types').select('id, pco_id').eq('church_id', churchId!)
-      for (const st of serviceTypes || []) {
-        await admin.from('teams').update({ service_type_id: st.id })
-          .eq('church_id', churchId!).eq('pco_service_type_id', st.pco_id)
-      }
+      await linkForeignKeys(admin, churchId!)
     } catch (e) {
       console.error('Cron: FK linking failed:', e)
     }

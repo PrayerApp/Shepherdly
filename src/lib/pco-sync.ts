@@ -157,7 +157,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     onConflict: 'pco_id',
     isNested: true,
     nestedParentTable: 'groups',
-    nestedEndpointTemplate: '/groups/v2/groups/{parentId}/enrollments',
+    nestedEndpointTemplate: '/groups/v2/groups/{parentId}/applications',
     mapRow: (e) => ({
       pco_id: e.id,
       pco_person_id: e.relationships?.person?.data?.id || null,
@@ -260,7 +260,40 @@ export const SYNC_RESOURCES: SyncResource[] = [
     }),
   },
 
-  // ── 10. Team Positions (nested per team) ──────────────────
+  // ── 10. Team Memberships (nested per team via person_team_position_assignments)
+  {
+    key: 'team_memberships',
+    label: 'Team Members',
+    category: 'services',
+    table: 'team_memberships',
+    endpoint: '',
+    supportsUpdatedSince: false,
+    syncStrategy: 'upsert',
+    onConflict: 'pco_id',
+    isNested: true,
+    nestedParentTable: 'teams',
+    nestedEndpointTemplate: '/services/v2/teams/{parentId}/person_team_position_assignments',
+    queryParams: { include: 'team_position' },
+    mapRow: (ptpa, included) => {
+      const positionId = ptpa.relationships?.team_position?.data?.id
+      const position = included?.find((i: any) => i.type === 'TeamPosition' && i.id === positionId)
+      return {
+        pco_id: ptpa.id,
+        _pco_person_id: ptpa.relationships?.person?.data?.id || null,
+        _pco_team_id: ptpa.attributes?._parentPcoId || null,
+        role: 'member',
+        position: position?.attributes?.name || null,
+        joined_at: ptpa.attributes.created_at || null,
+        is_active: true,
+      }
+    },
+    idMappings: [
+      { field: 'person_id', pcoField: '_pco_person_id', table: 'people' },
+      { field: 'team_id', pcoField: '_pco_team_id', table: 'teams' },
+    ],
+  },
+
+  // ── 11. Team Positions (nested per team) ──────────────────
   {
     key: 'team_positions',
     label: 'Team Positions',
@@ -499,14 +532,16 @@ export async function fetchNestedPage(
     const result = await client.get(endpoint, {
       per_page: String(perPage),
       offset: String(cursor.offset),
+      ...(resource.queryParams || {}),
     })
 
     const data = result.data || []
+    const included = result.included || []
     // Inject parent PCO ID into each row so mapRow can use it
     const rows = data.map((item: any) => {
       item.attributes = item.attributes || {}
       item.attributes._parentPcoId = parent.pcoId
-      return resource.mapRow(item)
+      return resource.mapRow(item, included)
     })
 
     const pageHasMore = !!result.links?.next
@@ -570,14 +605,16 @@ async function fetchDoublyNestedPage(
     const result = await client.get(endpoint, {
       per_page: String(perPage),
       offset: String(cursor.offset),
+      ...(resource.queryParams || {}),
     })
 
     const data = result.data || []
+    const included = result.included || []
     const rows = data.map((item: any) => {
       item.attributes = item.attributes || {}
       item.attributes._parentPcoId = parent.pcoId
       item.attributes._childPcoId = child.pcoId
-      return resource.mapRow(item)
+      return resource.mapRow(item, included)
     })
 
     const pageHasMore = !!result.links?.next
@@ -686,19 +723,37 @@ export async function resolvePcoIds(
  * E.g. groups.group_type_id from groups.pco_group_type_id → group_types.pco_id
  */
 export async function linkForeignKeys(admin: any, churchId: string) {
-  // groups.group_type_id from pco_group_type_id
-  await admin.rpc('link_groups_to_types', {}).catch(() => {
-    // Fallback: do it via direct update if RPC doesn't exist
-    // This is a simple join update
-  })
+  // Link groups.group_type_id from pco_group_type_id → group_types.pco_id
+  const { data: groupTypes } = await admin
+    .from('group_types')
+    .select('id, pco_id')
+    .eq('church_id', churchId)
 
-  // teams.service_type_id from pco_service_type_id
-  await admin.rpc('link_teams_to_service_types', {}).catch(() => {
-    // Fallback
-  })
+  if (groupTypes && groupTypes.length > 0) {
+    for (const gt of groupTypes) {
+      await admin
+        .from('groups')
+        .update({ group_type_id: gt.id })
+        .eq('church_id', churchId)
+        .eq('pco_group_type_id', gt.pco_id)
+    }
+  }
 
-  // We'll handle this in the sync_finish step with direct SQL-like updates
-  // via Supabase client if RPCs don't exist
+  // Link teams.service_type_id from pco_service_type_id → service_types.pco_id
+  const { data: serviceTypes } = await admin
+    .from('service_types')
+    .select('id, pco_id')
+    .eq('church_id', churchId)
+
+  if (serviceTypes && serviceTypes.length > 0) {
+    for (const st of serviceTypes) {
+      await admin
+        .from('teams')
+        .update({ service_type_id: st.id })
+        .eq('church_id', churchId)
+        .eq('pco_service_type_id', st.pco_id)
+    }
+  }
 }
 
 // ── Tables to purge ─────────────────────────────────────────

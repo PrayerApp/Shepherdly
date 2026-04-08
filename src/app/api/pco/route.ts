@@ -6,7 +6,7 @@ import {
   SYNC_RESOURCES, SYNC_CATEGORIES, PCO_TABLES,
   getResourceCount, fetchResourcePage,
   getNestedResourceInfo, fetchNestedPage,
-  resolvePcoIds,
+  resolvePcoIds, linkForeignKeys,
 } from '@/lib/pco-sync'
 import type { NestedCursor } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
@@ -183,15 +183,15 @@ export async function POST(request: NextRequest) {
         } catch { /* table might not exist yet */ }
 
         if (res.isNested) {
-          // Nested resources: get parent info for cursor
-          const { totalCount, cursor } = await getNestedResourceInfo(client, res, admin, churchId!)
+          // Nested resources: DON'T build cursor now — parents may not be synced yet.
+          // Cursor will be built lazily on first sync_page call.
           resourceInfo[res.key] = {
-            pcoCount: totalCount,
+            pcoCount: -1,  // unknown until cursor is built
             dbCount,
-            toSync: totalCount,
+            toSync: -1,    // signal to client: always attempt
             updatedSince: null,
             isNested: true,
-            cursor,
+            // no cursor — will be built lazily
           }
         } else {
           const pcoCount = await getResourceCount(client, res)
@@ -204,7 +204,7 @@ export async function POST(request: NextRequest) {
               ? await getResourceCount(client, res, updatedSince)
               : pcoCount
           } else {
-            toSync = pcoCount === dbCount ? 0 : pcoCount
+            toSync = pcoCount
           }
 
           resourceInfo[res.key] = {
@@ -250,9 +250,23 @@ export async function POST(request: NextRequest) {
       let nextOffset: number | null = null
       let nextCursor: NestedCursor | null = null
 
-      if (resource.isNested && cursor) {
+      if (resource.isNested) {
         // ── Nested pagination ────────────────────────────────────
-        const result = await fetchNestedPage(client, resource, cursor, 100)
+        // Lazily build cursor on first call (parents are now synced)
+        let activeCursor: NestedCursor = cursor
+        if (!activeCursor) {
+          const { totalCount: nestedTotal, cursor: newCursor } = await getNestedResourceInfo(
+            client, resource, admin, churchId!
+          )
+          activeCursor = newCursor
+          if (activeCursor.parents.length === 0) {
+            // No parents — nothing to sync
+            return NextResponse.json({
+              upserted: 0, hasMore: false, nextOffset: null, nextCursor: null, totalCount: 0,
+            })
+          }
+        }
+        const result = await fetchNestedPage(client, resource, activeCursor, 100)
         rows = result.rows
         hasMore = result.hasMore
         nextCursor = result.nextCursor
@@ -393,40 +407,3 @@ function tryDecrypt(value: string | null | undefined): string {
   try { return decrypt(value) } catch { return value }
 }
 
-/**
- * Link FK columns that were stored as PCO IDs during sync.
- * Uses Supabase client to do batch updates.
- */
-async function linkForeignKeys(admin: any, churchId: string) {
-  // Link groups.group_type_id from pco_group_type_id → group_types.pco_id
-  const { data: groupTypes } = await admin
-    .from('group_types')
-    .select('id, pco_id')
-    .eq('church_id', churchId)
-
-  if (groupTypes && groupTypes.length > 0) {
-    for (const gt of groupTypes) {
-      await admin
-        .from('groups')
-        .update({ group_type_id: gt.id })
-        .eq('church_id', churchId)
-        .eq('pco_group_type_id', gt.pco_id)
-    }
-  }
-
-  // Link teams.service_type_id from pco_service_type_id → service_types.pco_id
-  const { data: serviceTypes } = await admin
-    .from('service_types')
-    .select('id, pco_id')
-    .eq('church_id', churchId)
-
-  if (serviceTypes && serviceTypes.length > 0) {
-    for (const st of serviceTypes) {
-      await admin
-        .from('teams')
-        .update({ service_type_id: st.id })
-        .eq('church_id', churchId)
-        .eq('pco_service_type_id', st.pco_id)
-    }
-  }
-}
