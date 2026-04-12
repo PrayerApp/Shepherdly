@@ -9,76 +9,92 @@ export async function GET() {
 
   const { data: currentUser } = await supabase
     .from('users')
-    .select('id, role, church_id')
+    .select('id, name, role, church_id')
     .eq('user_id', user.id)
     .single()
 
   const admin = createAdminClient()
   const churchId = currentUser?.church_id
 
-  // Get all active people (exclude system accounts with name starting with "_")
-  const { data: people } = await admin
-    .from('people')
-    .select('id, name, pco_id, status')
-    .eq('church_id', churchId!)
-    .eq('status', 'active')
-    .not('name', 'like', '\\_%')
+  // Parallel fetch all needed data
+  const [
+    { data: people },
+    { data: groupMemberships },
+    { data: groups },
+    { data: teamMemberships },
+    { data: teams },
+    { data: manualRelationships },
+    { data: recentReports },
+  ] = await Promise.all([
+    admin.from('people').select('id, name, pco_id, status')
+      .eq('church_id', churchId!).eq('status', 'active').not('name', 'like', '\\_%'),
+    admin.from('group_memberships').select('person_id, group_id, role, is_active')
+      .eq('church_id', churchId!).eq('is_active', true),
+    admin.from('groups').select('id, name, is_active')
+      .eq('church_id', churchId!).eq('is_active', true),
+    admin.from('team_memberships').select('person_id, team_id, role, is_active')
+      .eq('church_id', churchId!).eq('is_active', true),
+    admin.from('teams').select('id, name, is_active')
+      .eq('church_id', churchId!).eq('is_active', true),
+    admin.from('shepherding_relationships').select('shepherd_id, person_id, context_type')
+      .eq('is_active', true),
+    admin.from('check_in_reports').select('leader_id, created_at')
+      .order('created_at', { ascending: false }),
+  ])
 
   if (!people || people.length === 0) {
     return NextResponse.json({ nodes: [], currentUserRole: currentUser?.role })
   }
 
   const personMap = new Map(people.map(p => [p.id, p]))
+  const groupMap = new Map((groups || []).map(g => [g.id, g]))
+  const teamMap = new Map((teams || []).map(t => [t.id, t]))
 
-  // Get group memberships with role info
-  const { data: groupMemberships } = await admin
-    .from('group_memberships')
-    .select('person_id, group_id, role, is_active')
-    .eq('church_id', churchId!)
-    .eq('is_active', true)
-
-  // Get groups
-  const { data: groups } = await admin
-    .from('groups')
-    .select('id, name, is_active')
-    .eq('church_id', churchId!)
-    .eq('is_active', true)
-
-  // Get team memberships
-  const { data: teamMemberships } = await admin
-    .from('team_memberships')
-    .select('person_id, team_id, role, is_active')
-    .eq('church_id', churchId!)
-    .eq('is_active', true)
-
-  // Get teams
-  const { data: teams } = await admin
-    .from('teams')
-    .select('id, name, is_active')
-    .eq('church_id', churchId!)
-    .eq('is_active', true)
-
-  // Get manual shepherding relationships
-  const { data: manualRelationships } = await admin
-    .from('shepherding_relationships')
-    .select('shepherd_id, person_id, context_type')
-    .eq('is_active', true)
-
-  // Get recent check-in reports per leader
-  const { data: recentReports } = await admin
-    .from('check_in_reports')
-    .select('leader_id, created_at')
-    .order('created_at', { ascending: false })
-
+  // Last check-in per person
   const lastCheckin: Record<string, string> = {}
   recentReports?.forEach(r => {
     if (!lastCheckin[r.leader_id]) lastCheckin[r.leader_id] = r.created_at
   })
 
-  // Build shepherding edges: shepherd_person_id → [sheep_person_id]
-  // Sources: group leaders, team leaders, manual assignments
-  const shepherdEdges: Map<string, Set<string>> = new Map()
+  // Index memberships by group/team
+  const groupMembers = new Map<string, { personId: string; role: string }[]>()
+  for (const gm of groupMemberships || []) {
+    if (!groupMembers.has(gm.group_id)) groupMembers.set(gm.group_id, [])
+    groupMembers.get(gm.group_id)!.push({ personId: gm.person_id, role: gm.role || 'member' })
+  }
+  const teamMembers = new Map<string, { personId: string; role: string }[]>()
+  for (const tm of teamMemberships || []) {
+    if (!teamMembers.has(tm.team_id)) teamMembers.set(tm.team_id, [])
+    teamMembers.get(tm.team_id)!.push({ personId: tm.person_id, role: tm.role || 'member' })
+  }
 
+  // Identify all leaders (group or team)
+  const leaderPersonIds = new Set<string>()
+  const shepherdContexts = new Map<string, Set<string>>()
+
+  for (const [groupId, members] of groupMembers) {
+    const group = groupMap.get(groupId)
+    for (const m of members) {
+      if (/leader/i.test(m.role) && personMap.has(m.personId)) {
+        leaderPersonIds.add(m.personId)
+        if (!shepherdContexts.has(m.personId)) shepherdContexts.set(m.personId, new Set())
+        shepherdContexts.get(m.personId)!.add(group?.name || 'Group')
+      }
+    }
+  }
+  for (const [teamId, members] of teamMembers) {
+    const team = teamMap.get(teamId)
+    for (const m of members) {
+      if (/leader/i.test(m.role) && personMap.has(m.personId)) {
+        leaderPersonIds.add(m.personId)
+        if (!shepherdContexts.has(m.personId)) shepherdContexts.set(m.personId, new Set())
+        shepherdContexts.get(m.personId)!.add(team?.name || 'Team')
+      }
+    }
+  }
+
+  // Build shepherd → sheep edges
+  const shepherdEdges = new Map<string, Set<string>>()
   const addEdge = (shepherdId: string, sheepId: string) => {
     if (shepherdId === sheepId) return
     if (!personMap.has(shepherdId) || !personMap.has(sheepId)) return
@@ -86,15 +102,8 @@ export async function GET() {
     shepherdEdges.get(shepherdId)!.add(sheepId)
   }
 
-  // Group leaders shepherd their group members
-  const groupMap = new Map((groups || []).map(g => [g.id, g]))
-  const groupMembers: Map<string, { personId: string; role: string }[]> = new Map()
-  for (const gm of groupMemberships || []) {
-    if (!groupMembers.has(gm.group_id)) groupMembers.set(gm.group_id, [])
-    groupMembers.get(gm.group_id)!.push({ personId: gm.person_id, role: gm.role || 'member' })
-  }
-
-  for (const [groupId, members] of groupMembers) {
+  // Group leaders → their members
+  for (const [, members] of groupMembers) {
     const leaders = members.filter(m => /leader/i.test(m.role))
     const nonLeaders = members.filter(m => !/leader/i.test(m.role))
     for (const leader of leaders) {
@@ -104,17 +113,8 @@ export async function GET() {
     }
   }
 
-  // Team leaders shepherd their team members
-  // PCO doesn't always have a "leader" role on team_memberships, so we also check
-  // if the person is in the team_leaders relationship or has a leader-like position
-  const teamMap = new Map((teams || []).map(t => [t.id, t]))
-  const teamMembers: Map<string, { personId: string; role: string }[]> = new Map()
-  for (const tm of teamMemberships || []) {
-    if (!teamMembers.has(tm.team_id)) teamMembers.set(tm.team_id, [])
-    teamMembers.get(tm.team_id)!.push({ personId: tm.person_id, role: tm.role || 'member' })
-  }
-
-  for (const [teamId, members] of teamMembers) {
+  // Team leaders → their members
+  for (const [, members] of teamMembers) {
     const leaders = members.filter(m => /leader/i.test(m.role))
     const nonLeaders = members.filter(m => !/leader/i.test(m.role))
     for (const leader of leaders) {
@@ -127,20 +127,34 @@ export async function GET() {
   // Manual shepherding relationships
   for (const r of manualRelationships || []) {
     addEdge(r.shepherd_id, r.person_id)
+    // Manual shepherds are also "leaders" for the tree
+    if (personMap.has(r.shepherd_id)) leaderPersonIds.add(r.shepherd_id)
   }
 
-  // Build tree nodes — only include people who are shepherds or have a shepherd
-  const allShepherds = new Set(shepherdEdges.keys())
-  const allSheep = new Set<string>()
-  for (const sheep of shepherdEdges.values()) {
-    for (const s of sheep) allSheep.add(s)
+  // Determine who's in the tree:
+  // - All leaders (always shown)
+  // - All sheep of those leaders
+  // - Current user (always shown if they match a person)
+  const treePersonIds = new Set<string>(leaderPersonIds)
+  for (const sheepSet of shepherdEdges.values()) {
+    for (const s of sheepSet) treePersonIds.add(s)
   }
-  const treePersonIds = new Set([...allShepherds, ...allSheep])
 
-  // For each person, pick their "primary" shepherd for the tree hierarchy
-  // Priority: manual > group leader > team leader
-  const primaryShepherd: Map<string, string> = new Map()
-  // First pass: group/team edges (lower priority)
+  // Match current user to a person record
+  let currentUserPersonId: string | null = null
+  if (currentUser?.name) {
+    const match = people.find(p => p.name?.toLowerCase() === currentUser.name?.toLowerCase())
+    if (match) {
+      currentUserPersonId = match.id
+      treePersonIds.add(match.id)
+    }
+  }
+
+  // Assign primary shepherd for tree hierarchy
+  // Priority: manual > group/team leader edges
+  const primaryShepherd = new Map<string, string>()
+
+  // First: group/team edges
   for (const [shepherdId, sheepSet] of shepherdEdges) {
     for (const sheepId of sheepSet) {
       if (!primaryShepherd.has(sheepId)) {
@@ -148,63 +162,52 @@ export async function GET() {
       }
     }
   }
-  // Second pass: manual overrides
+
+  // Manual overrides (higher priority)
   for (const r of manualRelationships || []) {
     if (treePersonIds.has(r.person_id) && treePersonIds.has(r.shepherd_id)) {
       primaryShepherd.set(r.person_id, r.shepherd_id)
     }
   }
 
-  // Collect context labels for each shepherd
-  const shepherdContexts: Map<string, Set<string>> = new Map()
-  for (const [groupId, members] of groupMembers) {
-    const group = groupMap.get(groupId)
-    const leaders = members.filter(m => /leader/i.test(m.role))
-    for (const leader of leaders) {
-      if (!shepherdContexts.has(leader.personId)) shepherdContexts.set(leader.personId, new Set())
-      shepherdContexts.get(leader.personId)!.add(group?.name || 'Group')
-    }
-  }
-  for (const [teamId, members] of teamMembers) {
-    const team = teamMap.get(teamId)
-    const leaders = members.filter(m => /leader/i.test(m.role))
-    for (const leader of leaders) {
-      if (!shepherdContexts.has(leader.personId)) shepherdContexts.set(leader.personId, new Set())
-      shepherdContexts.get(leader.personId)!.add(team?.name || 'Team')
+  // Detect cycle: if A → B → A, break it
+  for (const [childId, parentId] of primaryShepherd) {
+    if (primaryShepherd.get(parentId) === childId) {
+      // Break the cycle — keep the one with more flock
+      const childFlock = shepherdEdges.get(childId)?.size || 0
+      const parentFlock = shepherdEdges.get(parentId)?.size || 0
+      if (childFlock >= parentFlock) {
+        primaryShepherd.delete(parentId)
+      } else {
+        primaryShepherd.delete(childId)
+      }
     }
   }
 
-  // Build final nodes
-  const nodes = [...treePersonIds].map(personId => {
-    const person = personMap.get(personId)!
-    const flockCount = shepherdEdges.get(personId)?.size || 0
-    const isShepherd = allShepherds.has(personId)
-    const contexts = shepherdContexts.get(personId)
-    const contextLabel = contexts ? [...contexts].slice(0, 3).join(', ') : null
+  // Build nodes
+  const nodes = [...treePersonIds]
+    .filter(id => personMap.has(id))
+    .map(personId => {
+      const person = personMap.get(personId)!
+      const flockCount = shepherdEdges.get(personId)?.size || 0
+      const isLeader = leaderPersonIds.has(personId)
+      const contexts = shepherdContexts.get(personId)
+      const contextLabel = contexts ? [...contexts].slice(0, 3).join(', ') : null
+      const supervisorId = primaryShepherd.get(personId) || null
+      const hasNoShepherd = isLeader && !supervisorId
 
-    return {
-      id: personId,
-      name: person.name || 'Unknown',
-      role: isShepherd ? 'shepherd' : 'member',
-      supervisorId: primaryShepherd.get(personId) || null,
-      flockCount,
-      lastCheckin: lastCheckin[personId] || null,
-      isCurrentUser: false, // we'll match below
-      contextLabel,
-    }
-  })
-
-  // Try to match current user to a person record
-  const { data: appUsers } = await admin
-    .from('users')
-    .select('name')
-    .eq('user_id', user.id)
-    .single()
-
-  if (appUsers?.name) {
-    const match = nodes.find(n => n.name.toLowerCase() === appUsers.name.toLowerCase())
-    if (match) match.isCurrentUser = true
-  }
+      return {
+        id: personId,
+        name: person.name || 'Unknown',
+        role: isLeader ? 'shepherd' : 'member',
+        supervisorId,
+        flockCount,
+        lastCheckin: lastCheckin[personId] || null,
+        isCurrentUser: personId === currentUserPersonId,
+        contextLabel,
+        warning: hasNoShepherd ? 'No assigned shepherd' : null,
+      }
+    })
 
   return NextResponse.json({ nodes, currentUserRole: currentUser?.role })
 }

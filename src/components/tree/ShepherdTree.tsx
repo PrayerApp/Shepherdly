@@ -11,6 +11,7 @@ interface TreeNode {
   lastCheckin: string | null
   isCurrentUser: boolean
   contextLabel: string | null
+  warning: string | null
 }
 
 interface LayoutNode extends TreeNode {
@@ -113,6 +114,9 @@ export default function ShepherdTree() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d')
+  const [connecting, setConnecting] = useState<{ shepherdId: string; shepherdName: string } | null>(null)
+  const [searchTerm, setSearchTerm] = useState('')
+  const [allNodes, setAllNodes] = useState<TreeNode[]>([])
 
   // Pan & zoom state
   const [transform, setTransform] = useState({ x: 0, y: 60, scale: 1 })
@@ -125,6 +129,7 @@ export default function ShepherdTree() {
     const data = await res.json()
     if (data.error) { setError(data.error); setLoading(false); return }
 
+    setAllNodes(data.nodes || [])
     const laid = buildTree(data.nodes)
     setNodes(laid)
     setEdges(getAllEdges(laid))
@@ -140,6 +145,32 @@ export default function ShepherdTree() {
   }, [])
 
   useEffect(() => { fetchTree() }, [fetchTree])
+
+  const assignShepherd = async (personId: string, shepherdId: string) => {
+    await fetch(`/api/people/${personId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'add_shepherd', shepherd_id: shepherdId, context_type: 'manual' }),
+    })
+    setConnecting(null)
+    setSearchTerm('')
+    fetchTree()
+  }
+
+  const unassignShepherd = async (personId: string) => {
+    // Remove manual relationship - find it first
+    const res = await fetch(`/api/people/${personId}`)
+    const data = await res.json()
+    const manualRel = data.person?.shepherds?.find((s: any) => s.context_type === 'manual' && s.is_active)
+    if (manualRel) {
+      await fetch(`/api/people/${personId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'remove_shepherd', relationship_id: manualRel.id }),
+      })
+      fetchTree()
+    }
+  }
 
   // Bounds
   const minX = nodes.length ? Math.min(...nodes.map(n => n.x)) - NODE_W / 2 - 40 : -400
@@ -196,9 +227,9 @@ export default function ShepherdTree() {
   if (nodes.length === 0) return (
     <div className="flex-1 flex items-center justify-center text-center px-8">
       <div>
-        <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No leaders yet</p>
+        <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No leaders found</p>
         <p className="sans text-sm" style={{ color: 'var(--muted-foreground)' }}>
-          Add leaders in Settings → Manage Users to build the shepherd tree.
+          Sync your groups and teams from PCO to populate the shepherd tree.
         </p>
       </div>
     </div>
@@ -212,7 +243,7 @@ export default function ShepherdTree() {
         <div>
           <h1 className="font-serif text-xl" style={{ color: 'var(--primary)' }}>Shepherd Tree</h1>
           <p className="sans text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-            {nodes.length} leaders · scroll to zoom · drag to pan
+            {nodes.filter(n => n.role === 'shepherd').length} shepherds · {nodes.filter(n => n.role === 'member').length} members · scroll to zoom · drag to pan
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -342,7 +373,15 @@ export default function ShepherdTree() {
                     fill={color} style={{ clipPath: 'inset(0 0 0 0 round 10px 0 0 10px)' }} />
 
                   {/* Health dot — only for shepherds */}
-                  {isShepherd && <circle cx={NODE_W - 10} cy={10} r={4} fill={health} />}
+                  {isShepherd && !node.warning && <circle cx={NODE_W - 10} cy={10} r={4} fill={health} />}
+
+                  {/* Warning indicator */}
+                  {node.warning && (
+                    <g transform={`translate(${NODE_W - 16}, 4)`}>
+                      <polygon points="6,0 12,11 0,11" fill="#c17f3e" />
+                      <text x={6} y={9} textAnchor="middle" fontSize={8} fontWeight="700" fill="white">!</text>
+                    </g>
+                  )}
 
                   {/* Avatar circle */}
                   <circle cx={28} cy={NODE_H / 2} r={18}
@@ -416,11 +455,19 @@ export default function ShepherdTree() {
                   className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              {/* Role badge */}
-              <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium mb-4"
-                style={{ background: detailColor + '15', color: detailColor }}>
-                {isShepherd ? 'Shepherd' : 'Member'}
-              </span>
+              {/* Role badge + warning */}
+              <div className="flex items-center gap-2 mb-4">
+                <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
+                  style={{ background: detailColor + '15', color: detailColor }}>
+                  {isShepherd ? 'Shepherd' : 'Member'}
+                </span>
+                {selected.warning && (
+                  <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
+                    style={{ background: '#fef3cd', color: '#856404' }}>
+                    {selected.warning}
+                  </span>
+                )}
+              </div>
 
               {isShepherd && (
                 <>
@@ -457,23 +504,116 @@ export default function ShepherdTree() {
                     </div>
                   </div>
 
+                  {/* Assign to shepherd (for unconnected leaders) */}
+                  {selected.warning && !connecting && (
+                    <button
+                      onClick={() => setConnecting({ shepherdId: '', shepherdName: '' })}
+                      className="w-full text-xs sans py-2 rounded-lg font-medium mb-3 border-2 border-dashed"
+                      style={{ borderColor: '#c17f3e', color: '#c17f3e' }}>
+                      Assign a Shepherd
+                    </button>
+                  )}
+
                   <div className="flex gap-2">
                     <a href={`/checkins?shepherd=${selected.id}`}
                       className="flex-1 text-center text-xs sans py-2 rounded-lg font-medium"
                       style={{ background: 'var(--primary)', color: 'white' }}>
                       View Check-ins
                     </a>
-                    <a href={`/people?shepherd=${selected.id}`}
+                    <button
+                      onClick={() => setConnecting({ shepherdId: selected.id, shepherdName: selected.name })}
                       className="flex-1 text-center text-xs sans py-2 rounded-lg font-medium border"
                       style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-                      View Flock
-                    </a>
+                      Add to Flock
+                    </button>
                   </div>
                 </>
+              )}
+
+              {/* Member: assign shepherd */}
+              {!isShepherd && !connecting && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setConnecting({ shepherdId: '', shepherdName: '' })}
+                    className="flex-1 text-center text-xs sans py-2 rounded-lg font-medium"
+                    style={{ background: 'var(--primary)', color: 'white' }}>
+                    Assign Shepherd
+                  </button>
+                </div>
               )}
             </div>
           )
         })()}
+
+        {/* Connection search modal */}
+        {connecting && selected && (
+          <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
+            <div className="w-80 bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>
+                  {connecting.shepherdId
+                    ? `Add to ${connecting.shepherdName}'s flock`
+                    : `Assign shepherd for ${selected.name}`}
+                </h3>
+                <button onClick={() => { setConnecting(null); setSearchTerm('') }}
+                  className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+              </div>
+              <input
+                type="text"
+                placeholder="Search by name..."
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border text-sm sans mb-3"
+                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                autoFocus
+              />
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {allNodes
+                  .filter(n => {
+                    if (!searchTerm) return false
+                    if (n.id === selected.id) return false
+                    const matchesSearch = n.name.toLowerCase().includes(searchTerm.toLowerCase())
+                    if (connecting.shepherdId) {
+                      // Adding someone to a shepherd's flock — show anyone
+                      return matchesSearch
+                    } else {
+                      // Assigning a shepherd — only show other shepherds
+                      return matchesSearch && n.role === 'shepherd'
+                    }
+                  })
+                  .slice(0, 10)
+                  .map(n => (
+                    <button key={n.id}
+                      onClick={() => {
+                        if (connecting.shepherdId) {
+                          assignShepherd(n.id, connecting.shepherdId)
+                        } else {
+                          assignShepherd(selected.id, n.id)
+                        }
+                      }}
+                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left hover:bg-gray-50 transition-colors">
+                      <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
+                        style={{ background: n.role === 'shepherd' ? '#4a7c5918' : '#6b728018', color: n.role === 'shepherd' ? '#4a7c59' : '#6b7280' }}>
+                        {n.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{n.name}</div>
+                        <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>
+                          {n.contextLabel || (n.role === 'shepherd' ? 'Shepherd' : 'Member')}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                {searchTerm && allNodes.filter(n => n.id !== selected.id && n.name.toLowerCase().includes(searchTerm.toLowerCase())).length === 0 && (
+                  <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>No matches found</p>
+                )}
+                {!searchTerm && (
+                  <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>Type a name to search</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

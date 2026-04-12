@@ -116,21 +116,21 @@ export default async function DashboardPage() {
             <div className="flex justify-center gap-6 mt-2">
               <div className="flex items-center gap-1.5 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
                 <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#2d6047' }} />
-                Connected ({coverage.has_shepherd || 0})
+                Connected ({coverage?.has_shepherd || 0})
               </div>
               <div className="flex items-center gap-1.5 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
                 <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#dc4a4a' }} />
-                Unconnected ({coverage.unconnected_active || 0})
+                Unconnected ({coverage?.unconnected_active || 0})
               </div>
             </div>
           </div>
           <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
             <h2 className="font-serif text-lg mb-4" style={{ color: 'var(--foreground)' }}>Quick Stats</h2>
             <div className="grid grid-cols-2 gap-4">
-              <QuickStat label="Total Active" value={coverage.total_active || 0} />
-              <QuickStat label="Attenders" value={coverage.total_attenders || 0} />
+              <QuickStat label="Total Active" value={coverage.total_active_people || 0} />
+              <QuickStat label="Attenders" value={coverage.active_attenders || 0} />
               <QuickStat label="With Shepherd" value={coverage.has_shepherd || 0} />
-              <QuickStat label="Coverage" value={`${Math.round(coverage.connection_percentage || 0)}%`} />
+              <QuickStat label="Coverage" value={`${Math.round(coverage.connection_pct || 0)}%`} />
             </div>
           </div>
         </div>

@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: GridIcon },
   { href: '/tree', label: 'Shepherd Tree', icon: TreeIcon },
   { href: '/people', label: 'My Flock', icon: PeopleIcon },
+  { href: '/unassigned', label: 'Unassigned', icon: UnassignedIcon },
   { href: '/checkins', label: 'Check-ins', icon: CheckIcon },
   { href: '/surveys', label: 'Surveys', icon: SurveyIcon },
   { href: '/mir', label: 'Impact Reports', icon: MirIcon },
@@ -174,6 +175,9 @@ function MirIcon({ size }: { size: number }) {
 }
 function GroupTypeIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+}
+function UnassignedIcon({ size }: { size: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="7" r="4"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/><line x1="18" y1="11" x2="18" y2="17"/></svg>
 }
 function SignOutIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
