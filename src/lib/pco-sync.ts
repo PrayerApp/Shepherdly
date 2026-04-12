@@ -144,23 +144,20 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
-  // ── 5. Group Applications / Enrollments (nested per group) ─
+  // ── 5. Group Applications (flat top-level) ────────────────
   {
     key: 'group_applications',
     label: 'Group Applications',
     category: 'groups',
     table: 'group_applications',
-    endpoint: '',
+    endpoint: '/groups/v2/group_applications',
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
-    isNested: true,
-    nestedParentTable: 'groups',
-    nestedEndpointTemplate: '/groups/v2/groups/{parentId}/applications',
     mapRow: (e) => ({
       pco_id: e.id,
       pco_person_id: e.relationships?.person?.data?.id || null,
-      pco_group_id: e.attributes?._parentPcoId || null,
+      pco_group_id: e.relationships?.group?.data?.id || null,
       status: e.attributes.status || 'pending',
       applied_at: e.attributes.created_at || null,
       resolved_at: e.attributes.resolved_at || null,
@@ -171,22 +168,19 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
-  // ── 6. Group Events (nested per group) ────────────────────
+  // ── 6. Group Events (flat top-level) ─────────────────────
   {
     key: 'group_events',
     label: 'Group Events',
     category: 'groups',
     table: 'group_events',
-    endpoint: '',
+    endpoint: '/groups/v2/events',
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
-    isNested: true,
-    nestedParentTable: 'groups',
-    nestedEndpointTemplate: '/groups/v2/groups/{parentId}/events',
     mapRow: (ev) => ({
       pco_id: ev.id,
-      pco_group_id: ev.attributes?._parentPcoId || null,
+      pco_group_id: ev.relationships?.group?.data?.id || null,
       name: ev.attributes.name || null,
       starts_at: ev.attributes.starts_at || null,
       ends_at: ev.attributes.ends_at || null,
@@ -196,7 +190,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
-  // ── 7. Group Event Attendances (nested per group_event) ───
+  // ── 7. Group Event Attendances (nested per event) ────────
   {
     key: 'group_event_attendances',
     label: 'Group Attendance',
