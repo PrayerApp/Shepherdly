@@ -244,6 +244,14 @@ DROP INDEX IF EXISTS team_memberships_pco_id_idx;
 CREATE UNIQUE INDEX team_memberships_pco_id_idx ON team_memberships (pco_id);
 DROP INDEX IF EXISTS people_pco_id_idx;  -- duplicate partial; idx_people_pco_id_unique already exists
 
+-- attendance_records needs pco_id column + unique index for upsert
+ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS pco_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS attendance_records_pco_id_idx ON attendance_records (pco_id);
+
+-- team_memberships: drop person_id+team_id unique constraint
+-- (a person can hold multiple positions on the same team in PCO)
+ALTER TABLE team_memberships DROP CONSTRAINT IF EXISTS team_memberships_person_id_team_id_key;
+
 -- New table indexes
 CREATE INDEX IF NOT EXISTS idx_group_types_church ON group_types(church_id);
 CREATE INDEX IF NOT EXISTS idx_group_apps_church ON group_applications(church_id);
