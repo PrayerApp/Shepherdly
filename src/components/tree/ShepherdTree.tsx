@@ -704,6 +704,7 @@ export default function ShepherdTree() {
   const [transform, setTransform] = useState({ x: 0, y: 60, scale: 1 })
   const dragging = useRef(false)
   const lastPos = useRef({ x: 0, y: 0 })
+  const initialLoadDone = useRef(false)
 
   const isAdmin = ['super_admin', 'staff'].includes(currentUserRole || '')
 
@@ -840,11 +841,13 @@ export default function ShepherdTree() {
     setNodes(laid)
     setEdges(getAllEdges(laid))
 
-    if (laid.length > 0) {
+    // Only center tree on initial load — preserve position on subsequent refreshes
+    if (laid.length > 0 && !initialLoadDone.current) {
       const minX = Math.min(...laid.map(n => n.x)) - NODE_W / 2
       const maxX = Math.max(...laid.map(n => n.x)) + NODE_W / 2
       const treeW = maxX - minX
       setTransform({ x: -minX - treeW / 2, y: 60, scale: 1 })
+      initialLoadDone.current = true
     }
     setLoading(false)
   }, [])
@@ -1283,23 +1286,13 @@ export default function ShepherdTree() {
                     style={{ cursor: isAdmin ? 'pointer' : 'default' }}
                     onClick={() => {
                       if (!isAdmin) return
-                      // Set active parent for bottom panel quick-assign
+                      // Set active parent for bottom panel quick-assign (no modal)
                       setActiveParent({
                         personId: node.placeholderSupervisorPersonId || '',
                         nodeId: node.id,
                         layerId: node.layerId || '',
                       })
                       setPanelCollapsed(false)
-                      setAssignModal({
-                        personId: '', personName: '',
-                        layerId: node.layerId || '',
-                        supervisorPersonId: node.placeholderSupervisorPersonId || '',
-                        oversightEntries: [],
-                        isLeadPastor: false,
-                        isEdit: false,
-                      })
-                      setAssignSearch('')
-                      setAssignResults([])
                     }}>
                     <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
                       fill="white" stroke={phColor} strokeWidth="1.5"
@@ -1929,7 +1922,7 @@ export default function ShepherdTree() {
               {!panelCollapsed && (
                 <div className="flex items-center gap-1">
                   {[
-                    { key: 'staff' as const, label: 'Staff', count: unconnectedStaff.length, color: '#3b6ea5' },
+                    { key: 'staff' as const, label: 'Shepherd Team', count: unconnectedStaff.length, color: '#3b6ea5' },
                     { key: 'types' as const, label: 'Group / Service Types', count: unlinkedGroupTypes.length + unlinkedServiceTypes.length, color: '#4a7c59' },
                     { key: 'volunteers' as const, label: 'Volunteers', count: unconnectedVolunteers.length, color: '#6b7280' },
                   ].map(tab => (
@@ -1955,49 +1948,59 @@ export default function ShepherdTree() {
             )}
           </div>
 
-          {/* Panel body */}
+          {/* Panel body — horizontal scroll of tree-matching cards */}
           {!panelCollapsed && (
-            <div className="px-4 py-3 overflow-x-auto" style={{ maxHeight: '180px', overflowY: 'auto' }}>
-              {/* Staff tab */}
+            <div className="px-4 py-3 overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
+              {/* Staff (Shepherd Team) tab */}
               {unassignedTab === 'staff' && (
-                <div className="flex flex-wrap gap-2">
+                <div className="flex gap-3" style={{ minWidth: 'min-content' }}>
                   {unconnectedStaff.length === 0 && (
-                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All staff are connected.</span>
+                    <span className="text-xs sans whitespace-nowrap" style={{ color: 'var(--muted-foreground)' }}>All shepherd team members are connected.</span>
                   )}
-                  {unconnectedStaff.map(s => (
-                    <button key={s.id}
-                      onClick={async () => {
-                        if (!activeParent) return
-                        setSaving(true)
-                        try {
-                          await fetch('/api/tree', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              action: 'save_assignment', person_id: s.id,
-                              layer_id: assignmentsMap[s.id]?.layerId,
-                              supervisor_person_id: activeParent.personId,
-                              oversight: oversightMap[s.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
-                              is_lead_pastor: false,
-                            }),
-                          })
-                          await fetchTree()
-                        } finally { setSaving(false) }
-                      }}
-                      disabled={!activeParent || saving}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
-                      style={{ borderColor: activeParent ? '#3b6ea5' : 'var(--border)', color: activeParent ? '#3b6ea5' : 'var(--muted-foreground)', background: activeParent ? '#3b6ea510' : 'transparent' }}>
-                      {s.name}
-                      <span className="text-[9px]" style={{ color: 'var(--muted-foreground)' }}>{s.layerName}</span>
-                    </button>
-                  ))}
+                  {unconnectedStaff.map(s => {
+                    const initials = s.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()
+                    return (
+                      <button key={s.id}
+                        onClick={async () => {
+                          if (!activeParent) return
+                          setSaving(true)
+                          try {
+                            await fetch('/api/tree', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                action: 'save_assignment', person_id: s.id,
+                                layer_id: assignmentsMap[s.id]?.layerId,
+                                supervisor_person_id: activeParent.personId,
+                                oversight: oversightMap[s.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
+                                is_lead_pastor: false,
+                              }),
+                            })
+                            await fetchTree()
+                          } finally { setSaving(false) }
+                        }}
+                        disabled={!activeParent || saving}
+                        className="shrink-0 relative text-left border rounded-[10px] transition-all disabled:opacity-40 hover:shadow-md"
+                        style={{ width: 220, height: 72, borderColor: activeParent ? '#3b6ea5' : 'var(--border)', background: 'white', overflow: 'hidden' }}>
+                        <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-[10px]" style={{ background: '#3b6ea5' }} />
+                        <div className="flex items-center h-full pl-3 pr-2">
+                          <div className="w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-semibold sans shrink-0"
+                            style={{ background: '#3b6ea518', color: '#3b6ea5' }}>{initials}</div>
+                          <div className="ml-2.5 min-w-0">
+                            <div className="text-[12px] font-semibold truncate" style={{ fontFamily: 'Georgia, serif', color: 'var(--foreground)' }}>{s.name}</div>
+                            <div className="text-[10px] sans truncate" style={{ color: 'var(--muted-foreground)' }}>{s.layerName}</div>
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })}
                 </div>
               )}
 
               {/* Types tab */}
               {unassignedTab === 'types' && (
-                <div className="flex flex-wrap gap-2">
+                <div className="flex gap-3" style={{ minWidth: 'min-content' }}>
                   {unlinkedGroupTypes.length === 0 && unlinkedServiceTypes.length === 0 && (
-                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All types are connected to a staff overseer.</span>
+                    <span className="text-xs sans whitespace-nowrap" style={{ color: 'var(--muted-foreground)' }}>All types are connected to a staff overseer.</span>
                   )}
                   {unlinkedGroupTypes.map(gt => (
                     <button key={`gt-${gt.id}`}
@@ -2021,10 +2024,19 @@ export default function ShepherdTree() {
                         } finally { setSaving(false) }
                       }}
                       disabled={!activeParent || saving}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
-                      style={{ borderColor: activeParent ? '#4a7c59' : 'var(--border)', color: activeParent ? '#4a7c59' : 'var(--muted-foreground)', background: activeParent ? '#4a7c5910' : 'transparent' }}>
-                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#4a7c59' }} />
-                      {gt.name}
+                      className="shrink-0 relative text-left border rounded-[10px] transition-all disabled:opacity-40 hover:shadow-md"
+                      style={{ width: 220, height: 72, borderColor: activeParent ? '#4a7c59' : 'var(--border)', background: 'white', overflow: 'hidden' }}>
+                      <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-[10px]" style={{ background: '#4a7c59' }} />
+                      <div className="flex items-center h-full pl-3 pr-2">
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
+                          style={{ background: '#4a7c5918' }}>
+                          <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#4a7c59' }} />
+                        </div>
+                        <div className="ml-2.5 min-w-0">
+                          <div className="text-[12px] font-semibold truncate" style={{ fontFamily: 'Georgia, serif', color: 'var(--foreground)' }}>{gt.name}</div>
+                          <div className="text-[10px] sans truncate" style={{ color: '#4a7c59' }}>Group Type</div>
+                        </div>
+                      </div>
                     </button>
                   ))}
                   {unlinkedServiceTypes.map(st => (
@@ -2049,10 +2061,19 @@ export default function ShepherdTree() {
                         } finally { setSaving(false) }
                       }}
                       disabled={!activeParent || saving}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
-                      style={{ borderColor: activeParent ? '#3b6ea5' : 'var(--border)', color: activeParent ? '#3b6ea5' : 'var(--muted-foreground)', background: activeParent ? '#3b6ea510' : 'transparent' }}>
-                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#3b6ea5' }} />
-                      {st.name}
+                      className="shrink-0 relative text-left border rounded-[10px] transition-all disabled:opacity-40 hover:shadow-md"
+                      style={{ width: 220, height: 72, borderColor: activeParent ? '#3b6ea5' : 'var(--border)', background: 'white', overflow: 'hidden' }}>
+                      <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-[10px]" style={{ background: '#3b6ea5' }} />
+                      <div className="flex items-center h-full pl-3 pr-2">
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
+                          style={{ background: '#3b6ea518' }}>
+                          <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#3b6ea5' }} />
+                        </div>
+                        <div className="ml-2.5 min-w-0">
+                          <div className="text-[12px] font-semibold truncate" style={{ fontFamily: 'Georgia, serif', color: 'var(--foreground)' }}>{st.name}</div>
+                          <div className="text-[10px] sans truncate" style={{ color: '#3b6ea5' }}>Service Type</div>
+                        </div>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -2083,41 +2104,51 @@ export default function ShepherdTree() {
                       })()}
                     </span>
                   </div>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex gap-3" style={{ minWidth: 'min-content', overflowX: 'auto' }}>
                     {(() => {
                       const filtered = volunteerFilter === 'all' ? unconnectedVolunteers
                         : volunteerFilter.startsWith('gt-') ? unconnectedVolunteers.filter(v => v.groupTypeId === volunteerFilter.slice(3))
                         : unconnectedVolunteers.filter(v => v.serviceTypeId === volunteerFilter.slice(3))
                       if (filtered.length === 0) return (
-                        <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All volunteers are connected.</span>
+                        <span className="text-xs sans whitespace-nowrap" style={{ color: 'var(--muted-foreground)' }}>All volunteers are connected.</span>
                       )
-                      return filtered.map(v => (
-                        <button key={v.id}
-                          onClick={async () => {
-                            if (!activeParent) return
-                            setSaving(true)
-                            try {
-                              // If volunteer has an existing assignment, update supervisor; otherwise create new
-                              const existing = assignmentsMap[v.id]
-                              await fetch('/api/tree', {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                  action: 'save_assignment', person_id: v.id,
-                                  layer_id: existing?.layerId || activeParent.layerId,
-                                  supervisor_person_id: activeParent.personId,
-                                  oversight: oversightMap[v.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
-                                  is_lead_pastor: false,
-                                }),
-                              })
-                              await fetchTree()
-                            } finally { setSaving(false) }
-                          }}
-                          disabled={!activeParent || saving}
-                          className="inline-flex items-center px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
-                          style={{ borderColor: activeParent ? '#6b7280' : 'var(--border)', color: activeParent ? 'var(--foreground)' : 'var(--muted-foreground)', background: activeParent ? '#6b728008' : 'transparent' }}>
-                          {v.name}
-                        </button>
-                      ))
+                      return filtered.map(v => {
+                        const initials = v.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()
+                        return (
+                          <button key={v.id}
+                            onClick={async () => {
+                              if (!activeParent) return
+                              setSaving(true)
+                              try {
+                                const existing = assignmentsMap[v.id]
+                                await fetch('/api/tree', {
+                                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    action: 'save_assignment', person_id: v.id,
+                                    layer_id: existing?.layerId || activeParent.layerId,
+                                    supervisor_person_id: activeParent.personId,
+                                    oversight: oversightMap[v.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
+                                    is_lead_pastor: false,
+                                  }),
+                                })
+                                await fetchTree()
+                              } finally { setSaving(false) }
+                            }}
+                            disabled={!activeParent || saving}
+                            className="shrink-0 relative text-left border rounded-[10px] transition-all disabled:opacity-40 hover:shadow-md"
+                            style={{ width: 220, height: 72, borderColor: activeParent ? '#6b7280' : 'var(--border)', background: 'white', overflow: 'hidden' }}>
+                            <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-[10px]" style={{ background: '#6b7280' }} />
+                            <div className="flex items-center h-full pl-3 pr-2">
+                              <div className="w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-semibold sans shrink-0"
+                                style={{ background: '#6b728018', color: '#6b7280' }}>{initials}</div>
+                              <div className="ml-2.5 min-w-0">
+                                <div className="text-[12px] font-semibold truncate" style={{ fontFamily: 'Georgia, serif', color: 'var(--foreground)' }}>{v.name}</div>
+                                <div className="text-[10px] sans truncate" style={{ color: 'var(--muted-foreground)' }}>Volunteer</div>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })
                     })()}
                   </div>
                 </div>

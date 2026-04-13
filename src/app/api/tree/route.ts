@@ -360,20 +360,19 @@ export async function GET() {
       }
     }
 
-    // Auto-pool unconnected staff/volunteers below their parent layer
+    // Mark unconnected staff/volunteers (no supervisor, not LP, not elder)
+    // They won't be pooled in the tree — they'll appear in the bottom panel instead
     if (!supervisorId && !person.is_lead_pastor && layer.category !== 'elder') {
       isUnconnected = true
-      if (layer.category === 'staff') {
-        // Staff without supervisor → pool under Lead Pastor (or elder placeholder)
-        supervisorId = leadPastorNodeId || `placeholder-${sortedLayers.find(l => l.category === 'elder')?.id}`
-      } else if (layer.category === 'volunteer') {
-        // Volunteer without supervisor → pool under first staff (or staff placeholder)
+      // Volunteers without supervisor → pool under first staff (or staff placeholder)
+      if (layer.category === 'volunteer') {
         if (firstStaffAssignment) {
           supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
         } else {
           supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
         }
       }
+      // Staff without supervisor: NOT pooled in tree — shown in bottom panel only
     }
 
     nodes.push({
