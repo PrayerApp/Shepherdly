@@ -34,6 +34,7 @@ const SETTINGS_ITEMS = [
   { href: '/settings/users', label: 'Manage Users', icon: UsersIcon, roles: ['super_admin'] },
   { href: '/settings/pco', label: 'PCO Connection', icon: SyncIcon, roles: ['super_admin'] },
   { href: '/settings/group-types', label: 'Group Types', icon: GroupTypeIcon, roles: ['super_admin', 'staff'] },
+  { href: '/settings/service-types', label: 'Service Types', icon: ServiceTypeIcon, roles: ['super_admin', 'staff'] },
 ]
 
 export default function Sidebar({ user }: { user: User }) {
@@ -175,6 +176,9 @@ function MirIcon({ size }: { size: number }) {
 }
 function GroupTypeIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>
+}
+function ServiceTypeIcon({ size }: { size: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
 }
 function UnassignedIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="7" r="4"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/><line x1="18" y1="11" x2="18" y2="17"/></svg>

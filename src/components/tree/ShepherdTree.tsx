@@ -924,7 +924,7 @@ export default function ShepherdTree() {
         {/* Add person modal */}
         {addingPerson && (
           <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[480px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
+            <div className="w-[560px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>Add Person to Tree</h3>
                 <button onClick={() => { setAddingPerson(false); setAddSearch(''); setAddResults([]) }}
@@ -944,33 +944,37 @@ export default function ShepherdTree() {
               />
               <div className="max-h-64 overflow-y-auto space-y-1">
                 {addResults.map(p => {
-                  const alreadyInTree = allNodes.some(n => n.id === p.id)
+                  const alreadyInTree = allNodes.some(n => (n.personId || n.id) === p.id)
                   return (
-                    <div key={p.id} className="flex items-center gap-3 px-3 py-2 rounded-lg" style={{ background: alreadyInTree ? 'var(--muted)' : 'white' }}>
-                      <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
+                    <div key={p.id} className="flex items-center gap-3 px-3 py-2.5 rounded-lg" style={{ background: alreadyInTree ? 'var(--muted)' : 'white' }}>
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
                         style={{ background: '#4a7c5918', color: '#4a7c59' }}>
                         {p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{p.name}</div>
+                        <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{p.name}</div>
                         {alreadyInTree && <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Already in tree</div>}
                       </div>
-                      <div className="flex gap-1 shrink-0">
+                      <div className="flex gap-2 shrink-0">
                         <button
                           onClick={() => addPersonToTree(p.id)}
-                          className="text-xs sans px-2 py-1 rounded font-medium"
+                          className="text-xs sans px-3 py-1.5 rounded font-medium"
                           style={{ background: 'var(--primary)', color: 'white' }}>
                           As Root
                         </button>
                         <select
-                          className="text-xs sans px-2 py-1 rounded border max-w-[180px]"
+                          className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
                           style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
                           defaultValue=""
                           onChange={e => { if (e.target.value) addPersonToTree(p.id, e.target.value) }}>
-                          <option value="" disabled>Under…</option>
-                          {allNodes.filter(n => n.role === 'shepherd').slice(0, 20).map(n => (
-                            <option key={n.id} value={n.id}>{n.name}</option>
-                          ))}
+                          <option value="" disabled>Place under shepherd…</option>
+                          {allNodes
+                            .filter(n => n.role === 'shepherd')
+                            .filter((n, i, arr) => arr.findIndex(x => realId(x) === realId(n)) === i)
+                            .slice(0, 30)
+                            .map(n => (
+                              <option key={n.id} value={realId(n)}>{n.name}</option>
+                            ))}
                         </select>
                       </div>
                     </div>

@@ -51,7 +51,7 @@ export async function GET() {
       .order('created_at', { ascending: false }),
     admin.from('group_types').select('id, pco_id, name, is_tracked')
       .eq('church_id', churchId!).order('name'),
-    admin.from('service_types').select('id, pco_id, name')
+    admin.from('service_types').select('id, pco_id, name, is_tracked')
       .eq('church_id', churchId!).order('name'),
   ])
 
@@ -64,6 +64,30 @@ export async function GET() {
   const teamMap = new Map((teams || []).map(t => [t.id, t]))
   const groupTypeMap = new Map((groupTypes || []).map(gt => [gt.id, gt]))
   const groupTypePcoMap = new Map((groupTypes || []).map(gt => [gt.pco_id, gt]))
+
+  // Build sets of tracked type IDs for filtering
+  const trackedGroupTypeIds = new Set((groupTypes || []).filter(gt => gt.is_tracked).map(gt => gt.id))
+  const trackedGroupTypePcoIds = new Set((groupTypes || []).filter(gt => gt.is_tracked).map(gt => gt.pco_id))
+  const trackedServiceTypeIds = new Set((serviceTypes || []).filter(st => st.is_tracked).map(st => st.id))
+  const trackedServiceTypePcoIds = new Set((serviceTypes || []).filter(st => st.is_tracked).map(st => st.pco_id))
+
+  // Check if a group belongs to a tracked group type
+  function isGroupTracked(group: { group_type_id?: string | null; pco_group_type_id?: string | null }): boolean {
+    if (group.group_type_id && trackedGroupTypeIds.has(group.group_type_id)) return true
+    if (group.pco_group_type_id && trackedGroupTypePcoIds.has(group.pco_group_type_id)) return true
+    // Groups without a type: include by default
+    if (!group.group_type_id && !group.pco_group_type_id) return true
+    return false
+  }
+
+  // Check if a team belongs to a tracked service type
+  function isTeamTracked(team: { service_type_id?: string | null; pco_service_type_id?: string | null }): boolean {
+    if (team.service_type_id && trackedServiceTypeIds.has(team.service_type_id)) return true
+    if (team.pco_service_type_id && trackedServiceTypePcoIds.has(team.pco_service_type_id)) return true
+    // Teams without a type: include by default
+    if (!team.service_type_id && !team.pco_service_type_id) return true
+    return false
+  }
 
   function getGroupTypeName(group: { group_type_id?: string | null; pco_group_type_id?: string | null }): string | null {
     if (group.group_type_id) {
@@ -158,10 +182,11 @@ export async function GET() {
     }
   }
 
-  // ── Process Groups ────────────────────────────────────────
+  // ── Process Groups (only tracked group types) ─────────────
   for (const [groupId, members] of groupMembers) {
     const group = groupMap.get(groupId)
     if (!group) continue
+    if (!isGroupTracked(group)) continue
 
     const validMembers = members.filter(m => personMap.has(m.personId))
     if (validMembers.length === 0) continue
@@ -207,10 +232,11 @@ export async function GET() {
     }
   }
 
-  // ── Process Teams ─────────────────────────────────────────
+  // ── Process Teams (only tracked service types) ────────────
   for (const [teamId, members] of teamMembers) {
     const team = teamMap.get(teamId)
     if (!team) continue
+    if (!isTeamTracked(team)) continue
 
     const validMembers = members.filter(m => personMap.has(m.personId))
     if (validMembers.length === 0) continue

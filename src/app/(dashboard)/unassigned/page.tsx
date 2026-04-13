@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 
 interface UnassignedPerson {
   id: string
@@ -21,21 +21,29 @@ export default function UnassignedPage() {
   const [people, setPeople] = useState<UnassignedPerson[]>([])
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [searching, setSearching] = useState(false)
   const [search, setSearch] = useState('')
 
-  useEffect(() => {
-    fetch('/api/unassigned')
-      .then(r => r.json())
-      .then(data => {
-        setPeople(data.people || [])
-        setStats(data.stats || null)
-        setLoading(false)
-      })
+  const fetchData = useCallback(async (query: string) => {
+    setSearching(true)
+    const params = query.trim().length >= 2 ? `?search=${encodeURIComponent(query.trim())}` : ''
+    const res = await fetch(`/api/unassigned${params}`)
+    const data = await res.json()
+    setPeople(data.people || [])
+    if (data.stats) setStats(data.stats)
+    setSearching(false)
+    setLoading(false)
   }, [])
 
-  const filtered = search
-    ? people.filter(p => p.name.toLowerCase().includes(search.toLowerCase()))
-    : people
+  // Initial load
+  useEffect(() => { fetchData('') }, [fetchData])
+
+  // Debounced search
+  useEffect(() => {
+    if (search.trim().length === 1) return // wait for 2+ chars
+    const t = setTimeout(() => fetchData(search), 300)
+    return () => clearTimeout(t)
+  }, [search, fetchData])
 
   if (loading) {
     return (
@@ -81,21 +89,25 @@ export default function UnassignedPage() {
         </div>
       )}
 
-      {/* Search */}
-      <div className="mb-4">
+      {/* Search — server-side */}
+      <div className="mb-4 relative">
         <input
           type="text"
-          placeholder="Search by name..."
+          placeholder="Search all unassigned people..."
           value={search}
           onChange={e => setSearch(e.target.value)}
           className="w-full max-w-sm px-4 py-2 rounded-lg border text-sm sans"
           style={{ background: 'var(--card)', borderColor: 'var(--border)', color: 'var(--foreground)' }}
         />
+        {searching && (
+          <span className="absolute left-[calc(min(24rem,100%)+0.75rem)] top-1/2 -translate-y-1/2 text-xs sans"
+            style={{ color: 'var(--foreground-muted)' }}>Searching...</span>
+        )}
       </div>
 
       {/* People list */}
       <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
-        {filtered.length === 0 ? (
+        {people.length === 0 ? (
           <div className="p-8 text-center sans text-sm" style={{ color: 'var(--foreground-muted)' }}>
             {search ? 'No matches found.' : 'Everyone has a shepherd assigned!'}
           </div>
@@ -108,7 +120,7 @@ export default function UnassignedPage() {
               <span className="w-24 text-right">PCO</span>
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
-              {filtered.map(p => (
+              {people.map(p => (
                 <div key={p.id} className="px-5 py-3 border-b flex items-center gap-4 hover:bg-gray-50/50 transition-colors"
                   style={{ borderColor: 'var(--border)' }}>
                   <div className="flex-1 flex items-center gap-3">
@@ -134,9 +146,9 @@ export default function UnassignedPage() {
               ))}
             </div>
             <div className="px-5 py-2 text-xs sans text-right" style={{ color: 'var(--foreground-muted)', background: 'var(--muted)' }}>
-              {filtered.length === people.length
-                ? `${people.length} unassigned`
-                : `${filtered.length} of ${people.length} shown`}
+              {search
+                ? `${people.length} results${people.length === 200 ? ' (showing first 200)' : ''}`
+                : `${people.length} unassigned${people.length === 200 ? ' (showing first 200 — search to find more)' : ''}`}
             </div>
           </>
         )}
