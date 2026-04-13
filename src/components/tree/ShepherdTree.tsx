@@ -11,11 +11,14 @@ interface TreeNode {
   flockCount: number
   lastCheckin: string | null
   isCurrentUser: boolean
+  isStaff?: boolean
   contextLabel: string | null
   warning: string | null
   groupTypeId?: string | null
   serviceTypeId?: string | null
 }
+
+interface OversightEntry { contextType: string; contextId: string; typeName: string }
 
 interface LayoutNode extends TreeNode {
   x: number
@@ -179,6 +182,11 @@ export default function ShepherdTree() {
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
   const [groupTypes, setGroupTypes] = useState<GroupTypeOption[]>([])
   const [serviceTypes, setServiceTypes] = useState<ServiceTypeOption[]>([])
+  const [oversightMap, setOversightMap] = useState<Record<string, OversightEntry[]>>({})
+
+  // Edit roles modal
+  const [editRolesFor, setEditRolesFor] = useState<{ personId: string; personName: string; isStaff: boolean } | null>(null)
+  const [savingRoles, setSavingRoles] = useState(false)
 
   // Search-to-navigate
   const [treeSearch, setTreeSearch] = useState('')
@@ -330,6 +338,7 @@ export default function ShepherdTree() {
 
     setAllNodes(data.nodes || [])
     setCoLeaderLinks(data.coLeaderLinks || [])
+    setOversightMap(data.oversightMap || {})
     setCurrentUserRole(data.currentUserRole || null)
     setGroupTypes(data.groupTypes || [])
     setServiceTypes(data.serviceTypes || [])
@@ -431,6 +440,45 @@ export default function ShepherdTree() {
       fetchTree()
     } finally {
       setBulkAssigning(false)
+    }
+  }
+
+  /** Toggle a single oversight assignment on or off */
+  const toggleOversight = async (personId: string, contextType: string, contextId: string, enabled: boolean) => {
+    setSavingRoles(true)
+    try {
+      await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'toggle_oversight', shepherd_id: personId, context_type: contextType, context_id: contextId, enabled }),
+      })
+      // Also ensure is_leader is set if enabling any oversight
+      if (enabled) {
+        await fetch(`/api/people/${personId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_leader: true }),
+        })
+      }
+      await fetchTree()
+    } finally {
+      setSavingRoles(false)
+    }
+  }
+
+  /** Toggle staff tag */
+  const toggleStaff = async (personId: string, isStaff: boolean) => {
+    setSavingRoles(true)
+    try {
+      await fetch(`/api/people/${personId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_staff: isStaff }),
+      })
+      if (editRolesFor) setEditRolesFor({ ...editRolesFor, isStaff })
+      await fetchTree()
+    } finally {
+      setSavingRoles(false)
     }
   }
 
@@ -755,6 +803,12 @@ export default function ShepherdTree() {
                     fill={color} style={{ clipPath: 'inset(0 0 0 0 round 10px 0 0 10px)' }} />
 
                   {isShepherd && !node.warning && <circle cx={NODE_W - 10} cy={10} r={4} fill={health} />}
+                  {node.isStaff && (
+                    <g transform={`translate(${NODE_W - 44}, ${NODE_H - 16})`}>
+                      <rect x={0} y={0} width={36} height={14} rx={3} fill="#3b6ea5" opacity="0.85" />
+                      <text x={18} y={10} textAnchor="middle" fontSize={8} fontWeight="700" fontFamily="system-ui" fill="white">STAFF</text>
+                    </g>
+                  )}
                   {node.warning && (
                     <g transform={`translate(${NODE_W - 16}, 4)`}>
                       <polygon points="6,0 12,11 0,11" fill="#c17f3e" />
@@ -999,11 +1053,15 @@ export default function ShepherdTree() {
                   className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              <div className="flex items-center gap-2 mb-3">
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
                 <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
                   style={{ background: detailColor + '15', color: detailColor }}>
                   {isShepherd ? 'Shepherd' : 'Member'}
                 </span>
+                {selected.isStaff && (
+                  <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
+                    style={{ background: '#3b6ea520', color: '#3b6ea5' }}>Staff</span>
+                )}
                 {selected.warning && (
                   <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
                     style={{ background: '#fef3cd', color: '#856404' }}>{selected.warning}</span>
@@ -1036,6 +1094,14 @@ export default function ShepherdTree() {
                   style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
                   Assign Shepherd Above
                 </button>
+                {['super_admin', 'staff'].includes(currentUserRole || '') && (
+                  <button
+                    onClick={() => setEditRolesFor({ personId: realId(selected), personName: selected.name, isStaff: !!selected.isStaff })}
+                    className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
+                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                    Edit Roles & Oversight
+                  </button>
+                )}
                 {isShepherd && (
                   <a href={`/checkins?shepherd=${realId(selected)}`}
                     className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
@@ -1309,6 +1375,90 @@ export default function ShepherdTree() {
             </div>
           </div>
         )}
+
+        {/* ══════════════════════════════════════════════════════
+            MODAL: Edit Roles & Oversight
+           ══════════════════════════════════════════════════════ */}
+        {editRolesFor && (() => {
+          const pid = editRolesFor.personId
+          const currentOversight = oversightMap[pid] || []
+          const trackedGTs = groupTypes.filter(gt => gt.is_tracked)
+          return (
+            <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
+              <div className="w-[480px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>
+                    Edit Roles — {editRolesFor.personName}
+                  </h3>
+                  <button onClick={() => setEditRolesFor(null)}
+                    className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+                </div>
+
+                {/* Staff toggle */}
+                <div className="flex items-center justify-between px-3 py-2.5 rounded-lg mb-4" style={{ background: 'var(--muted)' }}>
+                  <div>
+                    <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>Staff Member</div>
+                    <div className="text-[11px] sans" style={{ color: 'var(--muted-foreground)' }}>Tag this person as church staff</div>
+                  </div>
+                  <button
+                    onClick={() => toggleStaff(pid, !editRolesFor.isStaff)}
+                    disabled={savingRoles}
+                    className="relative w-10 h-6 rounded-full transition-colors"
+                    style={{ background: editRolesFor.isStaff ? 'var(--primary)' : 'var(--border)' }}>
+                    <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"
+                      style={{ transform: editRolesFor.isStaff ? 'translateX(16px)' : 'translateX(0)' }} />
+                  </button>
+                </div>
+
+                {/* Oversight: Group Types */}
+                <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>
+                  Oversees Group Types
+                </p>
+                <div className="space-y-1 mb-4">
+                  {trackedGTs.length === 0 && (
+                    <p className="text-xs sans py-2" style={{ color: 'var(--muted-foreground)' }}>No tracked group types</p>
+                  )}
+                  {trackedGTs.map(gt => {
+                    const active = currentOversight.some(o => o.contextType === 'group_type' && o.contextId === gt.id)
+                    return (
+                      <label key={gt.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="checkbox" checked={active} disabled={savingRoles}
+                          onChange={() => toggleOversight(pid, 'group_type', gt.id, !active)}
+                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                        <div>
+                          <span className="text-sm sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+
+                {/* Oversight: Service Types */}
+                <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>
+                  Oversees Service Types
+                </p>
+                <div className="space-y-1 mb-2">
+                  {serviceTypes.length === 0 && (
+                    <p className="text-xs sans py-2" style={{ color: 'var(--muted-foreground)' }}>No service types</p>
+                  )}
+                  {serviceTypes.map(st => {
+                    const active = currentOversight.some(o => o.contextType === 'service_type' && o.contextId === st.id)
+                    return (
+                      <label key={st.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="checkbox" checked={active} disabled={savingRoles}
+                          onChange={() => toggleOversight(pid, 'service_type', st.id, !active)}
+                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                        <div>
+                          <span className="text-sm sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )
+        })()}
       </div>
     </div>
   )

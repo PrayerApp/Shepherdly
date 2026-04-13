@@ -41,10 +41,11 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const admin = createAdminClient()
 
   // Update person fields
-  if (body.is_leader !== undefined || body.status !== undefined) {
+  if (body.is_leader !== undefined || body.status !== undefined || body.is_staff !== undefined) {
     const updates: Record<string, unknown> = {}
     if (body.is_leader !== undefined) updates.is_leader = body.is_leader
     if (body.status !== undefined) updates.status = body.status
+    if (body.is_staff !== undefined) updates.is_staff = body.is_staff
 
     const { error } = await admin.from('people').update(updates).eq('id', id)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })

@@ -66,11 +66,11 @@ export async function GET() {
 
   // Fetch only needed people in batches (avoids 33K+ row limit issue)
   const personIds = [...neededPersonIds]
-  const people: { id: string; name: string; pco_id: string | null; status: string; membership_type: string }[] = []
+  const people: { id: string; name: string; pco_id: string | null; status: string; membership_type: string; is_staff: boolean }[] = []
   for (let i = 0; i < personIds.length; i += 500) {
     const batch = personIds.slice(i, i + 500)
     const { data } = await admin.from('people')
-      .select('id, name, pco_id, status, membership_type')
+      .select('id, name, pco_id, status, membership_type, is_staff')
       .in('id', batch)
     if (data) people.push(...data)
   }
@@ -179,6 +179,7 @@ export async function GET() {
       flockCount,
       lastCheckin: lastCheckin[personId] || null,
       isCurrentUser: false,
+      isStaff: !!(person as any).is_staff,
       contextLabel,
       warning: null,
       groupTypeId: filterMeta?.groupTypeId || null,
@@ -262,10 +263,10 @@ export async function GET() {
       const shepherdContextId = `gt-shepherd-${gtId}`
       leaderSupervisorId = `${firstShepherd}::${shepherdContextId}`
 
-      // Ensure the type-shepherd node exists
+      // Ensure the type-shepherd node exists (no filterMeta — oversight nodes never get filtered)
       if (!nodes.find(n => n.id === leaderSupervisorId)) {
         const gtName = groupTypeName || 'Groups'
-        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${gtName}`, 0, { groupTypeId: gtId! }))
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${gtName}`, 0))
       }
     }
 
@@ -350,9 +351,10 @@ export async function GET() {
       const shepherdContextId = `st-shepherd-${stId}`
       leaderSupervisorId = `${firstShepherd}::${shepherdContextId}`
 
+      // No filterMeta — oversight nodes never get filtered
       if (!nodes.find(n => n.id === leaderSupervisorId)) {
         const stName = serviceTypeName || 'Teams'
-        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${stName}`, 0, { serviceTypeId: stId! }))
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${stName}`, 0))
       }
     }
 
@@ -423,6 +425,7 @@ export async function GET() {
 
   for (const lp of leaderPeople || []) {
     if (!peopleInTree.has(lp.id)) {
+      const person = personMap.get(lp.id)
       nodes.push({
         id: `${lp.id}::leader-root`,
         personId: lp.id,
@@ -433,8 +436,11 @@ export async function GET() {
         flockCount: 0,
         lastCheckin: lastCheckin[lp.id] || null,
         isCurrentUser: false,
+        isStaff: !!(person as any)?.is_staff,
         contextLabel: 'Leader',
         warning: null,
+        groupTypeId: null,
+        serviceTypeId: null,
       })
     }
   }
@@ -468,9 +474,24 @@ export async function GET() {
     })
   ).size
 
+  // Build oversight map: personId → array of oversight assignments
+  const oversightMap: Record<string, { contextType: string; contextId: string; typeName: string }[]> = {}
+  for (const r of typedRelationships) {
+    if (r.context_type === 'group_type' && r.context_id) {
+      if (!oversightMap[r.shepherd_id]) oversightMap[r.shepherd_id] = []
+      const gt = groupTypeMap.get(r.context_id)
+      oversightMap[r.shepherd_id].push({ contextType: 'group_type', contextId: r.context_id, typeName: gt?.name || 'Unknown' })
+    } else if (r.context_type === 'service_type' && r.context_id) {
+      if (!oversightMap[r.shepherd_id]) oversightMap[r.shepherd_id] = []
+      const st = serviceTypeMap.get(r.context_id)
+      oversightMap[r.shepherd_id].push({ contextType: 'service_type', contextId: r.context_id, typeName: st?.name || 'Unknown' })
+    }
+  }
+
   return NextResponse.json({
     nodes,
     coLeaderLinks,
+    oversightMap,
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
@@ -496,7 +517,42 @@ export async function POST(request: Request) {
 
   const body = await request.json()
   const { action, shepherd_id, group_type_id, service_type_id } = body
+  const admin = createAdminClient()
+  const churchId = currentUser.church_id
 
+  // ── Toggle a single oversight on or off ──
+  if (action === 'toggle_oversight') {
+    const { context_type, context_id, enabled } = body
+    if (!shepherd_id || !context_type || !context_id) {
+      return NextResponse.json({ error: 'shepherd_id, context_type, context_id required' }, { status: 400 })
+    }
+
+    if (enabled) {
+      const now = new Date().toISOString()
+      const { error: err } = await admin.from('shepherding_relationships')
+        .upsert({
+          shepherd_id,
+          person_id: shepherd_id,
+          type: 'shepherd',
+          context_type,
+          context_id,
+          is_active: true,
+          assigned_at: now,
+          church_id: churchId,
+        }, { onConflict: 'shepherd_id,person_id,context_type,context_id' })
+      if (err) return NextResponse.json({ error: err.message }, { status: 500 })
+    } else {
+      await admin.from('shepherding_relationships')
+        .delete()
+        .eq('shepherd_id', shepherd_id)
+        .eq('person_id', shepherd_id)
+        .eq('context_type', context_type)
+        .eq('context_id', context_id)
+    }
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Bulk assign shepherd over a group_type or service_type ──
   if (action !== 'bulk_assign' || !shepherd_id) {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
   }
@@ -505,11 +561,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Must provide group_type_id or service_type_id' }, { status: 400 })
   }
 
-  const admin = createAdminClient()
-  const churchId = currentUser.church_id
-
-  // Create a single oversight relationship — the tree derives the full hierarchy
-  // from group/team memberships. This row just says "this person oversees this type".
   const contextType = group_type_id ? 'group_type' : 'service_type'
   const contextId = group_type_id || service_type_id
   const now = new Date().toISOString()
@@ -517,7 +568,7 @@ export async function POST(request: Request) {
   const { error: upsertError } = await admin.from('shepherding_relationships')
     .upsert({
       shepherd_id,
-      person_id: shepherd_id,  // self-ref for oversight roles
+      person_id: shepherd_id,
       type: 'shepherd',
       context_type: contextType,
       context_id: contextId,
@@ -531,7 +582,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Failed to assign shepherd: ' + upsertError.message }, { status: 500 })
   }
 
-  // Also mark them as leader so they appear in the tree
   await admin.from('people')
     .update({ is_leader: true })
     .eq('id', shepherd_id)
