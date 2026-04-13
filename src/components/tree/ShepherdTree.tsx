@@ -101,6 +101,7 @@ function checkinLabel(node: TreeNode): string {
   return `${daysSince}d ago`
 }
 
+interface CoLeaderLink { from: string; to: string }
 interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
 interface ServiceTypeOption { id: string; name: string }
 
@@ -108,6 +109,7 @@ export default function ShepherdTree() {
   const svgRef = useRef<SVGSVGElement>(null)
   const [nodes, setNodes] = useState<LayoutNode[]>([])
   const [edges, setEdges] = useState<{ from: LayoutNode; to: LayoutNode }[]>([])
+  const [coLeaderLinks, setCoLeaderLinks] = useState<CoLeaderLink[]>([])
   const [selected, setSelected] = useState<LayoutNode | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -116,6 +118,11 @@ export default function ShepherdTree() {
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
   const [groupTypes, setGroupTypes] = useState<GroupTypeOption[]>([])
   const [serviceTypes, setServiceTypes] = useState<ServiceTypeOption[]>([])
+
+  // Search-to-navigate
+  const [treeSearch, setTreeSearch] = useState('')
+  const [treeSearchResults, setTreeSearchResults] = useState<LayoutNode[]>([])
+  const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null)
 
   // Modal state — one unified modal for all assignment operations
   type ModalMode =
@@ -144,6 +151,41 @@ export default function ShepherdTree() {
     setAddPlacement('root')
   }
 
+  // Search-to-navigate: filter nodes as user types
+  useEffect(() => {
+    if (treeSearch.length < 2) { setTreeSearchResults([]); return }
+    const q = treeSearch.toLowerCase()
+    const matches = nodes.filter(n => n.name.toLowerCase().includes(q))
+    // Deduplicate by personId — show first appearance
+    const seen = new Set<string>()
+    const deduped: LayoutNode[] = []
+    for (const m of matches) {
+      const pid = m.personId || m.id
+      if (!seen.has(pid)) { seen.add(pid); deduped.push(m) }
+    }
+    setTreeSearchResults(deduped.slice(0, 8))
+  }, [treeSearch, nodes])
+
+  const navigateToNode = useCallback((node: LayoutNode) => {
+    const svgEl = svgRef.current
+    if (!svgEl) return
+    const svgW = svgEl.clientWidth
+    const svgH = svgEl.clientHeight
+    // Center the view on the node
+    const targetScale = Math.max(transform.scale, 0.7) // at least 0.7 zoom
+    setTransform({
+      x: -node.x + (svgW / 2 - svgW / 2) / targetScale,
+      y: -node.y + svgH / (2 * targetScale),
+      scale: targetScale,
+    })
+    setHighlightedNodeId(node.id)
+    setSelected(node)
+    setTreeSearch('')
+    setTreeSearchResults([])
+    // Clear highlight after 3 seconds
+    setTimeout(() => setHighlightedNodeId(null), 3000)
+  }, [transform.scale])
+
   const fetchTree = useCallback(async () => {
     setLoading(true)
     const res = await fetch('/api/tree')
@@ -151,6 +193,7 @@ export default function ShepherdTree() {
     if (data.error) { setError(data.error); setLoading(false); return }
 
     setAllNodes(data.nodes || [])
+    setCoLeaderLinks(data.coLeaderLinks || [])
     setCurrentUserRole(data.currentUserRole || null)
     setGroupTypes(data.groupTypes || [])
     setServiceTypes(data.serviceTypes || [])
@@ -406,6 +449,32 @@ export default function ShepherdTree() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Search-to-navigate */}
+          <div className="relative">
+            <input type="text" placeholder="Find person…" value={treeSearch}
+              onChange={e => setTreeSearch(e.target.value)}
+              className="w-40 md:w-52 px-3 py-1.5 rounded-lg border text-xs sans"
+              style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
+            {treeSearchResults.length > 0 && (
+              <div className="absolute top-full left-0 mt-1 w-64 bg-white rounded-lg shadow-xl border z-50 max-h-64 overflow-y-auto"
+                style={{ borderColor: 'var(--border)' }}>
+                {treeSearchResults.map(n => (
+                  <button key={n.id} onClick={() => navigateToNode(n)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50 transition-colors">
+                    <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-medium sans shrink-0"
+                      style={{ background: n.role === 'shepherd' ? '#4a7c5918' : '#6b728018', color: n.role === 'shepherd' ? '#4a7c59' : '#6b7280' }}>
+                      {n.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{n.name}</div>
+                      <div className="text-[10px] sans truncate" style={{ color: 'var(--muted-foreground)' }}>{n.contextLabel || (n.role === 'shepherd' ? 'Shepherd' : 'Member')}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="hidden md:flex items-center gap-3 text-xs sans mr-2" style={{ color: 'var(--muted-foreground)' }}>
             <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#4a7c59' }} />Healthy</span>
             <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#c17f3e' }} />Attention</span>
@@ -460,6 +529,27 @@ export default function ShepherdTree() {
               )
             })}
 
+            {/* Co-leader horizontal connectors */}
+            {coLeaderLinks.map(link => {
+              const nodeMap = new Map(nodes.map(n => [n.id, n]))
+              const fromNode = nodeMap.get(link.from)
+              const toNode = nodeMap.get(link.to)
+              if (!fromNode || !toNode) return null
+              const y = fromNode.y + NODE_H / 2
+              const x1 = Math.min(fromNode.x, toNode.x) + NODE_W / 2
+              const x2 = Math.max(fromNode.x, toNode.x) - NODE_W / 2
+              return (
+                <g key={`co-${link.from}-${link.to}`}>
+                  <line x1={x1} y1={y} x2={x2} y2={y}
+                    stroke="#4a7c59" strokeWidth="2" strokeDasharray="6 3" />
+                  {/* Diamond midpoint indicator */}
+                  <polygon
+                    points={`${(x1 + x2) / 2},${y - 5} ${(x1 + x2) / 2 + 5},${y} ${(x1 + x2) / 2},${y + 5} ${(x1 + x2) / 2 - 5},${y}`}
+                    fill="#4a7c59" opacity="0.6" />
+                </g>
+              )
+            })}
+
             {/* Nodes */}
             {nodes.map(node => {
               const isShepherd = node.role === 'shepherd'
@@ -478,8 +568,14 @@ export default function ShepherdTree() {
                   )}
                   <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
                     fill={node.isCurrentUser ? color : 'white'}
-                    stroke={isSelected ? color : node.isCurrentUser ? color : 'var(--border)'}
-                    strokeWidth={isSelected ? 2.5 : 1} filter="url(#shadow)" />
+                    stroke={highlightedNodeId === node.id ? '#f59e0b' : isSelected ? color : node.isCurrentUser ? color : 'var(--border)'}
+                    strokeWidth={highlightedNodeId === node.id ? 3 : isSelected ? 2.5 : 1} filter="url(#shadow)" />
+                  {highlightedNodeId === node.id && (
+                    <rect x={-3} y={-3} width={NODE_W + 6} height={NODE_H + 6} rx={12}
+                      fill="none" stroke="#f59e0b" strokeWidth="2" opacity="0.5">
+                      <animate attributeName="opacity" values="0.5;0.1;0.5" dur="1.5s" repeatCount="indefinite" />
+                    </rect>
+                  )}
                   <rect x={0} y={0} width={4} height={NODE_H} rx={2}
                     fill={color} style={{ clipPath: 'inset(0 0 0 0 round 10px 0 0 10px)' }} />
 

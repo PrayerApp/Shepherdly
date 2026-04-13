@@ -161,6 +161,7 @@ export async function GET() {
   // Each node gets a compound ID: personId::contextId
 
   const nodes: any[] = []
+  const coLeaderLinks: { from: string; to: string }[] = []  // horizontal links between co-leaders
 
   const mkNode = (
     personId: string, contextId: string, role: 'shepherd' | 'member',
@@ -265,38 +266,44 @@ export async function GET() {
       }
     }
 
-    if (leaders.length > 0) {
-      for (const leader of leaders) {
-        // Skip if this leader IS the type shepherd (don't double up)
-        if (typeShepherdIds?.has(leader.personId)) {
-          // This leader IS the assigned shepherd — use their type-shepherd node as parent
-          // Members will point to the type-shepherd node instead
-          continue
-        }
+    // Co-leader logic: ALL members go under the FIRST leader.
+    // Additional co-leaders are siblings at the same level, linked via coLeaderLinks.
+    // All co-leaders show the full flock count (shared responsibility).
+    const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
+
+    if (effectiveLeaders.length > 0) {
+      const primaryLeader = effectiveLeaders[0]
+      const primaryNodeId = `${primaryLeader.personId}::${contextId}`
+
+      // Create leader nodes — all at same level
+      for (const leader of effectiveLeaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
-          Math.ceil(nonLeaders.length / leaders.length),
+          nonLeaders.length,  // full count — co-leaders share the flock
         ))
       }
 
-      // Distribute members under leaders (or under type-shepherd if leader was skipped)
-      const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
-      for (let i = 0; i < nonLeaders.length; i++) {
-        const m = nonLeaders[i]
-        let parentNodeId: string
-        if (effectiveLeaders.length > 0) {
-          const assignedLeader = effectiveLeaders[i % effectiveLeaders.length]
-          parentNodeId = `${assignedLeader.personId}::${contextId}`
-        } else {
-          // All leaders were type-shepherds, put members directly under type-shepherd
-          parentNodeId = leaderSupervisorId!
-        }
-        nodes.push(mkNode(m.personId, contextId, 'member', parentNodeId, contextLabel, 0))
+      // Link co-leaders with horizontal connectors
+      for (let i = 1; i < effectiveLeaders.length; i++) {
+        coLeaderLinks.push({
+          from: primaryNodeId,
+          to: `${effectiveLeaders[i].personId}::${contextId}`,
+        })
+      }
+
+      // ALL members go under the first leader
+      for (const m of nonLeaders) {
+        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0))
+      }
+    } else if (leaderSupervisorId) {
+      // All leaders were type-shepherds, put members directly under type-shepherd
+      for (const m of nonLeaders) {
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
       }
     } else {
-      // No leaders — put under type shepherd if available, otherwise root
+      // No leaders at all — members appear as roots
       for (const m of validMembers) {
-        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0))
       }
     }
   }
@@ -344,29 +351,36 @@ export async function GET() {
       }
     }
 
-    if (leaders.length > 0) {
-      for (const leader of leaders) {
-        if (typeShepherdIds?.has(leader.personId)) continue
+    const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
+
+    if (effectiveLeaders.length > 0) {
+      const primaryLeader = effectiveLeaders[0]
+      const primaryNodeId = `${primaryLeader.personId}::${contextId}`
+
+      for (const leader of effectiveLeaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
-          Math.ceil(nonLeaders.length / leaders.length),
+          nonLeaders.length,
         ))
       }
-      const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
-      for (let i = 0; i < nonLeaders.length; i++) {
-        const m = nonLeaders[i]
-        let parentNodeId: string
-        if (effectiveLeaders.length > 0) {
-          const assignedLeader = effectiveLeaders[i % effectiveLeaders.length]
-          parentNodeId = `${assignedLeader.personId}::${contextId}`
-        } else {
-          parentNodeId = leaderSupervisorId!
-        }
-        nodes.push(mkNode(m.personId, contextId, 'member', parentNodeId, contextLabel, 0))
+
+      for (let i = 1; i < effectiveLeaders.length; i++) {
+        coLeaderLinks.push({
+          from: primaryNodeId,
+          to: `${effectiveLeaders[i].personId}::${contextId}`,
+        })
+      }
+
+      for (const m of nonLeaders) {
+        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0))
+      }
+    } else if (leaderSupervisorId) {
+      for (const m of nonLeaders) {
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
       }
     } else {
       for (const m of validMembers) {
-        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0))
       }
     }
   }
@@ -451,6 +465,7 @@ export async function GET() {
 
   return NextResponse.json({
     nodes,
+    coLeaderLinks,
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
