@@ -38,7 +38,7 @@ interface CoLeaderLink { from: string; to: string }
 interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
 interface ServiceTypeOption { id: string; name: string }
 interface LayerOption { id: string; name: string; category: string; rank: number }
-interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null }
+interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null; sortOrder: number }
 interface OversightEntry { contextType: string; contextId: string; typeName: string }
 
 function buildTree(nodes: TreeNode[]): LayoutNode[] {
@@ -1321,64 +1321,121 @@ export default function ShepherdTree() {
         {/* ══════════════════════════════════════════════════════
             MODAL: Manage Layers
            ══════════════════════════════════════════════════════ */}
-        {layerModalOpen && (
+        {layerModalOpen && (() => {
+          // Group assigned people by layer, sorted by sortOrder
+          const peopleByLayer = new Map<string, { id: string; name: string; sortOrder: number }[]>()
+          for (const [pid, info] of Object.entries(assignmentsMap)) {
+            if (!peopleByLayer.has(info.layerId)) peopleByLayer.set(info.layerId, [])
+            const person = allNodes.find(n => n.personId === pid)
+            peopleByLayer.get(info.layerId)!.push({ id: pid, name: person?.name || 'Unknown', sortOrder: info.sortOrder })
+          }
+          for (const list of peopleByLayer.values()) list.sort((a, b) => a.sortOrder - b.sortOrder)
+
+          const movePerson = async (layerId: string, personId: string, direction: -1 | 1) => {
+            const list = peopleByLayer.get(layerId)
+            if (!list) return
+            const idx = list.findIndex(p => p.id === personId)
+            if (idx < 0) return
+            const newIdx = idx + direction
+            if (newIdx < 0 || newIdx >= list.length) return
+            // Swap
+            const temp = list[idx]
+            list[idx] = list[newIdx]
+            list[newIdx] = temp
+            // Build new order
+            const order = list.map((p, i) => ({ person_id: p.id, sort_order: i * 10 }))
+            await fetch('/api/tree', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'reorder', order }),
+            })
+            await fetchTree()
+          }
+
+          const renderLayerPeople = (layerId: string, color: string) => {
+            const list = peopleByLayer.get(layerId) || []
+            if (list.length === 0) return (
+              <p className="text-[10px] sans px-3 py-1" style={{ color: 'var(--muted-foreground)' }}>No people assigned</p>
+            )
+            return list.map((p, i) => (
+              <div key={p.id} className="flex items-center gap-2 px-3 py-1.5 rounded" style={{ background: 'white' }}>
+                <span className="text-xs sans flex-1 truncate" style={{ color: 'var(--foreground)' }}>{p.name}</span>
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button onClick={() => movePerson(layerId, p.id, -1)} disabled={i === 0}
+                    className="w-5 h-5 flex items-center justify-center rounded hover:bg-gray-100 disabled:opacity-20 text-xs"
+                    style={{ color }} title="Move up">▲</button>
+                  <button onClick={() => movePerson(layerId, p.id, 1)} disabled={i === list.length - 1}
+                    className="w-5 h-5 flex items-center justify-center rounded hover:bg-gray-100 disabled:opacity-20 text-xs"
+                    style={{ color }} title="Move down">▼</button>
+                </div>
+              </div>
+            ))
+          }
+
+          return (
           <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[400px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
+            <div className="w-[420px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(85vh, 700px)', display: 'flex', flexDirection: 'column' }}>
               <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-                <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers</h3>
+                <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers & Order</h3>
                 <button onClick={() => setLayerModalOpen(false)}
                   className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
               <div className="overflow-y-auto px-5 py-4 flex-1">
                 <p className="text-xs sans mb-4" style={{ color: 'var(--muted-foreground)' }}>
-                  The tree hierarchy: Elder → Staff → Volunteer → People (PCO data). Add sub-layers within Staff or Volunteer.
+                  Elder → Staff → Volunteer → People (PCO). Reorder people within each layer using arrows. Add sub-layers to Staff or Volunteer.
                 </p>
 
                 {/* Elder layers */}
-                <div className="mb-3">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#7c3aed' }}>Elder</div>
-                  {elderLayers.map(l => (
-                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: '#7c3aed10' }}>
-                      <span className="text-xs sans font-medium" style={{ color: '#7c3aed' }}>{l.name}</span>
-                      <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>Fixed</span>
+                {elderLayers.map(l => (
+                  <div key={l.id} className="mb-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: '#7c3aed' }}>{l.name}</div>
+                      <span className="text-[9px] sans" style={{ color: 'var(--muted-foreground)' }}>Fixed</span>
                     </div>
-                  ))}
-                </div>
+                    <div className="rounded-lg p-1" style={{ background: '#7c3aed08' }}>
+                      {renderLayerPeople(l.id, '#7c3aed')}
+                    </div>
+                  </div>
+                ))}
 
                 {/* Staff layers */}
-                <div className="mb-3">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#3b6ea5' }}>Staff</div>
-                  {staffLayers.map(l => (
-                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg mb-1" style={{ background: '#3b6ea510' }}>
-                      <span className="text-xs sans font-medium" style={{ color: '#3b6ea5' }}>{l.name}</span>
+                {staffLayers.map(l => (
+                  <div key={l.id} className="mb-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: '#3b6ea5' }}>{l.name}</div>
                       {staffLayers.length > 1 && (
                         <button onClick={() => removeLayer(l.id)}
-                          className="text-[10px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
+                          className="text-[9px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
                       )}
                     </div>
-                  ))}
-                </div>
+                    <div className="rounded-lg p-1" style={{ background: '#3b6ea508' }}>
+                      {renderLayerPeople(l.id, '#3b6ea5')}
+                    </div>
+                  </div>
+                ))}
 
                 {/* Volunteer layers */}
-                <div className="mb-4">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#4a7c59' }}>Volunteer</div>
-                  {volunteerLayers.map(l => (
-                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg mb-1" style={{ background: '#4a7c5910' }}>
-                      <span className="text-xs sans font-medium" style={{ color: '#4a7c59' }}>{l.name}</span>
+                {volunteerLayers.map(l => (
+                  <div key={l.id} className="mb-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: '#4a7c59' }}>{l.name}</div>
                       {volunteerLayers.length > 1 && (
                         <button onClick={() => removeLayer(l.id)}
-                          className="text-[10px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
+                          className="text-[9px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
                       )}
                     </div>
-                  ))}
-                </div>
+                    <div className="rounded-lg p-1" style={{ background: '#4a7c5908' }}>
+                      {renderLayerPeople(l.id, '#4a7c59')}
+                    </div>
+                  </div>
+                ))}
 
-                {/* Divider: People (PCO) — not a real layer, just info */}
+                {/* People (PCO) info */}
                 <div className="mb-4">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#6b7280' }}>People (Automatic)</div>
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#6b7280' }}>People (Automatic)</div>
                   <div className="px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
-                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>PCO group/team leaders and members appear automatically below the volunteer layer.</span>
+                    <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>PCO group/team leaders and members appear automatically below the volunteer layer.</span>
                   </div>
                 </div>
 
@@ -1406,7 +1463,8 @@ export default function ShepherdTree() {
               </div>
             </div>
           </div>
-        )}
+          )
+        })()}
       </div>
     </div>
   )

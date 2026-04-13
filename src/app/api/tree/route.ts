@@ -31,8 +31,8 @@ export async function GET() {
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
-    admin.from('tree_assignments').select('id, person_id, layer_id, supervisor_person_id, church_id')
-      .eq('church_id', churchId!),
+    admin.from('tree_assignments').select('id, person_id, layer_id, supervisor_person_id, sort_order, church_id')
+      .eq('church_id', churchId!).order('sort_order'),
     admin.from('tree_oversight').select('id, person_id, context_type, context_id')
       .eq('church_id', churchId!),
     admin.from('group_memberships').select('person_id, group_id, role, is_active')
@@ -150,7 +150,7 @@ export async function GET() {
   const coLeaderLinks: { from: string; to: string }[] = []
 
   // Index assignments by person
-  type AssignmentRow = { id: string; person_id: string; layer_id: string; supervisor_person_id: string | null; church_id: string }
+  type AssignmentRow = { id: string; person_id: string; layer_id: string; supervisor_person_id: string | null; sort_order: number; church_id: string }
   const assignmentByPerson = new Map<string, AssignmentRow>()
   for (const a of (assignments || []) as AssignmentRow[]) assignmentByPerson.set(a.person_id, a)
 
@@ -214,6 +214,7 @@ export async function GET() {
       warning: null,
       layerId: a.layer_id,
       layerCategory: layer.category,
+      sortOrder: a.sort_order || 0,
       groupTypeId: null,
       serviceTypeId: null,
     })
@@ -412,7 +413,7 @@ export async function GET() {
   ).size
 
   // ── Build assignment + oversight maps for frontend ───────────
-  const assignmentMap: Record<string, { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null }> = {}
+  const assignmentMap: Record<string, { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null; sortOrder: number }> = {}
   for (const a of assignments || []) {
     const layer = layerMap.get(a.layer_id)
     assignmentMap[a.person_id] = {
@@ -420,6 +421,7 @@ export async function GET() {
       layerName: layer?.name || 'Unknown',
       layerCategory: layer?.category || 'volunteer',
       supervisorPersonId: a.supervisor_person_id,
+      sortOrder: a.sort_order || 0,
     }
   }
 
@@ -641,6 +643,19 @@ export async function POST(request: Request) {
     const { layer_id, name } = body
     if (!layer_id || !name) return NextResponse.json({ error: 'layer_id and name required' }, { status: 400 })
     await admin.from('tree_layers').update({ name }).eq('id', layer_id)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Reorder people within a layer ────────────────────────────
+  if (body.action === 'reorder') {
+    const { order } = body // array of { person_id, sort_order }
+    if (!Array.isArray(order)) return NextResponse.json({ error: 'order array required' }, { status: 400 })
+    for (const item of order) {
+      await admin.from('tree_assignments')
+        .update({ sort_order: item.sort_order })
+        .eq('person_id', item.person_id)
+        .eq('church_id', churchId!)
+    }
     return NextResponse.json({ success: true })
   }
 
