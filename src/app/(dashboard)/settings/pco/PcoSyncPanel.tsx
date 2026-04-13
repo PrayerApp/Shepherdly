@@ -299,6 +299,27 @@ export default function PcoSyncPanel() {
     }, 0)
   }
 
+  // ── Debug handler ──────────────────────────────────────────
+  const [debugData, setDebugData] = useState<any>(null)
+  const [debugLoading, setDebugLoading] = useState(false)
+
+  const handleDebug = async () => {
+    setDebugLoading(true)
+    setDebugData(null)
+    try {
+      const res = await fetch('/api/pco', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sync_debug' }),
+      })
+      const data = await res.json()
+      setDebugData(data)
+    } catch (e: any) {
+      setDebugData({ error: e.message })
+    }
+    setDebugLoading(false)
+  }
+
   /* ── Render ────────────────────────────────────────────────── */
   return (
     <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
@@ -310,10 +331,17 @@ export default function PcoSyncPanel() {
           </p>
         </div>
         {!syncing ? (
-          <button onClick={handleSync} className="btn-primary text-sm sans flex items-center gap-2">
-            <SyncIcon />
-            Sync Now
-          </button>
+          <div className="flex gap-2">
+            <button onClick={handleDebug} disabled={debugLoading}
+              className="text-xs sans px-3 py-2 rounded-lg border"
+              style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)' }}>
+              {debugLoading ? 'Testing…' : 'Debug'}
+            </button>
+            <button onClick={handleSync} className="btn-primary text-sm sans flex items-center gap-2">
+              <SyncIcon />
+              Sync Now
+            </button>
+          </div>
         ) : (
           <button onClick={handleCancel}
             className="text-sm sans px-4 py-2 rounded-lg border font-medium"
@@ -322,6 +350,79 @@ export default function PcoSyncPanel() {
           </button>
         )}
       </div>
+
+      {/* ── Debug output ──────────────────────────────────────── */}
+      {debugData && (
+        <div className="rounded-lg border mb-4 overflow-hidden" style={{ borderColor: 'var(--border)' }}>
+          <div className="flex items-center justify-between px-4 py-2" style={{ background: 'var(--muted)' }}>
+            <span className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>
+              Sync Debug — {debugData.churchId ? `Church: ${debugData.churchId.slice(0, 8)}…` : ''}
+            </span>
+            <button onClick={() => setDebugData(null)} className="text-xs" style={{ color: 'var(--foreground-muted)' }}>×</button>
+          </div>
+          {debugData.error ? (
+            <div className="px-4 py-3 text-xs sans" style={{ color: 'var(--danger)' }}>{debugData.error}</div>
+          ) : debugData.debug && (
+            <div className="divide-y" style={{ borderColor: 'var(--border)' }}>
+              {Object.values(debugData.debug).map((r: any) => (
+                <div key={r.key} className="px-4 py-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`w-2 h-2 rounded-full ${
+                      r.status === 'ok' ? 'bg-green-500' :
+                      r.status === 'error' ? 'bg-red-500' :
+                      r.status === 'has_parents' ? 'bg-blue-500' :
+                      'bg-yellow-500'
+                    }`} />
+                    <span className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>
+                      {r.label}
+                    </span>
+                    <span className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
+                      {r.isNested ? '(nested)' : '(flat)'} · DB: {r.dbCount}
+                      {r.pcoTotalCount != null && ` · PCO: ${r.pcoTotalCount}`}
+                      {r.parentCount != null && ` · Parents: ${r.parentCount}`}
+                    </span>
+                  </div>
+                  {r.pcoError && (
+                    <div className="text-xs sans ml-4 mb-1" style={{ color: 'var(--danger)' }}>
+                      Error: {r.pcoError}
+                    </div>
+                  )}
+                  {r.mapError && (
+                    <div className="text-xs sans ml-4 mb-1" style={{ color: '#c17f3e' }}>
+                      Map error: {r.mapError}
+                    </div>
+                  )}
+                  {r.sampleType && (
+                    <div className="text-xs sans ml-4" style={{ color: 'var(--foreground-muted)' }}>
+                      Type: {r.sampleType} · ID: {r.sampleId}
+                    </div>
+                  )}
+                  {r.sampleAttributes && (
+                    <div className="text-xs sans ml-4" style={{ color: 'var(--foreground-muted)' }}>
+                      Attrs: {r.sampleAttributes.join(', ')}
+                    </div>
+                  )}
+                  {r.sampleRelationships && (
+                    <div className="text-xs sans ml-4" style={{ color: 'var(--foreground-muted)' }}>
+                      Rels: {r.sampleRelationships.join(', ')}
+                    </div>
+                  )}
+                  {r.mappedRow && (
+                    <details className="ml-4 mt-1">
+                      <summary className="text-xs sans cursor-pointer" style={{ color: 'var(--foreground-muted)' }}>
+                        Mapped row →
+                      </summary>
+                      <pre className="text-xs mt-1 p-2 rounded overflow-x-auto" style={{ background: 'var(--muted)', color: 'var(--foreground)' }}>
+                        {JSON.stringify(r.mappedRow, null, 2)}
+                      </pre>
+                    </details>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Active sync progress ──────────────────────────────── */}
       {progress && progress.phase !== 'done' && progress.phase !== 'error' && (

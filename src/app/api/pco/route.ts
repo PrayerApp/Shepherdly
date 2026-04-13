@@ -392,6 +392,84 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true })
     }
 
+    // ── Debug: test each resource endpoint ────────────────────
+    if (body.action === 'sync_debug') {
+      if (!credentials?.app_id || !credentials?.app_secret) {
+        return NextResponse.json({ error: 'No PCO credentials' }, { status: 400 })
+      }
+      const client = createPcoClient(credentials.app_id, credentials.app_secret)
+      const results: Record<string, any> = {}
+
+      for (const res of SYNC_RESOURCES) {
+        const entry: any = {
+          key: res.key,
+          label: res.label,
+          table: res.table,
+          endpoint: res.endpoint || res.nestedEndpointTemplate || '(none)',
+          isNested: !!res.isNested,
+          syncStrategy: res.syncStrategy,
+        }
+
+        // Check DB count
+        try {
+          const { count } = await admin
+            .from(res.table)
+            .select('*', { count: 'exact', head: true })
+            .eq('church_id', churchId!)
+          entry.dbCount = count || 0
+        } catch (e: any) {
+          entry.dbCount = 0
+          entry.dbError = e.message
+        }
+
+        if (res.isNested) {
+          // For nested, check if parent table has data
+          try {
+            const { count } = await admin
+              .from(res.nestedParentTable!)
+              .select('*', { count: 'exact', head: true })
+              .eq('church_id', churchId!)
+            entry.parentCount = count || 0
+          } catch (e: any) {
+            entry.parentCount = 0
+            entry.parentError = e.message
+          }
+          entry.status = entry.parentCount > 0 ? 'has_parents' : 'no_parents'
+        } else {
+          // For flat, try a PCO API call with per_page=1
+          try {
+            const pcoResult = await client.get(res.endpoint, { per_page: '1' })
+            entry.pcoTotalCount = pcoResult.meta?.total_count ?? null
+            entry.pcoDataLength = (pcoResult.data || []).length
+            entry.pcoHasNext = !!pcoResult.links?.next
+            // Include a sample of the first item (truncated)
+            if (pcoResult.data?.[0]) {
+              const item = pcoResult.data[0]
+              entry.sampleId = item.id
+              entry.sampleType = item.type
+              entry.sampleAttributes = Object.keys(item.attributes || {})
+              entry.sampleRelationships = Object.keys(item.relationships || {})
+              // Try mapping it
+              try {
+                const mapped = res.mapRow(item, pcoResult.included || [])
+                entry.mappedRow = mapped
+              } catch (mapErr: any) {
+                entry.mapError = mapErr.message
+              }
+            }
+            entry.status = 'ok'
+          } catch (e: any) {
+            entry.status = 'error'
+            entry.pcoError = e.message
+          }
+        }
+
+        results[res.key] = entry
+      }
+
+      return NextResponse.json({ debug: results, churchId })
+    }
+
     // ── Purge all PCO data ─────────────────────────────────────
     if (body.action === 'purge') {
       for (const table of PCO_TABLES) {
