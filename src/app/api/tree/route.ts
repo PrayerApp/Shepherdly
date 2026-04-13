@@ -161,8 +161,16 @@ export async function GET() {
     oversightByPerson.get(o.person_id)!.push({ context_type: o.context_type, context_id: o.context_id })
   }
 
-  // Set of person IDs with manual assignments (they won't get separate PCO leader nodes)
+  // Set of person IDs with manual assignments (they won't get ANY separate PCO nodes)
   const assignedPersonIds = new Set((assignments || []).map(a => a.person_id))
+
+  // Set of person IDs on staff or elder layers (for isStaff badge — NOT all assigned people)
+  const staffPersonIds = new Set(
+    (assignments || []).filter(a => {
+      const layer = layerMap.get(a.layer_id)
+      return layer && ['elder', 'staff'].includes(layer.category)
+    }).map(a => a.person_id)
+  )
 
   // ── Step 1: Build manual hierarchy nodes ─────────────────────
   // These are Elders, Staff, and optionally Volunteer coaches
@@ -247,6 +255,8 @@ export async function GET() {
   }
 
   // ── Step 3: Build PCO group nodes ────────────────────────────
+  // People with manual assignments (Elder/Staff/Volunteer) appear ONLY at their
+  // assigned layer — they never get duplicate PCO nodes.
   for (const [groupId, members] of groupMembers) {
     const group = groupMap.get(groupId)
     if (!group) continue
@@ -261,56 +271,35 @@ export async function GET() {
     const gtId = getGroupTypeId(group)
     const gMeta = { groupTypeId: gtId || undefined }
 
-    // Find the overseer for this group type (if any)
     const overseerId = gtId ? groupTypeOverseers.get(gtId) : null
     const overseerAssignment = overseerId ? assignmentByPerson.get(overseerId) : null
     const overseerNodeId = overseerAssignment ? `${overseerId}::layer-${overseerAssignment.layer_id}` : null
 
-    const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
-    const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
+    // Filter out manually-assigned people — they already have their layer node
+    const pcoLeaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role) && !assignedPersonIds.has(m.personId))
+    const pcoMembers = validMembers.filter(m => !/leader|co.?leader/i.test(m.role) && !assignedPersonIds.has(m.personId))
 
-    // For leaders who have a manual assignment, their PCO members go under their manual node
-    // For leaders WITHOUT a manual assignment, create PCO leader nodes under the overseer
-    if (leaders.length > 0) {
-      const primaryLeader = leaders[0]
-      const primaryIsAssigned = assignedPersonIds.has(primaryLeader.personId)
-      let primaryNodeId: string
+    if (pcoLeaders.length > 0) {
+      const primaryLeader = pcoLeaders[0]
+      const primaryNodeId = `${primaryLeader.personId}::${contextId}`
+      nodes.push(mkPcoNode(primaryLeader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, pcoMembers.length, gMeta))
 
-      if (primaryIsAssigned) {
-        // Use their manual node as parent for members
-        const a = assignmentByPerson.get(primaryLeader.personId)!
-        primaryNodeId = `${primaryLeader.personId}::layer-${a.layer_id}`
-      } else {
-        // Create PCO leader node
-        primaryNodeId = `${primaryLeader.personId}::${contextId}`
-        nodes.push(mkPcoNode(primaryLeader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, nonLeaders.length, gMeta))
+      for (let i = 1; i < pcoLeaders.length; i++) {
+        nodes.push(mkPcoNode(pcoLeaders[i].personId, contextId, 'shepherd', overseerNodeId, contextLabel, pcoMembers.length, gMeta))
+        coLeaderLinks.push({ from: primaryNodeId, to: `${pcoLeaders[i].personId}::${contextId}` })
       }
 
-      // Additional co-leaders
-      for (let i = 1; i < leaders.length; i++) {
-        const leader = leaders[i]
-        if (assignedPersonIds.has(leader.personId)) {
-          // Already in tree as manual node — link as co-leader
-          const a = assignmentByPerson.get(leader.personId)!
-          coLeaderLinks.push({ from: primaryNodeId, to: `${leader.personId}::layer-${a.layer_id}` })
-        } else {
-          nodes.push(mkPcoNode(leader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, nonLeaders.length, gMeta))
-          coLeaderLinks.push({ from: primaryNodeId, to: `${leader.personId}::${contextId}` })
-        }
-      }
-
-      // Members under primary leader
-      for (const m of nonLeaders) {
+      for (const m of pcoMembers) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0, gMeta))
       }
     } else if (overseerNodeId) {
-      // No leaders — members go directly under overseer
-      for (const m of nonLeaders) {
+      for (const m of pcoMembers) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', overseerNodeId, contextLabel, 0, gMeta))
       }
     } else {
-      // No leaders, no overseer — root-level orphans
-      for (const m of validMembers) {
+      // No PCO leaders, no overseer — orphan members
+      const allPco = validMembers.filter(m => !assignedPersonIds.has(m.personId))
+      for (const m of allPco) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', null, contextLabel, 0, gMeta))
       }
     }
@@ -335,42 +324,30 @@ export async function GET() {
     const overseerAssignment = overseerId ? assignmentByPerson.get(overseerId) : null
     const overseerNodeId = overseerAssignment ? `${overseerId}::layer-${overseerAssignment.layer_id}` : null
 
-    const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
-    const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
+    // Filter out manually-assigned people — they already have their layer node
+    const pcoLeaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role) && !assignedPersonIds.has(m.personId))
+    const pcoMembers = validMembers.filter(m => !/leader|co.?leader/i.test(m.role) && !assignedPersonIds.has(m.personId))
 
-    if (leaders.length > 0) {
-      const primaryLeader = leaders[0]
-      const primaryIsAssigned = assignedPersonIds.has(primaryLeader.personId)
-      let primaryNodeId: string
+    if (pcoLeaders.length > 0) {
+      const primaryLeader = pcoLeaders[0]
+      const primaryNodeId = `${primaryLeader.personId}::${contextId}`
+      nodes.push(mkPcoNode(primaryLeader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, pcoMembers.length, sMeta))
 
-      if (primaryIsAssigned) {
-        const a = assignmentByPerson.get(primaryLeader.personId)!
-        primaryNodeId = `${primaryLeader.personId}::layer-${a.layer_id}`
-      } else {
-        primaryNodeId = `${primaryLeader.personId}::${contextId}`
-        nodes.push(mkPcoNode(primaryLeader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, nonLeaders.length, sMeta))
+      for (let i = 1; i < pcoLeaders.length; i++) {
+        nodes.push(mkPcoNode(pcoLeaders[i].personId, contextId, 'shepherd', overseerNodeId, contextLabel, pcoMembers.length, sMeta))
+        coLeaderLinks.push({ from: primaryNodeId, to: `${pcoLeaders[i].personId}::${contextId}` })
       }
 
-      for (let i = 1; i < leaders.length; i++) {
-        const leader = leaders[i]
-        if (assignedPersonIds.has(leader.personId)) {
-          const a = assignmentByPerson.get(leader.personId)!
-          coLeaderLinks.push({ from: primaryNodeId, to: `${leader.personId}::layer-${a.layer_id}` })
-        } else {
-          nodes.push(mkPcoNode(leader.personId, contextId, 'shepherd', overseerNodeId, contextLabel, nonLeaders.length, sMeta))
-          coLeaderLinks.push({ from: primaryNodeId, to: `${leader.personId}::${contextId}` })
-        }
-      }
-
-      for (const m of nonLeaders) {
+      for (const m of pcoMembers) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0, sMeta))
       }
     } else if (overseerNodeId) {
-      for (const m of nonLeaders) {
+      for (const m of pcoMembers) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', overseerNodeId, contextLabel, 0, sMeta))
       }
     } else {
-      for (const m of validMembers) {
+      const allPco = validMembers.filter(m => !assignedPersonIds.has(m.personId))
+      for (const m of allPco) {
         nodes.push(mkPcoNode(m.personId, contextId, 'member', null, contextLabel, 0, sMeta))
       }
     }
@@ -467,7 +444,7 @@ export async function GET() {
       flockCount,
       lastCheckin: lastCheckin[personId] || null,
       isCurrentUser: false,
-      isStaff: !!person?.is_staff || assignedPersonIds.has(personId),
+      isStaff: !!person?.is_staff || staffPersonIds.has(personId),
       isLeadPastor: !!person?.is_lead_pastor,
       contextLabel,
       warning: null,
