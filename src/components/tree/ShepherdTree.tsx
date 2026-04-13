@@ -1293,6 +1293,10 @@ export default function ShepherdTree() {
                         layerId: node.layerId || '',
                       })
                       setPanelCollapsed(false)
+                      // Switch bottom panel to matching tab
+                      if (node.layerCategory === 'staff') setUnassignedTab('staff')
+                      else if (node.layerCategory === 'volunteer') setUnassignedTab('volunteers')
+                      else setUnassignedTab('types')
                     }}>
                     <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
                       fill="white" stroke={phColor} strokeWidth="1.5"
@@ -1922,7 +1926,7 @@ export default function ShepherdTree() {
               {!panelCollapsed && (
                 <div className="flex items-center gap-1">
                   {[
-                    { key: 'staff' as const, label: 'Shepherd Team', count: unconnectedStaff.length, color: '#3b6ea5' },
+                    { key: 'staff' as const, label: 'Staff', count: unconnectedStaff.length, color: '#3b6ea5' },
                     { key: 'types' as const, label: 'Group / Service Types', count: unlinkedGroupTypes.length + unlinkedServiceTypes.length, color: '#4a7c59' },
                     { key: 'volunteers' as const, label: 'Volunteers', count: unconnectedVolunteers.length, color: '#6b7280' },
                   ].map(tab => (
@@ -1955,7 +1959,7 @@ export default function ShepherdTree() {
               {unassignedTab === 'staff' && (
                 <div className="flex gap-3" style={{ minWidth: 'min-content' }}>
                   {unconnectedStaff.length === 0 && (
-                    <span className="text-xs sans whitespace-nowrap" style={{ color: 'var(--muted-foreground)' }}>All shepherd team members are connected.</span>
+                    <span className="text-xs sans whitespace-nowrap" style={{ color: 'var(--muted-foreground)' }}>All staff are assigned to a layer.</span>
                   )}
                   {unconnectedStaff.map(s => {
                     const initials = s.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()

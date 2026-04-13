@@ -360,19 +360,20 @@ export async function GET() {
       }
     }
 
-    // Mark unconnected staff/volunteers (no supervisor, not LP, not elder)
-    if (!supervisorId && !person.is_lead_pastor && layer.category !== 'elder') {
+    // Auto-assign: Shepherd Team (staff layer) members → under Lead Pastor
+    if (!supervisorId && !person.is_lead_pastor && layer.category === 'staff') {
+      if (leadPastorNodeId) {
+        supervisorId = leadPastorNodeId
+      }
+    }
+
+    // Volunteers without supervisor → pool under first staff (or staff placeholder)
+    if (!supervisorId && !person.is_lead_pastor && layer.category === 'volunteer') {
       isUnconnected = true
-      if (layer.category === 'staff') {
-        // Staff without supervisor: SKIP from tree entirely — bottom panel only
-        continue
-      } else if (layer.category === 'volunteer') {
-        // Volunteers without supervisor → pool under first staff (or staff placeholder)
-        if (firstStaffAssignment) {
-          supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
-        } else {
-          supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
-        }
+      if (firstStaffAssignment) {
+        supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
+      } else {
+        supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
       }
     }
 
@@ -455,8 +456,10 @@ export async function GET() {
     ))
   }
 
-  // Per-person placeholders: Lead Pastor + all Staff get ONE "+" child
-  // pointing to the next layer rank below their own layer
+  // Per-person placeholders:
+  //  - Lead Pastor → placeholder for staff (Shepherd Team) layer
+  //  - Staff members → placeholder for first volunteer layer below them
+  //  - Non-LP elders → NO placeholder (they don't manage direct reports)
   for (const a of (assignments || []) as AssignmentRow[]) {
     const layer = layerMap.get(a.layer_id)
     if (!layer) continue
@@ -464,21 +467,36 @@ export async function GET() {
     const isLP = !!person?.is_lead_pastor
     const isStaff = layer.category === 'staff'
 
-    if (isLP || isStaff) {
+    if (isLP) {
+      // Lead Pastor → placeholder for Shepherd Team (staff layer)
       const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
-      // Find the next layer below this person's layer rank
-      const childLayer = sortedLayers.find(l => l.rank > layer.rank)
-      if (childLayer) {
+      const staffLayer = sortedLayers.find(l => l.category === 'staff')
+      if (staffLayer) {
         nodes.push(mkPlaceholder(
           `placeholder-under-${a.person_id}`,
-          childLayer.name,
-          childLayer.id,
-          childLayer.category,
+          staffLayer.name,
+          staffLayer.id,
+          staffLayer.category,
+          parentNodeId,
+          a.person_id,
+        ))
+      }
+    } else if (isStaff) {
+      // Staff → placeholder for first volunteer layer
+      const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
+      const volLayer = sortedLayers.find(l => l.category === 'volunteer')
+      if (volLayer) {
+        nodes.push(mkPlaceholder(
+          `placeholder-under-${a.person_id}`,
+          volLayer.name,
+          volLayer.id,
+          volLayer.category,
           parentNodeId,
           a.person_id,
         ))
       }
     }
+    // Non-LP elders: no placeholder
   }
 
   // ── Bridge nodes: align same-layer people to same visual depth ──
@@ -732,15 +750,14 @@ export async function GET() {
   }
 
   // ── Unassigned data for bottom panel ─────────────────────────
-  // Staff with no supervisor (unconnected) — these were skipped from tree nodes above
+  // Staff people (is_staff=true in PCO) who are NOT on any tree layer
+  // These are staff members who haven't been placed on the Shepherd Team or any other layer
   const unconnectedStaff: { id: string; name: string; layerName: string }[] = []
-  for (const a of (assignments || []) as AssignmentRow[]) {
-    const layer = layerMap.get(a.layer_id)
-    if (!layer || layer.category !== 'staff') continue
-    if (a.supervisor_person_id) continue // has a supervisor → connected
-    const person = personMap.get(a.person_id)
-    if (!person || person.is_lead_pastor) continue
-    unconnectedStaff.push({ id: a.person_id, name: person.name || 'Unknown', layerName: layer.name })
+  for (const p of people) {
+    if (!p.is_staff) continue
+    if (p.is_lead_pastor) continue
+    if (assignedPersonIds.has(p.id)) continue // already on a tree layer
+    unconnectedStaff.push({ id: p.id, name: p.name || 'Unknown', layerName: 'Staff' })
   }
   // Group types with no overseer
   const unlinkedGroupTypes = (groupTypes || [])
