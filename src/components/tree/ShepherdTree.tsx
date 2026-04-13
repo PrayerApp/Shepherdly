@@ -20,6 +20,7 @@ interface TreeNode {
   layerId?: string | null
   layerCategory?: string | null
   isPlaceholder?: boolean
+  isBridge?: boolean
   placeholderSupervisorPersonId?: string | null
 }
 
@@ -40,7 +41,7 @@ interface CoLeaderLink { from: string; to: string }
 interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
 interface ServiceTypeOption { id: string; name: string }
 interface LayerOption { id: string; name: string; category: string; rank: number }
-interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null; sortOrder: number }
+interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; layerRank: number; supervisorPersonId: string | null; sortOrder: number }
 interface OversightEntry { contextType: string; contextId: string; typeName: string }
 interface PcoListOption { id: string; name: string; totalPeople: number }
 interface ListLayerLink { listId: string; layerId: string }
@@ -749,7 +750,7 @@ export default function ShepherdTree() {
   useEffect(() => {
     if (treeSearch.length < 2) { setTreeSearchResults([]); return }
     const q = treeSearch.toLowerCase()
-    const matches = nodes.filter(n => !n.isPlaceholder && n.name.toLowerCase().includes(q))
+    const matches = nodes.filter(n => !n.isPlaceholder && !n.isBridge && n.name.toLowerCase().includes(q))
     const seen = new Set<string>()
     const deduped: LayoutNode[] = []
     for (const m of matches) {
@@ -1095,15 +1096,10 @@ export default function ShepherdTree() {
       <div>
         <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No tree data yet</p>
         <p className="sans text-sm mb-4" style={{ color: 'var(--muted-foreground)' }}>
-          Start by assigning people to the tree hierarchy. Sync groups and teams from PCO for automatic data below the volunteer layer.
+          Sync PCO Reference Lists and connect them to layers to populate the tree. Then use the placeholders to assign who each person oversees.
         </p>
         {isAdmin && (
           <div className="flex items-center justify-center gap-2">
-            <button onClick={() => openAssignModal()}
-              className="text-xs sans px-4 py-2 rounded-lg font-medium"
-              style={{ background: 'var(--primary)', color: 'white' }}>
-              + Assign Person
-            </button>
             <button onClick={() => setLayerModalOpen(true)}
               className="text-xs sans px-4 py-2 rounded-lg font-medium border"
               style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
@@ -1193,11 +1189,6 @@ export default function ShepherdTree() {
                 </svg>
                 Layers
               </button>
-              <button onClick={() => openAssignModal()}
-                className="text-xs sans px-3 py-1.5 rounded-lg font-medium"
-                style={{ background: 'var(--primary)', color: 'white' }}>
-                + Assign Person
-              </button>
             </>
           )}
         </div>
@@ -1256,6 +1247,19 @@ export default function ShepherdTree() {
 
             {/* Nodes */}
             {nodes.map(node => {
+              // ── Bridge node (invisible spacer for depth alignment) ──
+              if (node.isBridge) {
+                return (
+                  <g key={node.id} transform={`translate(${node.x - NODE_W / 2}, ${node.y})`}>
+                    <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
+                      fill="transparent" stroke="var(--border)" strokeWidth="1"
+                      strokeDasharray="4 4" opacity="0.3" />
+                    <line x1={NODE_W / 2} y1={0} x2={NODE_W / 2} y2={NODE_H}
+                      stroke="var(--border)" strokeWidth="1" strokeDasharray="3 3" opacity="0.3" />
+                  </g>
+                )
+              }
+
               // ── Placeholder node ──
               if (node.isPlaceholder) {
                 const phColor = node.layerCategory === 'elder' ? '#7c3aed' : node.layerCategory === 'staff' ? '#3b6ea5' : '#4a7c59'
@@ -1619,7 +1623,7 @@ export default function ShepherdTree() {
                     onClick={() => openAssignModal(pid, selected.name)}
                     className="w-full text-center text-xs sans py-2 rounded-lg font-medium"
                     style={{ background: 'var(--primary)', color: 'white' }}>
-                    {assignment ? 'Edit Assignment' : 'Assign to Layer'}
+                    Edit Assignment
                   </button>
                 )}
                 {isShepherd && (
@@ -1651,7 +1655,7 @@ export default function ShepherdTree() {
               {/* Header */}
               <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
                 <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>
-                  {assignModal.isEdit ? `Edit — ${assignModal.personName}` : 'Assign Person to Tree'}
+                  {assignModal.isEdit ? `Edit — ${assignModal.personName}` : 'Add Person'}
                 </h3>
                 <button onClick={() => setAssignModal(null)}
                   className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
@@ -1704,38 +1708,20 @@ export default function ShepherdTree() {
                   </div>
                 )}
 
-                {/* Layer selection */}
-                <div>
-                  <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Layer</label>
-                  <div className="space-y-1">
-                    {elderLayers.map(l => (
-                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-purple-400 bg-purple-50' : 'border-transparent hover:bg-gray-50'}`}>
-                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
-                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
-                          style={{ accentColor: '#7c3aed' }} />
-                        <span className="text-xs sans font-medium" style={{ color: '#7c3aed' }}>{l.name}</span>
-                      </label>
-                    ))}
-                    {staffLayers.map(l => (
-                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-blue-400 bg-blue-50' : 'border-transparent hover:bg-gray-50'}`}>
-                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
-                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
-                          style={{ accentColor: '#3b6ea5' }} />
-                        <span className="text-xs sans font-medium" style={{ color: '#3b6ea5' }}>{l.name}</span>
-                      </label>
-                    ))}
-                    {volunteerLayers.map(l => (
-                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-green-400 bg-green-50' : 'border-transparent hover:bg-gray-50'}`}>
-                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
-                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
-                          style={{ accentColor: '#4a7c59' }} />
-                        <span className="text-xs sans font-medium" style={{ color: '#4a7c59' }}>{l.name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
+                {/* Layer indicator (read-only) */}
+                {assignModal.layerId && (() => {
+                  const layer = layers.find(l => l.id === assignModal.layerId)
+                  if (!layer) return null
+                  const lColor = layer.category === 'elder' ? '#7c3aed' : layer.category === 'staff' ? '#3b6ea5' : '#4a7c59'
+                  return (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg" style={{ background: lColor + '10' }}>
+                      <span className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: 'var(--muted-foreground)' }}>Layer:</span>
+                      <span className="text-xs sans font-medium" style={{ color: lColor }}>{layer.name}</span>
+                    </div>
+                  )
+                })()}
 
-                {/* Reports to (supervisor) */}
+                {/* Reports to (supervisor) — only people from layers above */}
                 <div>
                   <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Reports To</label>
                   <select
@@ -1744,11 +1730,14 @@ export default function ShepherdTree() {
                     className="w-full px-3 py-2 rounded-lg border text-sm sans"
                     style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
                     <option value="">None (top of tree)</option>
-                    {assignedPeople
-                      .filter(p => p.id !== assignModal.personId)
-                      .map(p => (
-                        <option key={p.id} value={p.id}>{p.name} ({p.layerName})</option>
-                      ))}
+                    {(() => {
+                      const currentLayerRank = layers.find(l => l.id === assignModal.layerId)?.rank ?? 999
+                      return assignedPeople
+                        .filter(p => p.id !== assignModal.personId && p.layerRank < currentLayerRank)
+                        .map(p => (
+                          <option key={p.id} value={p.id}>{p.name} ({p.layerName})</option>
+                        ))
+                    })()}
                   </select>
                 </div>
 

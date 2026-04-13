@@ -481,6 +481,64 @@ export async function GET() {
     }
   }
 
+  // ── Bridge nodes: align same-layer people to same visual depth ──
+  // When a person's supervisor is >1 layer step above, insert invisible
+  // bridge nodes at intermediate layers so all same-rank people align.
+  const layerRankList = sortedLayers.map(l => l.rank)
+  const layerRankMap = new Map((layers || []).map(l => [l.id, l.rank]))
+  const nodeLayerRank = new Map<string, number>() // nodeId → rank
+  for (const n of nodes) {
+    if (n.layerId) {
+      const lr = layerRankMap.get(n.layerId)
+      if (lr !== undefined) nodeLayerRank.set(n.id, lr as number)
+    }
+  }
+
+  const bridgeNodes: typeof nodes = []
+  for (const n of nodes) {
+    if (n.isPlaceholder || !n.supervisorId || !n.layerId) continue
+    const myRank = nodeLayerRank.get(n.id)
+    const supRank = nodeLayerRank.get(n.supervisorId)
+    if (myRank === undefined || supRank === undefined) continue
+
+    // Find intermediate layer ranks between supervisor and this node
+    const intermediateRanks = layerRankList.filter(r => r > supRank && r < myRank)
+    if (intermediateRanks.length === 0) continue
+
+    // Insert chain of bridge nodes: supervisor → bridge1 → bridge2 → ... → this node
+    let prevNodeId = n.supervisorId
+    for (const rank of intermediateRanks) {
+      const bridgeLayer = sortedLayers.find(l => l.rank === rank)
+      if (!bridgeLayer) continue
+      const bridgeId = `bridge-${n.personId}-${bridgeLayer.id}`
+      bridgeNodes.push({
+        id: bridgeId,
+        personId: undefined,
+        name: '',
+        role: 'shepherd' as const,
+        supervisorId: prevNodeId,
+        flockCount: 0,
+        lastCheckin: null,
+        isCurrentUser: false,
+        isStaff: false,
+        isLeadPastor: false,
+        contextLabel: null,
+        warning: null,
+        layerId: bridgeLayer.id,
+        layerCategory: bridgeLayer.category,
+        sortOrder: 0,
+        groupTypeId: null,
+        serviceTypeId: null,
+        isPlaceholder: false,
+        isBridge: true,
+      })
+      prevNodeId = bridgeId
+    }
+    // Re-parent the actual node to the last bridge
+    n.supervisorId = prevNodeId
+  }
+  nodes.push(...bridgeNodes)
+
   // ── Step 2: Index PCO memberships ────────────────────────────
   const groupMembers = new Map<string, { personId: string; role: string }[]>()
   for (const gm of groupMemberships || []) {
@@ -643,13 +701,14 @@ export async function GET() {
   ).size
 
   // ── Build assignment + oversight maps for frontend ───────────
-  const assignmentMap: Record<string, { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null; sortOrder: number }> = {}
+  const assignmentMap: Record<string, { layerId: string; layerName: string; layerCategory: string; layerRank: number; supervisorPersonId: string | null; sortOrder: number }> = {}
   for (const a of assignments || []) {
     const layer = layerMap.get(a.layer_id)
     assignmentMap[a.person_id] = {
       layerId: a.layer_id,
       layerName: layer?.name || 'Unknown',
       layerCategory: layer?.category || 'volunteer',
+      layerRank: layer?.rank ?? 999,
       supervisorPersonId: a.supervisor_person_id,
       sortOrder: a.sort_order || 0,
     }
