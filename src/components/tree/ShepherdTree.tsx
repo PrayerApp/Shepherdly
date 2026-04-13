@@ -311,9 +311,11 @@ export default function ShepherdTree() {
   }, [transform.scale])
 
   // Apply filter to raw nodes before building tree
+  // Staff members always remain visible even when their group/team type is filtered out
   const filteredNodes = useMemo(() => {
     if (hiddenGroupTypes.size === 0 && hiddenServiceTypes.size === 0) return allNodes
     return allNodes.filter(n => {
+      if (n.isStaff) return true // staff always visible
       if (n.groupTypeId && hiddenGroupTypes.has(n.groupTypeId)) return false
       if (n.serviceTypeId && hiddenServiceTypes.has(n.serviceTypeId)) return false
       return true
