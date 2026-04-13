@@ -138,6 +138,8 @@ export async function GET() {
     { data: pcoLists },
     { data: pcoListPeople },
     { data: pcoListLayerLinks },
+    { data: departments },
+    { data: departmentMembers },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -164,6 +166,10 @@ export async function GET() {
     admin.from('pco_list_people').select('list_id, person_id')
       .eq('church_id', churchId!),
     admin.from('pco_list_layer_links').select('id, list_id, layer_id')
+      .eq('church_id', churchId!),
+    admin.from('departments').select('id, name, color')
+      .eq('church_id', churchId!).order('name'),
+    admin.from('department_members').select('department_id, person_id')
       .eq('church_id', churchId!),
   ])
 
@@ -197,6 +203,8 @@ export async function GET() {
       serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
       pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
       listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
+      departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
+      departmentMembers: departmentMembers || [],
       stats: { shepherdCount: 0, groupCount: 0, teamCount: 0 },
     })
   }
@@ -209,6 +217,7 @@ export async function GET() {
   const serviceTypeMap = new Map((serviceTypes || []).map(st => [st.id, st]))
   const serviceTypePcoMap = new Map((serviceTypes || []).map(st => [st.pco_id, st]))
   const layerMap = new Map((layers || []).map(l => [l.id, l]))
+  const departmentMap = new Map((departments || []).map((d: any) => [d.id, d]))
 
   // Build tracked-type sets for filtering
   const trackedGroupTypeIds = new Set((groupTypes || []).filter(gt => gt.is_tracked).map(gt => gt.id))
@@ -314,6 +323,9 @@ export async function GET() {
       if (o.context_type === 'group_type') {
         const gt = groupTypeMap.get(o.context_id)
         return gt?.name || null
+      } else if (o.context_type === 'department') {
+        const dept = departmentMap.get(o.context_id)
+        return dept?.name || null
       } else {
         const st = serviceTypeMap.get(o.context_id)
         return st?.name || null
@@ -635,6 +647,9 @@ export async function GET() {
     if (o.context_type === 'group_type') {
       const gt = groupTypeMap.get(o.context_id)
       if (gt) typeName = gt.name
+    } else if (o.context_type === 'department') {
+      const dept = departmentMap.get(o.context_id)
+      if (dept) typeName = dept.name
     } else {
       const st = serviceTypeMap.get(o.context_id)
       if (st) typeName = st.name
@@ -653,6 +668,8 @@ export async function GET() {
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
     pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
     listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
+    departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
+    departmentMembers: departmentMembers || [],
     stats: { shepherdCount, groupCount, teamCount },
   })
 
@@ -896,6 +913,53 @@ export async function POST(request: Request) {
     await admin.from('pco_list_layer_links').delete().eq('list_id', list_id).eq('church_id', churchId!)
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Add department ───────────────────────────────────────────
+  if (body.action === 'add_department') {
+    const { name } = body
+    if (!name?.trim()) return NextResponse.json({ error: 'name required' }, { status: 400 })
+    const { data: dept, error } = await admin.from('departments')
+      .insert({ name: name.trim(), church_id: churchId })
+      .select().single()
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ department: dept })
+  }
+
+  // ── Remove department ──────────────────────────────────────
+  if (body.action === 'remove_department') {
+    const { department_id } = body
+    if (!department_id) return NextResponse.json({ error: 'department_id required' }, { status: 400 })
+    // Also remove oversight entries referencing this department
+    await admin.from('tree_oversight').delete()
+      .eq('context_type', 'department').eq('context_id', department_id)
+    await admin.from('departments').delete().eq('id', department_id).eq('church_id', churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Rename department ──────────────────────────────────────
+  if (body.action === 'rename_department') {
+    const { department_id, name } = body
+    if (!department_id || !name?.trim()) return NextResponse.json({ error: 'department_id and name required' }, { status: 400 })
+    await admin.from('departments').update({ name: name.trim() }).eq('id', department_id).eq('church_id', churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Set department members (replace all for a department) ───
+  if (body.action === 'set_department_members') {
+    const { department_id, person_ids } = body
+    if (!department_id) return NextResponse.json({ error: 'department_id required' }, { status: 400 })
+    // Delete existing members
+    await admin.from('department_members').delete().eq('department_id', department_id)
+    // Insert new members
+    if (Array.isArray(person_ids) && person_ids.length > 0) {
+      const rows = person_ids.map((pid: string) => ({
+        department_id, person_id: pid, church_id: churchId,
+      }))
+      const { error } = await admin.from('department_members').insert(rows)
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    }
     return NextResponse.json({ success: true })
   }
 
