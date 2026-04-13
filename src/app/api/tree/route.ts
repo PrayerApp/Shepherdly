@@ -360,9 +360,10 @@ export async function GET() {
       }
     }
 
-    // Auto-assign: Shepherd Team (staff layer) members → under Lead Pastor
+    // Auto-assign: only the TOP staff layer (Shepherd Team) → under Lead Pastor
+    // Secondary staff layers must be manually assigned under top-layer staff
     if (!supervisorId && !person.is_lead_pastor && layer.category === 'staff') {
-      if (leadPastorNodeId) {
+      if (firstStaffLayer && layer.id === firstStaffLayer.id && leadPastorNodeId) {
         supervisorId = leadPastorNodeId
       }
     }
