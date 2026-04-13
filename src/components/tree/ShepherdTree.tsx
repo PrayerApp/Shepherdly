@@ -290,13 +290,8 @@ export default function ShepherdTree() {
         }),
       })
       const data = await res.json()
-      // Also mark them as leader so they appear
-      await fetch(`/api/people/${shepherdId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_leader: true }),
-      })
-      alert(`Assigned ${data.count || 0} members from "${typeName}" under this person`)
+      if (data.error) { alert('Error: ' + data.error); return }
+      alert(`Assigned as shepherd over "${typeName}"`)
       closeModal()
       fetchTree()
     } finally {

@@ -269,14 +269,14 @@ export async function GET() {
     // Co-leader logic: ALL members go under the FIRST leader.
     // Additional co-leaders are siblings at the same level, linked via coLeaderLinks.
     // All co-leaders show the full flock count (shared responsibility).
-    const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
+    // NOTE: Type-shepherds who also lead a group appear in BOTH spots (overseer + leader).
 
-    if (effectiveLeaders.length > 0) {
-      const primaryLeader = effectiveLeaders[0]
+    if (leaders.length > 0) {
+      const primaryLeader = leaders[0]
       const primaryNodeId = `${primaryLeader.personId}::${contextId}`
 
       // Create leader nodes — all at same level
-      for (const leader of effectiveLeaders) {
+      for (const leader of leaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
           nonLeaders.length,  // full count — co-leaders share the flock
@@ -284,10 +284,10 @@ export async function GET() {
       }
 
       // Link co-leaders with horizontal connectors
-      for (let i = 1; i < effectiveLeaders.length; i++) {
+      for (let i = 1; i < leaders.length; i++) {
         coLeaderLinks.push({
           from: primaryNodeId,
-          to: `${effectiveLeaders[i].personId}::${contextId}`,
+          to: `${leaders[i].personId}::${contextId}`,
         })
       }
 
@@ -296,7 +296,7 @@ export async function GET() {
         nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0))
       }
     } else if (leaderSupervisorId) {
-      // All leaders were type-shepherds, put members directly under type-shepherd
+      // No leaders at all, put members directly under type-shepherd
       for (const m of nonLeaders) {
         nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
       }
@@ -351,23 +351,21 @@ export async function GET() {
       }
     }
 
-    const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
-
-    if (effectiveLeaders.length > 0) {
-      const primaryLeader = effectiveLeaders[0]
+    if (leaders.length > 0) {
+      const primaryLeader = leaders[0]
       const primaryNodeId = `${primaryLeader.personId}::${contextId}`
 
-      for (const leader of effectiveLeaders) {
+      for (const leader of leaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
           nonLeaders.length,
         ))
       }
 
-      for (let i = 1; i < effectiveLeaders.length; i++) {
+      for (let i = 1; i < leaders.length; i++) {
         coLeaderLinks.push({
           from: primaryNodeId,
-          to: `${effectiveLeaders[i].personId}::${contextId}`,
+          to: `${leaders[i].personId}::${contextId}`,
         })
       }
 
@@ -496,78 +494,43 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
   }
 
-  const admin = createAdminClient()
-  const churchId = currentUser.church_id
-
-  let memberPersonIds: string[] = []
-
-  if (group_type_id) {
-    const { data: groups } = await admin.from('groups')
-      .select('id')
-      .eq('church_id', churchId!)
-      .eq('group_type_id', group_type_id)
-      .eq('is_active', true)
-
-    if (groups && groups.length > 0) {
-      const groupIds = groups.map(g => g.id)
-      const { data: memberships } = await admin.from('group_memberships')
-        .select('person_id')
-        .eq('church_id', churchId!)
-        .eq('is_active', true)
-        .in('group_id', groupIds)
-        .range(0, 49999)
-
-      memberPersonIds = [...new Set((memberships || []).map(m => m.person_id))]
-    }
-  } else if (service_type_id) {
-    const { data: teams } = await admin.from('teams')
-      .select('id')
-      .eq('church_id', churchId!)
-      .eq('service_type_id', service_type_id)
-      .eq('is_active', true)
-
-    if (teams && teams.length > 0) {
-      const teamIds = teams.map(t => t.id)
-      const { data: memberships } = await admin.from('team_memberships')
-        .select('person_id')
-        .eq('church_id', churchId!)
-        .eq('is_active', true)
-        .in('team_id', teamIds)
-        .range(0, 49999)
-
-      memberPersonIds = [...new Set((memberships || []).map(m => m.person_id))]
-    }
-  } else {
+  if (!group_type_id && !service_type_id) {
     return NextResponse.json({ error: 'Must provide group_type_id or service_type_id' }, { status: 400 })
   }
 
-  memberPersonIds = memberPersonIds.filter(id => id !== shepherd_id)
+  const admin = createAdminClient()
+  const churchId = currentUser.church_id
 
-  if (memberPersonIds.length === 0) {
-    return NextResponse.json({ message: 'No members found', count: 0 })
-  }
-
+  // Create a single oversight relationship — the tree derives the full hierarchy
+  // from group/team memberships. This row just says "this person oversees this type".
   const contextType = group_type_id ? 'group_type' : 'service_type'
   const contextId = group_type_id || service_type_id
+  const now = new Date().toISOString()
 
-  const rows = memberPersonIds.map(personId => ({
-    shepherd_id,
-    person_id: personId,
-    context_type: contextType,
-    context_id: contextId,
-    is_active: true,
-    church_id: churchId,
-  }))
+  const { error: upsertError } = await admin.from('shepherding_relationships')
+    .upsert({
+      shepherd_id,
+      person_id: shepherd_id,  // self-ref for oversight roles
+      type: 'shepherd',
+      context_type: contextType,
+      context_id: contextId,
+      is_active: true,
+      assigned_at: now,
+      church_id: churchId,
+    }, { onConflict: 'shepherd_id,person_id,context_type,context_id' })
 
-  let created = 0
-  for (let i = 0; i < rows.length; i += 500) {
-    const batch = rows.slice(i, i + 500)
-    const { error } = await admin.from('shepherding_relationships')
-      .upsert(batch, { onConflict: 'shepherd_id,person_id,context_type,context_id' })
-    if (!error) created += batch.length
+  if (upsertError) {
+    console.error('Failed to create oversight relationship:', upsertError)
+    return NextResponse.json({ error: 'Failed to assign shepherd: ' + upsertError.message }, { status: 500 })
   }
 
-  return NextResponse.json({ message: `Assigned ${created} members`, count: created })
+  // Also mark them as leader so they appear in the tree
+  await admin.from('people')
+    .update({ is_leader: true })
+    .eq('id', shepherd_id)
+
+  const typeName = group_type_id ? 'group type' : 'service type'
+  return NextResponse.json({ message: `Assigned as shepherd over ${typeName}`, count: 1 })
 }
 
 // DELETE: Remove a person from the tree (manual assignments only — not PCO data)
