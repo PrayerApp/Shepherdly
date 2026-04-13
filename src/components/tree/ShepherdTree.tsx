@@ -280,7 +280,7 @@ function DepartmentModal({
 
   return (
     <div className="absolute inset-0 flex items-center justify-center z-[60]" style={{ background: 'rgba(0,0,0,0.35)' }}>
-      <div className="w-[520px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(85vh, 700px)', display: 'flex', flexDirection: 'column' }}>
+      <div className="bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', width: 'min(90vw, 800px)', height: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
         <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
           <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Staff Teams / Departments</h3>
           <button onClick={onClose} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
@@ -288,53 +288,60 @@ function DepartmentModal({
 
         <div className="flex flex-1 overflow-hidden">
           {/* Left: department list */}
-          <div className="w-[160px] border-r overflow-y-auto py-2 shrink-0" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
-            {departments.map(dept => (
-              <button key={dept.id} onClick={() => selectDept(dept.id)}
-                className="w-full text-left px-3 py-2 text-xs sans flex items-center justify-between group"
-                style={{ background: selectedDeptId === dept.id ? 'white' : 'transparent', color: selectedDeptId === dept.id ? '#c17f3e' : 'var(--foreground)', fontWeight: selectedDeptId === dept.id ? 600 : 400 }}>
-                <span className="truncate">{dept.name}</span>
-                <span className="text-[9px] opacity-0 group-hover:opacity-100" style={{ color: 'var(--danger, #9b3a3a)' }}
-                  onClick={(e) => { e.stopPropagation(); removeDept(dept.id) }}>×</span>
-              </button>
-            ))}
-            <div className="px-2 pt-2">
-              <div className="flex gap-1">
-                <input type="text" placeholder="New…" value={newDeptName}
+          <div className="w-[220px] border-r overflow-y-auto py-3 shrink-0" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
+            <div className="px-3 mb-2">
+              <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: 'var(--muted-foreground)' }}>Teams</div>
+            </div>
+            {departments.map(dept => {
+              const memberCount = departmentMembers.filter(dm => dm.department_id === dept.id).length
+              return (
+                <button key={dept.id} onClick={() => selectDept(dept.id)}
+                  className="w-full text-left px-4 py-2.5 text-sm sans flex items-center justify-between group"
+                  style={{ background: selectedDeptId === dept.id ? 'white' : 'transparent', color: selectedDeptId === dept.id ? '#c17f3e' : 'var(--foreground)', fontWeight: selectedDeptId === dept.id ? 600 : 400 }}>
+                  <span className="truncate flex-1">{dept.name}</span>
+                  <span className="text-[10px] sans mr-1" style={{ color: 'var(--muted-foreground)' }}>{memberCount}</span>
+                  <span className="text-xs opacity-0 group-hover:opacity-100" style={{ color: 'var(--danger, #9b3a3a)' }}
+                    onClick={(e) => { e.stopPropagation(); removeDept(dept.id) }}>×</span>
+                </button>
+              )
+            })}
+            <div className="px-3 pt-3">
+              <div className="flex gap-1.5">
+                <input type="text" placeholder="New team name…" value={newDeptName}
                   onChange={e => setNewDeptName(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && createDept()}
-                  className="flex-1 px-2 py-1 rounded border text-[11px] sans min-w-0"
+                  className="flex-1 px-2.5 py-1.5 rounded-lg border text-xs sans min-w-0"
                   style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
                 <button onClick={createDept} disabled={saving || !newDeptName.trim()}
-                  className="px-2 py-1 rounded text-[11px] sans font-medium disabled:opacity-50 shrink-0"
+                  className="px-2.5 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50 shrink-0"
                   style={{ background: '#c17f3e', color: 'white' }}>+</button>
               </div>
             </div>
           </div>
 
           {/* Right: tag-picker for members */}
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto p-6">
             {!selectedDeptId ? (
-              <div className="text-xs sans text-center py-8" style={{ color: 'var(--muted-foreground)' }}>
-                Select or create a department to manage members.
+              <div className="text-sm sans text-center py-16" style={{ color: 'var(--muted-foreground)' }}>
+                Select or create a team to manage members.
               </div>
             ) : (
               <>
-                <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: '#c17f3e' }}>
+                <div className="text-[11px] sans font-semibold uppercase tracking-wide mb-3" style={{ color: '#c17f3e' }}>
                   Members — {departments.find(d => d.id === selectedDeptId)?.name}
                 </div>
 
                 {/* Tag chips */}
-                <div className="flex flex-wrap gap-1.5 mb-3 min-h-[28px]">
+                <div className="flex flex-wrap gap-2 mb-4 min-h-[32px]">
                   {memberList.map(m => (
-                    <span key={m.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] sans font-medium"
+                    <span key={m.id} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs sans font-medium"
                       style={{ background: '#c17f3e15', color: '#c17f3e' }}>
                       {m.name}
-                      <button onClick={() => removeMember(m.id)} className="text-[10px] leading-none hover:opacity-70">×</button>
+                      <button onClick={() => removeMember(m.id)} className="text-sm leading-none hover:opacity-70">×</button>
                     </span>
                   ))}
                   {memberList.length === 0 && (
-                    <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No members yet — type to add.</span>
+                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>No members yet — type a name to add.</span>
                   )}
                 </div>
 
@@ -344,15 +351,15 @@ function DepartmentModal({
                     onChange={e => { setSearch(e.target.value); setShowDropdown(true) }}
                     onFocus={() => search.length >= 1 && setShowDropdown(true)}
                     onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
-                    className="w-full px-3 py-2 rounded-lg border text-xs sans"
+                    className="w-full px-4 py-2.5 rounded-lg border text-sm sans"
                     style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
 
                   {showDropdown && filtered.length > 0 && (
-                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto"
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-xl shadow-lg z-10 max-h-56 overflow-y-auto"
                       style={{ borderColor: 'var(--border)' }}>
                       {filtered.map(p => (
                         <button key={p.id} onMouseDown={() => addMember(p.id)}
-                          className="w-full text-left px-3 py-2 text-xs sans hover:bg-gray-50"
+                          className="w-full text-left px-4 py-2.5 text-sm sans hover:bg-gray-50"
                           style={{ color: 'var(--foreground)' }}>
                           {p.name}
                         </button>
@@ -360,9 +367,9 @@ function DepartmentModal({
                     </div>
                   )}
                   {showDropdown && search.length >= 1 && filtered.length === 0 && (
-                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-10 px-3 py-2"
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-xl shadow-lg z-10 px-4 py-3"
                       style={{ borderColor: 'var(--border)' }}>
-                      <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No matching staff found</span>
+                      <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>No matching staff found</span>
                     </div>
                   )}
                 </div>
@@ -370,7 +377,7 @@ function DepartmentModal({
                 {/* Save */}
                 {membersDirty && (
                   <button onClick={saveMembers} disabled={saving}
-                    className="mt-3 w-full px-3 py-2 rounded-lg text-xs sans font-medium disabled:opacity-50"
+                    className="mt-4 w-full px-4 py-2.5 rounded-lg text-sm sans font-medium disabled:opacity-50"
                     style={{ background: '#c17f3e', color: 'white' }}>
                     {saving ? 'Saving…' : 'Save Members'}
                   </button>
@@ -387,17 +394,15 @@ function DepartmentModal({
 /* ── Manage Layers Modal ───────────────────────────────────── */
 function ManageLayersModal({
   elderLayers, staffLayers, volunteerLayers, pcoLists, listLayerLinks, layers,
-  departments, departmentMembers,
   newLayerName, setNewLayerName, newLayerCategory, setNewLayerCategory,
-  saving, addLayer, removeLayer, onClose, onConfirm, onOpenDeptModal,
+  saving, addLayer, removeLayer, onClose, onConfirm,
 }: {
   elderLayers: LayerOption[]; staffLayers: LayerOption[]; volunteerLayers: LayerOption[]
   pcoLists: PcoListOption[]; listLayerLinks: ListLayerLink[]; layers: LayerOption[]
-  departments: DepartmentOption[]; departmentMembers: DepartmentMember[]
   newLayerName: string; setNewLayerName: (v: string) => void
   newLayerCategory: 'staff' | 'volunteer'; setNewLayerCategory: (v: 'staff' | 'volunteer') => void
   saving: boolean; addLayer: () => void; removeLayer: (id: string) => void
-  onClose: () => void; onConfirm: () => void; onOpenDeptModal: () => void
+  onClose: () => void; onConfirm: () => void
 }) {
   // Local state for drag-reorder (changes only apply on confirm)
   const [localStaffLayers, setLocalStaffLayers] = useState(staffLayers)
@@ -605,31 +610,6 @@ function ManageLayersModal({
             </div>
           </div>
 
-          {/* Departments — just a list with link to the department modal */}
-          <div className="border-t pt-3 mt-3" style={{ borderColor: 'var(--border)' }}>
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: '#c17f3e' }}>Departments / Staff Teams</div>
-              <button onClick={() => onOpenDeptModal()}
-                className="text-[10px] sans font-medium px-2 py-0.5 rounded"
-                style={{ color: '#c17f3e', background: '#c17f3e10' }}>
-                Manage
-              </button>
-            </div>
-            {departments.length === 0 && (
-              <p className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No departments yet.</p>
-            )}
-            {departments.map(dept => {
-              const memberCount = departmentMembers.filter(dm => dm.department_id === dept.id).length
-              return (
-                <div key={dept.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg mb-1" style={{ background: '#c17f3e08' }}>
-                  <span className="text-xs sans font-medium flex-1" style={{ color: '#c17f3e' }}>
-                    {dept.name}
-                    <span className="ml-1 text-[10px]" style={{ color: 'var(--muted-foreground)' }}>({memberCount} members)</span>
-                  </span>
-                </div>
-              )
-            })}
-          </div>
         </div>
 
         {/* Confirm / Cancel footer */}
@@ -1902,8 +1882,6 @@ export default function ShepherdTree() {
           pcoLists={pcoLists}
           listLayerLinks={listLayerLinks}
           layers={layers}
-          departments={departments}
-          departmentMembers={departmentMembers}
           newLayerName={newLayerName}
           setNewLayerName={setNewLayerName}
           newLayerCategory={newLayerCategory}
@@ -1913,7 +1891,6 @@ export default function ShepherdTree() {
           removeLayer={removeLayer}
           onClose={() => setLayerModalOpen(false)}
           onConfirm={fetchTree}
-          onOpenDeptModal={() => { setLayerModalOpen(false); setDeptModalOpen(true) }}
         />}
 
         {deptModalOpen && (
