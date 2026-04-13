@@ -161,7 +161,27 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'No PCO credentials configured' }, { status: 400 })
       }
 
+      const forceFullSync = !!body.force
       const client = createPcoClient(credentials.app_id, credentials.app_secret)
+
+      // How recently must a nested resource have been synced to be skipped?
+      // Default: skip if synced within 7 days. Force flag overrides.
+      const NESTED_CACHE_DAYS = 7
+
+      // Check when the last successful sync completed
+      let lastSuccessfulSync: string | null = null
+      try {
+        const { data: lastLog } = await admin
+          .from('pco_sync_log').select('completed_at')
+          .eq('church_id', churchId!)
+          .eq('status', 'success')
+          .order('completed_at', { ascending: false }).limit(1).single()
+        lastSuccessfulSync = lastLog?.completed_at || null
+      } catch { /* no previous sync */ }
+
+      const daysSinceLastSync = lastSuccessfulSync
+        ? (Date.now() - new Date(lastSuccessfulSync).getTime()) / 86400000
+        : Infinity
 
       const resourceInfo: Record<string, {
         pcoCount: number
@@ -183,15 +203,26 @@ export async function POST(request: NextRequest) {
         } catch { /* table might not exist yet */ }
 
         if (res.isNested) {
-          // Nested resources: DON'T build cursor now — parents may not be synced yet.
-          // Cursor will be built lazily on first sync_page call.
-          resourceInfo[res.key] = {
-            pcoCount: -1,  // unknown until cursor is built
-            dbCount,
-            toSync: -1,    // signal to client: always attempt
-            updatedSince: null,
-            isNested: true,
-            // no cursor — will be built lazily
+          // Skip nested resources if we synced recently and have data, unless forced
+          if (!forceFullSync && dbCount > 0 && daysSinceLastSync < NESTED_CACHE_DAYS) {
+            resourceInfo[res.key] = {
+              pcoCount: dbCount,
+              dbCount,
+              toSync: 0,     // skip — already have recent data
+              updatedSince: null,
+              isNested: true,
+            }
+          } else {
+            // Nested resources: DON'T build cursor now — parents may not be synced yet.
+            // Cursor will be built lazily on first sync_page call.
+            resourceInfo[res.key] = {
+              pcoCount: -1,  // unknown until cursor is built
+              dbCount,
+              toSync: -1,    // signal to client: always attempt
+              updatedSince: null,
+              isNested: true,
+              // no cursor — will be built lazily
+            }
           }
         } else {
           const pcoCount = await getResourceCount(client, res)

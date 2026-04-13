@@ -756,7 +756,9 @@ export async function linkForeignKeys(admin: any, churchId: string) {
 
 // ── Tables to purge ─────────────────────────────────────────
 
-/** All tables that hold PCO-synced data (delete in FK-safe order) */
+/** All tables that hold PCO-synced data (delete in FK-safe order).
+ *  NOTE: shepherding_relationships is NOT in this list — it's user-curated
+ *  (manual assignments + bulk assigns), not PCO-synced data. */
 export const PCO_TABLES = [
   'plan_team_members',
   'service_plans',
@@ -768,7 +770,6 @@ export const PCO_TABLES = [
   'group_memberships',
   'attendance_records',
   'person_analytics',
-  'shepherding_relationships',
   'teams',
   'groups',
   'group_types',

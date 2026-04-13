@@ -66,7 +66,7 @@ export default function PcoSyncPanel() {
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
   /* ── Sync handler ──────────────────────────────────────────── */
-  const handleSync = async () => {
+  const handleSync = async (force = false) => {
     setSyncing(true)
     abortRef.current = false
     setProgress({
@@ -81,7 +81,7 @@ export default function PcoSyncPanel() {
       const startRes = await fetch('/api/pco', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'sync_start' }),
+        body: JSON.stringify({ action: 'sync_start', force }),
       })
       const startData = await startRes.json()
       if (!startRes.ok) throw new Error(startData.error || 'Failed to start sync')
@@ -336,9 +336,14 @@ export default function PcoSyncPanel() {
               style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)' }}>
               {debugLoading ? 'Testing…' : 'Debug'}
             </button>
-            <button onClick={handleSync} className="btn-primary text-sm sans flex items-center gap-2">
+            <button onClick={() => handleSync(false)} className="btn-primary text-sm sans flex items-center gap-2">
               <SyncIcon />
               Sync Now
+            </button>
+            <button onClick={() => handleSync(true)}
+              className="text-xs sans px-3 py-2 rounded-lg border"
+              style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)' }}>
+              Force Full Sync
             </button>
           </div>
         ) : (

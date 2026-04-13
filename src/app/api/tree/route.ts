@@ -45,7 +45,7 @@ export async function GET() {
     admin.from('teams').select('id, name, is_active, service_type_id, pco_service_type_id')
       .eq('church_id', churchId!).eq('is_active', true)
       .range(0, 49999),
-    admin.from('shepherding_relationships').select('shepherd_id, person_id, context_type')
+    admin.from('shepherding_relationships').select('shepherd_id, person_id, context_type, context_id')
       .eq('is_active', true),
     admin.from('check_in_reports').select('leader_id, created_at')
       .order('created_at', { ascending: false }),
@@ -130,12 +130,19 @@ export async function GET() {
   }
 
   // ── Build PERSON-BASED tree ──────────────────────────────────
-  // Structure: Leaders are roots (per group/team), members hang under them.
+  //
+  // Hierarchy (top to bottom):
+  //   1. Assigned shepherds (from shepherding_relationships with context_type
+  //      'group_type' or 'service_type') — these are root-level overseers
+  //   2. Group/team leaders (from group/team memberships with role=leader)
+  //   3. Group/team members (non-leaders)
+  //
   // People can appear multiple times (once per group/team they belong to).
   // Each node gets a compound ID: personId::contextId
+
   const nodes: any[] = []
 
-  const personNode = (
+  const mkNode = (
     personId: string, contextId: string, role: 'shepherd' | 'member',
     supervisorId: string | null, contextLabel: string, flockCount: number,
   ) => {
@@ -155,6 +162,54 @@ export async function GET() {
     }
   }
 
+  // ── Index shepherding_relationships by context ───────────────
+  // context_type = 'group_type' → shepherd oversees all groups of that type
+  // context_type = 'service_type' → shepherd oversees all teams of that type
+  // context_type = 'manual' → direct 1:1 shepherd→person
+  type ShepherdRel = { shepherd_id: string; person_id: string; context_type: string; context_id: string | null }
+  const typedRelationships = (manualRelationships || []) as ShepherdRel[]
+
+  // Map: group_type_id → shepherd person IDs who oversee it
+  const groupTypeShepherds = new Map<string, Set<string>>()
+  // Map: service_type_id → shepherd person IDs who oversee it
+  const serviceTypeShepherds = new Map<string, Set<string>>()
+  // Manual 1:1 relationships
+  const manualRels: ShepherdRel[] = []
+
+  for (const r of typedRelationships) {
+    if (!personMap.has(r.shepherd_id)) continue
+    if (r.context_type === 'group_type' && r.context_id) {
+      if (!groupTypeShepherds.has(r.context_id)) groupTypeShepherds.set(r.context_id, new Set())
+      groupTypeShepherds.get(r.context_id)!.add(r.shepherd_id)
+    } else if (r.context_type === 'service_type' && r.context_id) {
+      if (!serviceTypeShepherds.has(r.context_id)) serviceTypeShepherds.set(r.context_id, new Set())
+      serviceTypeShepherds.get(r.context_id)!.add(r.shepherd_id)
+    } else if (r.context_type === 'manual') {
+      if (personMap.has(r.person_id) && r.shepherd_id !== r.person_id) {
+        manualRels.push(r)
+      }
+    }
+  }
+
+  // Resolve group → its group_type_id (use UUID first, fallback to pco_id lookup)
+  function getGroupTypeId(group: { group_type_id?: string | null; pco_group_type_id?: string | null }): string | null {
+    if (group.group_type_id) return group.group_type_id
+    if (group.pco_group_type_id) {
+      const gt = groupTypePcoMap.get(group.pco_group_type_id)
+      if (gt) return gt.id
+    }
+    return null
+  }
+
+  function getTeamServiceTypeId(team: { service_type_id?: string | null; pco_service_type_id?: string | null }): string | null {
+    if (team.service_type_id) return team.service_type_id
+    if (team.pco_service_type_id) {
+      const st = serviceTypePcoMap.get(team.pco_service_type_id)
+      if (st) return st.id
+    }
+    return null
+  }
+
   // ── Process Groups (only tracked group types) ─────────────
   for (const [groupId, members] of groupMembers) {
     const group = groupMap.get(groupId)
@@ -168,28 +223,72 @@ export async function GET() {
     const contextLabel = groupTypeName ? `${groupTypeName}: ${group.name}` : group.name || 'Group'
     const contextId = `group-${groupId}`
 
+    // Check if there's an assigned shepherd over this group's type
+    const gtId = getGroupTypeId(group)
+    const typeShepherdIds = gtId ? groupTypeShepherds.get(gtId) : null
+
     const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
     const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
 
+    // Determine the supervisorId for leaders in this group
+    let leaderSupervisorId: string | null = null
+    if (typeShepherdIds && typeShepherdIds.size > 0) {
+      // There are assigned shepherds over this group type — leaders report to first one
+      const firstShepherd = [...typeShepherdIds][0]
+      const shepherdContextId = `gt-shepherd-${gtId}`
+      leaderSupervisorId = `${firstShepherd}::${shepherdContextId}`
+
+      // Ensure the type-shepherd node exists
+      if (!nodes.find(n => n.id === leaderSupervisorId)) {
+        const gtName = groupTypeName || 'Groups'
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${gtName}`, 0))
+      }
+    }
+
     if (leaders.length > 0) {
-      // Leaders are root nodes for this group context
       for (const leader of leaders) {
-        nodes.push(personNode(
-          leader.personId, contextId, 'shepherd', null, contextLabel,
+        // Skip if this leader IS the type shepherd (don't double up)
+        if (typeShepherdIds?.has(leader.personId)) {
+          // This leader IS the assigned shepherd — use their type-shepherd node as parent
+          // Members will point to the type-shepherd node instead
+          continue
+        }
+        nodes.push(mkNode(
+          leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
           Math.ceil(nonLeaders.length / leaders.length),
         ))
       }
-      // Distribute members round-robin among leaders
+
+      // Distribute members under leaders (or under type-shepherd if leader was skipped)
+      const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
       for (let i = 0; i < nonLeaders.length; i++) {
         const m = nonLeaders[i]
-        const assignedLeader = leaders[i % leaders.length]
-        const leaderNodeId = `${assignedLeader.personId}::${contextId}`
-        nodes.push(personNode(m.personId, contextId, 'member', leaderNodeId, contextLabel, 0))
+        let parentNodeId: string
+        if (effectiveLeaders.length > 0) {
+          const assignedLeader = effectiveLeaders[i % effectiveLeaders.length]
+          parentNodeId = `${assignedLeader.personId}::${contextId}`
+        } else {
+          // All leaders were type-shepherds, put members directly under type-shepherd
+          parentNodeId = leaderSupervisorId!
+        }
+        nodes.push(mkNode(m.personId, contextId, 'member', parentNodeId, contextLabel, 0))
       }
     } else {
-      // No leaders — all members appear as roots
+      // No leaders — put under type shepherd if available, otherwise root
       for (const m of validMembers) {
-        nodes.push(personNode(m.personId, contextId, 'member', null, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
+      }
+    }
+  }
+
+  // Update flock counts for group-type shepherds
+  for (const [gtId, shepherdIds] of groupTypeShepherds) {
+    for (const sid of shepherdIds) {
+      const shepherdContextId = `gt-shepherd-${gtId}`
+      const nodeId = `${sid}::${shepherdContextId}`
+      const sNode = nodes.find(n => n.id === nodeId)
+      if (sNode) {
+        sNode.flockCount = nodes.filter(n => n.supervisorId === nodeId).length
       }
     }
   }
@@ -207,87 +306,82 @@ export async function GET() {
     const contextLabel = serviceTypeName ? `${serviceTypeName}: ${team.name}` : team.name || 'Team'
     const contextId = `team-${teamId}`
 
+    const stId = getTeamServiceTypeId(team)
+    const typeShepherdIds = stId ? serviceTypeShepherds.get(stId) : null
+
     const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
     const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
 
+    let leaderSupervisorId: string | null = null
+    if (typeShepherdIds && typeShepherdIds.size > 0) {
+      const firstShepherd = [...typeShepherdIds][0]
+      const shepherdContextId = `st-shepherd-${stId}`
+      leaderSupervisorId = `${firstShepherd}::${shepherdContextId}`
+
+      if (!nodes.find(n => n.id === leaderSupervisorId)) {
+        const stName = serviceTypeName || 'Teams'
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${stName}`, 0))
+      }
+    }
+
     if (leaders.length > 0) {
       for (const leader of leaders) {
-        nodes.push(personNode(
-          leader.personId, contextId, 'shepherd', null, contextLabel,
+        if (typeShepherdIds?.has(leader.personId)) continue
+        nodes.push(mkNode(
+          leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
           Math.ceil(nonLeaders.length / leaders.length),
         ))
       }
+      const effectiveLeaders = leaders.filter(l => !typeShepherdIds?.has(l.personId))
       for (let i = 0; i < nonLeaders.length; i++) {
         const m = nonLeaders[i]
-        const assignedLeader = leaders[i % leaders.length]
-        const leaderNodeId = `${assignedLeader.personId}::${contextId}`
-        nodes.push(personNode(m.personId, contextId, 'member', leaderNodeId, contextLabel, 0))
+        let parentNodeId: string
+        if (effectiveLeaders.length > 0) {
+          const assignedLeader = effectiveLeaders[i % effectiveLeaders.length]
+          parentNodeId = `${assignedLeader.personId}::${contextId}`
+        } else {
+          parentNodeId = leaderSupervisorId!
+        }
+        nodes.push(mkNode(m.personId, contextId, 'member', parentNodeId, contextLabel, 0))
       }
     } else {
       for (const m of validMembers) {
-        nodes.push(personNode(m.personId, contextId, 'member', null, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
       }
     }
   }
 
-  // ── Manual shepherding relationships ──────────────────────
-  const manualShepherdIds = new Set<string>()
-  for (const r of manualRelationships || []) {
-    if (!personMap.has(r.shepherd_id) || !personMap.has(r.person_id)) continue
-    if (r.shepherd_id === r.person_id) continue
+  // Update flock counts for service-type shepherds
+  for (const [stId, shepherdIds] of serviceTypeShepherds) {
+    for (const sid of shepherdIds) {
+      const shepherdContextId = `st-shepherd-${stId}`
+      const nodeId = `${sid}::${shepherdContextId}`
+      const sNode = nodes.find(n => n.id === nodeId)
+      if (sNode) {
+        sNode.flockCount = nodes.filter(n => n.supervisorId === nodeId).length
+      }
+    }
+  }
 
-    // Add shepherd as root if not already added for manual context
+  // ── Manual 1:1 shepherding relationships ──────────────────
+  const manualShepherdIds = new Set<string>()
+  for (const r of manualRels) {
     if (!manualShepherdIds.has(r.shepherd_id)) {
       manualShepherdIds.add(r.shepherd_id)
-      const person = personMap.get(r.shepherd_id)!
-      nodes.push({
-        id: `${r.shepherd_id}::manual`,
-        personId: r.shepherd_id,
-        name: person.name || 'Unknown',
-        role: 'shepherd',
-        nodeType: 'person',
-        supervisorId: null,
-        flockCount: 0,
-        lastCheckin: lastCheckin[r.shepherd_id] || null,
-        isCurrentUser: false,
-        contextLabel: 'Manual Assignment',
-        warning: null,
-      })
+      nodes.push(mkNode(r.shepherd_id, 'manual', 'shepherd', null, 'Manual Assignment', 0))
     }
 
     const shepherdTreeId = `${r.shepherd_id}::manual`
-    const person = personMap.get(r.person_id)!
-    nodes.push({
-      id: `${r.person_id}::manual-${r.shepherd_id}`,
-      personId: r.person_id,
-      name: person.name || 'Unknown',
-      role: 'member',
-      nodeType: 'person',
-      supervisorId: shepherdTreeId,
-      flockCount: 0,
-      lastCheckin: null,
-      isCurrentUser: false,
-      contextLabel: 'Manual Assignment',
-      warning: null,
-    })
+    nodes.push(mkNode(r.person_id, `manual-${r.shepherd_id}`, 'member', shepherdTreeId, 'Manual Assignment', 0))
 
-    // Update shepherd flock count
     const shepherdNode = nodes.find(n => n.id === shepherdTreeId)
     if (shepherdNode) shepherdNode.flockCount++
   }
 
-  // ── Also add manual root leaders that have no manual flock yet ──
-  // (e.g. Joe Henseler added as root via "Add Person" but nobody assigned under him)
-  // These people were marked is_leader=true when added via addPersonToTree
-  // They show up in manualRelationships only if someone is under them.
-  // Check for people who are leaders but don't appear in any tree node yet:
+  // ── Root leaders without any group/team/manual context ────
   const peopleInTree = new Set<string>()
-  for (const n of nodes) {
-    if (n.personId) peopleInTree.add(n.personId)
-  }
+  for (const n of nodes) { if (n.personId) peopleInTree.add(n.personId) }
 
-  // People marked as is_leader who aren't in any tracked group/team/manual context
-  // Check the is_leader flag
   const { data: leaderPeople } = await admin.from('people')
     .select('id, name')
     .eq('church_id', churchId!)
