@@ -433,21 +433,21 @@ export async function GET() {
     placeholderSupervisorPersonId: supervisorPersonId || null,
   })
 
+  // Layer-level placeholders: only for layers with NO assigned people
   for (const layer of sortedLayers) {
-    // Layer-level placeholder (shows the empty layer in the tree)
+    const hasAssignments = (assignmentsByLayer.get(layer.id) || []).length > 0
+    if (hasAssignments) continue // people exist on this layer, no placeholder needed
+
     let layerPlaceholderSupervisor: string | null = null
     if (layer.category === 'staff') {
-      // Staff placeholder goes under Lead Pastor
       layerPlaceholderSupervisor = leadPastorNodeId || `placeholder-${sortedLayers.find(l => l.category === 'elder')?.id}`
     } else if (layer.category === 'volunteer') {
-      // Volunteer placeholder goes under first staff
       if (firstStaffAssignment) {
         layerPlaceholderSupervisor = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
       } else {
         layerPlaceholderSupervisor = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
       }
     }
-    // Elder placeholder: root level (null supervisor)
 
     nodes.push(mkPlaceholder(
       `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
@@ -455,7 +455,8 @@ export async function GET() {
     ))
   }
 
-  // Per-person placeholders: Lead Pastor + all Staff get a "+" child
+  // Per-person placeholders: Lead Pastor + all Staff get ONE "+" child
+  // pointing to the next layer rank below their own layer
   for (const a of (assignments || []) as AssignmentRow[]) {
     const layer = layerMap.get(a.layer_id)
     if (!layer) continue
@@ -465,9 +466,8 @@ export async function GET() {
 
     if (isLP || isStaff) {
       const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
-      // Determine which layer the child would be on
-      const childLayerCategory = isLP ? 'staff' : 'volunteer'
-      const childLayer = sortedLayers.find(l => l.category === childLayerCategory)
+      // Find the next layer below this person's layer rank
+      const childLayer = sortedLayers.find(l => l.rank > layer.rank)
       if (childLayer) {
         nodes.push(mkPlaceholder(
           `placeholder-under-${a.person_id}`,
