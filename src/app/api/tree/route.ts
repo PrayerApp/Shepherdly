@@ -237,58 +237,103 @@ export async function GET() {
     })
   }
 
-  // ── Add placeholder "click to add" nodes for each layer ──────
-  // Placeholders sit at the right level in the hierarchy so users
-  // can see the layer structure even when empty.
+  // ── Add placeholder nodes ─────────────────────────────────────
+  //
+  // Rules:
+  //  1. Layer-level placeholders: one per layer (to show empty layers)
+  //     - Elder placeholder: root level
+  //     - Staff placeholder: under Lead Pastor (or elder placeholder if no LP)
+  //     - Volunteer placeholder: under first staff (or staff placeholder)
+  //  2. Per-person placeholders: Lead Pastor and every Staff member
+  //     ALWAYS get a "+" child node, even if they already have children.
+  //     This lets admins add reports under any staff/LP.
+  //  3. Non-LP elders do NOT get children in the manual hierarchy.
+  //
   const sortedLayers = [...(layers || [])].sort((a, b) => a.rank - b.rank)
-  for (const layer of sortedLayers) {
-    const layerAssignments = assignmentsByLayer.get(layer.id) || []
-    const isStaffOrElder = ['elder', 'staff'].includes(layer.category)
 
-    // Find the "last" real node on the layer above to use as supervisor
-    // Layers are ordered by rank, so previous layer in sortedLayers
-    const layerIdx = sortedLayers.indexOf(layer)
-    let placeholderSupervisorId: string | null = null
-    if (layerIdx > 0) {
-      // Find nodes on the previous layer
-      const prevLayer = sortedLayers[layerIdx - 1]
-      const prevAssignments = assignmentsByLayer.get(prevLayer.id) || []
-      if (prevAssignments.length > 0) {
-        // Attach under the first person of the previous layer
-        const first = prevAssignments[0]
-        placeholderSupervisorId = `${first.person_id}::layer-${first.layer_id}`
+  // Find Lead Pastor node ID
+  const leadPastorAssignment = ((assignments || []) as AssignmentRow[]).find(a => {
+    const p = personMap.get(a.person_id)
+    return p?.is_lead_pastor
+  })
+  const leadPastorNodeId = leadPastorAssignment
+    ? `${leadPastorAssignment.person_id}::layer-${leadPastorAssignment.layer_id}`
+    : null
+
+  // Find first staff layer and its first assignment for volunteer placeholder
+  const firstStaffLayer = sortedLayers.find(l => l.category === 'staff')
+  const firstStaffAssignment = firstStaffLayer
+    ? (assignmentsByLayer.get(firstStaffLayer.id) || [])[0]
+    : null
+
+  const mkPlaceholder = (id: string, label: string, layerId: string, layerCategory: string, supervisorId: string | null, supervisorPersonId?: string) => ({
+    id,
+    personId: undefined,
+    name: `+ Add ${label}`,
+    role: 'shepherd' as const,
+    supervisorId,
+    flockCount: 0,
+    lastCheckin: null,
+    isCurrentUser: false,
+    isStaff: ['elder', 'staff'].includes(layerCategory),
+    isLeadPastor: false,
+    contextLabel: label,
+    warning: null,
+    layerId,
+    layerCategory,
+    sortOrder: 99999,
+    groupTypeId: null,
+    serviceTypeId: null,
+    isPlaceholder: true,
+    placeholderSupervisorPersonId: supervisorPersonId || null,
+  })
+
+  for (const layer of sortedLayers) {
+    // Layer-level placeholder (shows the empty layer in the tree)
+    let layerPlaceholderSupervisor: string | null = null
+    if (layer.category === 'staff') {
+      // Staff placeholder goes under Lead Pastor
+      layerPlaceholderSupervisor = leadPastorNodeId || `placeholder-${sortedLayers.find(l => l.category === 'elder')?.id}`
+    } else if (layer.category === 'volunteer') {
+      // Volunteer placeholder goes under first staff
+      if (firstStaffAssignment) {
+        layerPlaceholderSupervisor = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
       } else {
-        // Previous layer is also empty — attach under its placeholder
-        placeholderSupervisorId = `placeholder-${prevLayer.id}`
+        layerPlaceholderSupervisor = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
       }
     }
+    // Elder placeholder: root level (null supervisor)
 
-    nodes.push({
-      id: `placeholder-${layer.id}`,
-      personId: undefined,
-      name: `+ Add ${layer.name}`,
-      role: 'shepherd' as const,
-      supervisorId: placeholderSupervisorId,
-      flockCount: 0,
-      lastCheckin: null,
-      isCurrentUser: false,
-      isStaff: isStaffOrElder,
-      isLeadPastor: false,
-      contextLabel: layer.name,
-      warning: null,
-      layerId: layer.id,
-      layerCategory: layer.category,
-      sortOrder: 99999, // sort last within the layer
-      groupTypeId: null,
-      serviceTypeId: null,
-      isPlaceholder: true,
-    })
+    nodes.push(mkPlaceholder(
+      `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
+      layerPlaceholderSupervisor,
+    ))
+  }
 
-    // Real nodes that have no supervisor should attach to the placeholder
-    // of the layer above (if it exists), but only if they don't already have one
-    // Actually, real nodes on this layer with no supervisor: if the layer
-    // above has nodes, connect to the first; otherwise connect to its placeholder.
-    // This is already handled by the assignment's supervisor_person_id.
+  // Per-person placeholders: Lead Pastor + all Staff get a "+" child
+  for (const a of (assignments || []) as AssignmentRow[]) {
+    const layer = layerMap.get(a.layer_id)
+    if (!layer) continue
+    const person = personMap.get(a.person_id)
+    const isLP = !!person?.is_lead_pastor
+    const isStaff = layer.category === 'staff'
+
+    if (isLP || isStaff) {
+      const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
+      // Determine which layer the child would be on
+      const childLayerCategory = isLP ? 'staff' : 'volunteer'
+      const childLayer = sortedLayers.find(l => l.category === childLayerCategory)
+      if (childLayer) {
+        nodes.push(mkPlaceholder(
+          `placeholder-under-${a.person_id}`,
+          childLayer.name,
+          childLayer.id,
+          childLayer.category,
+          parentNodeId,
+          a.person_id,
+        ))
+      }
+    }
   }
 
   // ── Step 2: Index PCO memberships ────────────────────────────
@@ -694,6 +739,19 @@ export async function POST(request: Request) {
       await admin.from('tree_assignments')
         .update({ sort_order: item.sort_order })
         .eq('person_id', item.person_id)
+        .eq('church_id', churchId!)
+    }
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Reorder layers within a category ─────────────────────────
+  if (body.action === 'reorder_layers') {
+    const { order } = body // array of { layer_id, rank }
+    if (!Array.isArray(order)) return NextResponse.json({ error: 'order array required' }, { status: 400 })
+    for (const item of order) {
+      await admin.from('tree_layers')
+        .update({ rank: item.rank })
+        .eq('id', item.layer_id)
         .eq('church_id', churchId!)
     }
     return NextResponse.json({ success: true })
