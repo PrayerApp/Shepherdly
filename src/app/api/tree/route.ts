@@ -731,6 +731,50 @@ export async function GET() {
     oversightMapOut[o.person_id].push({ contextType: o.context_type, contextId: o.context_id, typeName })
   }
 
+  // ── Unassigned data for bottom panel ─────────────────────────
+  // Staff with no supervisor (unconnected)
+  const unconnectedStaff: { id: string; name: string; layerName: string }[] = []
+  for (const n of nodes) {
+    if (n.isBridge || n.isPlaceholder || !n.personId) continue
+    if (n.layerId && n.warning === 'Unconnected') {
+      const layer = layerMap.get(n.layerId)
+      if (layer && layer.category === 'staff') {
+        unconnectedStaff.push({ id: n.personId, name: n.name, layerName: layer.name })
+      }
+    }
+  }
+  // Group types with no overseer
+  const unlinkedGroupTypes = (groupTypes || [])
+    .filter(gt => gt.is_tracked && !groupTypeOverseers.has(gt.id))
+    .map(gt => ({ id: gt.id, name: gt.name }))
+  // Service types with no overseer
+  const unlinkedServiceTypes = (serviceTypes || [])
+    .filter((st: any) => st.is_tracked !== false && !serviceTypeOverseers.has(st.id))
+    .map(st => ({ id: st.id, name: st.name }))
+
+  // Volunteer-layer people with no supervisor (unconnected) + their group/team context
+  // We derive this from nodes that have warning=Unconnected and volunteer layer
+  // But we also need volunteers who are PCO leaders with no overseer — those are root nodes
+  // For the bottom panel we need: personId, name, groupTypeId/serviceTypeId for filtering
+  const unconnectedVolunteers: { id: string; name: string; groupTypeId: string | null; serviceTypeId: string | null }[] = []
+  const seenVolIds = new Set<string>()
+  for (const n of nodes) {
+    if (n.isBridge || n.isPlaceholder || !n.personId) continue
+    // Manual volunteer-layer people with no supervisor
+    if (n.layerId && n.warning === 'Unconnected') {
+      const layer = layerMap.get(n.layerId)
+      if (layer && layer.category === 'volunteer' && !seenVolIds.has(n.personId)) {
+        seenVolIds.add(n.personId)
+        unconnectedVolunteers.push({ id: n.personId, name: n.name, groupTypeId: n.groupTypeId || null, serviceTypeId: n.serviceTypeId || null })
+      }
+    }
+    // PCO leaders (shepherds) that are root nodes (no supervisor) and not on a manual layer
+    if (!n.layerId && n.role === 'shepherd' && !n.supervisorId && !n.isStaff && !seenVolIds.has(n.personId)) {
+      seenVolIds.add(n.personId)
+      unconnectedVolunteers.push({ id: n.personId, name: n.name, groupTypeId: n.groupTypeId || null, serviceTypeId: n.serviceTypeId || null })
+    }
+  }
+
   return NextResponse.json({
     nodes,
     coLeaderLinks,
@@ -744,6 +788,10 @@ export async function GET() {
     listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
     departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
     departmentMembers: departmentMembers || [],
+    unconnectedStaff,
+    unlinkedGroupTypes,
+    unlinkedServiceTypes,
+    unconnectedVolunteers,
     stats: { shepherdCount, groupCount, teamCount },
   })
 

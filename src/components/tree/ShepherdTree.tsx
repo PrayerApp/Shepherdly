@@ -678,6 +678,16 @@ export default function ShepherdTree() {
   const [newLayerName, setNewLayerName] = useState('')
   const [newLayerCategory, setNewLayerCategory] = useState<'staff' | 'volunteer'>('staff')
 
+  // Unassigned panel
+  const [unconnectedStaff, setUnconnectedStaff] = useState<{ id: string; name: string; layerName: string }[]>([])
+  const [unlinkedGroupTypes, setUnlinkedGroupTypes] = useState<{ id: string; name: string }[]>([])
+  const [unlinkedServiceTypes, setUnlinkedServiceTypes] = useState<{ id: string; name: string }[]>([])
+  const [unconnectedVolunteers, setUnconnectedVolunteers] = useState<{ id: string; name: string; groupTypeId: string | null; serviceTypeId: string | null }[]>([])
+  const [unassignedTab, setUnassignedTab] = useState<'staff' | 'types' | 'volunteers'>('types')
+  const [volunteerFilter, setVolunteerFilter] = useState<string>('all')
+  const [activeParent, setActiveParent] = useState<{ personId: string; nodeId: string; layerId: string } | null>(null)
+  const [panelCollapsed, setPanelCollapsed] = useState(false)
+
   // Search-to-navigate
   const [treeSearch, setTreeSearch] = useState('')
   const [treeSearchResults, setTreeSearchResults] = useState<LayoutNode[]>([])
@@ -819,6 +829,10 @@ export default function ShepherdTree() {
     setListLayerLinks(data.listLayerLinks || [])
     setDepartments(data.departments || [])
     setDepartmentMembers(data.departmentMembers || [])
+    setUnconnectedStaff(data.unconnectedStaff || [])
+    setUnlinkedGroupTypes(data.unlinkedGroupTypes || [])
+    setUnlinkedServiceTypes(data.unlinkedServiceTypes || [])
+    setUnconnectedVolunteers(data.unconnectedVolunteers || [])
 
     const laid = buildTree(data.nodes || [])
     const midpoints = applyCoLeaderLayout(laid, data.coLeaderLinks || [])
@@ -1269,6 +1283,13 @@ export default function ShepherdTree() {
                     style={{ cursor: isAdmin ? 'pointer' : 'default' }}
                     onClick={() => {
                       if (!isAdmin) return
+                      // Set active parent for bottom panel quick-assign
+                      setActiveParent({
+                        personId: node.placeholderSupervisorPersonId || '',
+                        nodeId: node.id,
+                        layerId: node.layerId || '',
+                      })
+                      setPanelCollapsed(false)
                       setAssignModal({
                         personId: '', personName: '',
                         layerId: node.layerId || '',
@@ -1892,6 +1913,219 @@ export default function ShepherdTree() {
           />
         )}
       </div>
+
+      {/* ══════════════════════════════════════════════════════
+          BOTTOM PANEL: Unassigned
+         ══════════════════════════════════════════════════════ */}
+      {isAdmin && (
+        <div className="shrink-0 border-t bg-white" style={{ borderColor: 'var(--border)' }}>
+          {/* Panel header */}
+          <div className="flex items-center justify-between px-4 py-2" style={{ borderBottom: panelCollapsed ? 'none' : '1px solid var(--border)' }}>
+            <div className="flex items-center gap-3">
+              <button onClick={() => setPanelCollapsed(!panelCollapsed)}
+                className="text-xs sans font-medium" style={{ color: 'var(--primary)' }}>
+                {panelCollapsed ? '▸' : '▾'} Unassigned
+              </button>
+              {!panelCollapsed && (
+                <div className="flex items-center gap-1">
+                  {[
+                    { key: 'staff' as const, label: 'Staff', count: unconnectedStaff.length, color: '#3b6ea5' },
+                    { key: 'types' as const, label: 'Group / Service Types', count: unlinkedGroupTypes.length + unlinkedServiceTypes.length, color: '#4a7c59' },
+                    { key: 'volunteers' as const, label: 'Volunteers', count: unconnectedVolunteers.length, color: '#6b7280' },
+                  ].map(tab => (
+                    <button key={tab.key} onClick={() => setUnassignedTab(tab.key)}
+                      className="text-[11px] sans px-2.5 py-1 rounded-full font-medium transition-colors"
+                      style={{
+                        background: unassignedTab === tab.key ? tab.color + '15' : 'transparent',
+                        color: unassignedTab === tab.key ? tab.color : 'var(--muted-foreground)',
+                      }}>
+                      {tab.label} <span className="ml-0.5 text-[10px]">({tab.count})</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {!panelCollapsed && activeParent && (
+              <div className="flex items-center gap-2 text-[11px] sans" style={{ color: 'var(--muted-foreground)' }}>
+                Assigning under: <span className="font-medium" style={{ color: 'var(--foreground)' }}>
+                  {allNodes.find(n => n.personId === activeParent.personId)?.name || 'Selected'}
+                </span>
+                <button onClick={() => setActiveParent(null)} className="text-xs" style={{ color: 'var(--danger, #9b3a3a)' }}>×</button>
+              </div>
+            )}
+          </div>
+
+          {/* Panel body */}
+          {!panelCollapsed && (
+            <div className="px-4 py-3 overflow-x-auto" style={{ maxHeight: '180px', overflowY: 'auto' }}>
+              {/* Staff tab */}
+              {unassignedTab === 'staff' && (
+                <div className="flex flex-wrap gap-2">
+                  {unconnectedStaff.length === 0 && (
+                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All staff are connected.</span>
+                  )}
+                  {unconnectedStaff.map(s => (
+                    <button key={s.id}
+                      onClick={async () => {
+                        if (!activeParent) return
+                        setSaving(true)
+                        try {
+                          await fetch('/api/tree', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'save_assignment', person_id: s.id,
+                              layer_id: assignmentsMap[s.id]?.layerId,
+                              supervisor_person_id: activeParent.personId,
+                              oversight: oversightMap[s.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
+                              is_lead_pastor: false,
+                            }),
+                          })
+                          await fetchTree()
+                        } finally { setSaving(false) }
+                      }}
+                      disabled={!activeParent || saving}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
+                      style={{ borderColor: activeParent ? '#3b6ea5' : 'var(--border)', color: activeParent ? '#3b6ea5' : 'var(--muted-foreground)', background: activeParent ? '#3b6ea510' : 'transparent' }}>
+                      {s.name}
+                      <span className="text-[9px]" style={{ color: 'var(--muted-foreground)' }}>{s.layerName}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Types tab */}
+              {unassignedTab === 'types' && (
+                <div className="flex flex-wrap gap-2">
+                  {unlinkedGroupTypes.length === 0 && unlinkedServiceTypes.length === 0 && (
+                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All types are connected to a staff overseer.</span>
+                  )}
+                  {unlinkedGroupTypes.map(gt => (
+                    <button key={`gt-${gt.id}`}
+                      onClick={async () => {
+                        if (!activeParent) return
+                        setSaving(true)
+                        try {
+                          const existing = oversightMap[activeParent.personId] || []
+                          const entries = [...existing.map(o => ({ context_type: o.contextType, context_id: o.contextId })), { context_type: 'group_type', context_id: gt.id }]
+                          await fetch('/api/tree', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'save_assignment', person_id: activeParent.personId,
+                              layer_id: assignmentsMap[activeParent.personId]?.layerId,
+                              supervisor_person_id: assignmentsMap[activeParent.personId]?.supervisorPersonId || null,
+                              oversight: entries,
+                              is_lead_pastor: allNodes.find(n => n.personId === activeParent.personId)?.isLeadPastor || false,
+                            }),
+                          })
+                          await fetchTree()
+                        } finally { setSaving(false) }
+                      }}
+                      disabled={!activeParent || saving}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
+                      style={{ borderColor: activeParent ? '#4a7c59' : 'var(--border)', color: activeParent ? '#4a7c59' : 'var(--muted-foreground)', background: activeParent ? '#4a7c5910' : 'transparent' }}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#4a7c59' }} />
+                      {gt.name}
+                    </button>
+                  ))}
+                  {unlinkedServiceTypes.map(st => (
+                    <button key={`st-${st.id}`}
+                      onClick={async () => {
+                        if (!activeParent) return
+                        setSaving(true)
+                        try {
+                          const existing = oversightMap[activeParent.personId] || []
+                          const entries = [...existing.map(o => ({ context_type: o.contextType, context_id: o.contextId })), { context_type: 'service_type', context_id: st.id }]
+                          await fetch('/api/tree', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'save_assignment', person_id: activeParent.personId,
+                              layer_id: assignmentsMap[activeParent.personId]?.layerId,
+                              supervisor_person_id: assignmentsMap[activeParent.personId]?.supervisorPersonId || null,
+                              oversight: entries,
+                              is_lead_pastor: allNodes.find(n => n.personId === activeParent.personId)?.isLeadPastor || false,
+                            }),
+                          })
+                          await fetchTree()
+                        } finally { setSaving(false) }
+                      }}
+                      disabled={!activeParent || saving}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
+                      style={{ borderColor: activeParent ? '#3b6ea5' : 'var(--border)', color: activeParent ? '#3b6ea5' : 'var(--muted-foreground)', background: activeParent ? '#3b6ea510' : 'transparent' }}>
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#3b6ea5' }} />
+                      {st.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Volunteers tab */}
+              {unassignedTab === 'volunteers' && (
+                <div>
+                  {/* Filter */}
+                  <div className="flex items-center gap-2 mb-2">
+                    <select value={volunteerFilter} onChange={e => setVolunteerFilter(e.target.value)}
+                      className="px-2 py-1 rounded-lg border text-[11px] sans"
+                      style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                      <option value="all">All types</option>
+                      {groupTypes.filter(gt => gt.is_tracked).map(gt => (
+                        <option key={`gf-${gt.id}`} value={`gt-${gt.id}`}>{gt.name}</option>
+                      ))}
+                      {serviceTypes.map(st => (
+                        <option key={`sf-${st.id}`} value={`st-${st.id}`}>{st.name}</option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>
+                      {(() => {
+                        const filtered = volunteerFilter === 'all' ? unconnectedVolunteers
+                          : volunteerFilter.startsWith('gt-') ? unconnectedVolunteers.filter(v => v.groupTypeId === volunteerFilter.slice(3))
+                          : unconnectedVolunteers.filter(v => v.serviceTypeId === volunteerFilter.slice(3))
+                        return `${filtered.length} unconnected`
+                      })()}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {(() => {
+                      const filtered = volunteerFilter === 'all' ? unconnectedVolunteers
+                        : volunteerFilter.startsWith('gt-') ? unconnectedVolunteers.filter(v => v.groupTypeId === volunteerFilter.slice(3))
+                        : unconnectedVolunteers.filter(v => v.serviceTypeId === volunteerFilter.slice(3))
+                      if (filtered.length === 0) return (
+                        <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>All volunteers are connected.</span>
+                      )
+                      return filtered.map(v => (
+                        <button key={v.id}
+                          onClick={async () => {
+                            if (!activeParent) return
+                            setSaving(true)
+                            try {
+                              // If volunteer has an existing assignment, update supervisor; otherwise create new
+                              const existing = assignmentsMap[v.id]
+                              await fetch('/api/tree', {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                  action: 'save_assignment', person_id: v.id,
+                                  layer_id: existing?.layerId || activeParent.layerId,
+                                  supervisor_person_id: activeParent.personId,
+                                  oversight: oversightMap[v.id]?.map(o => ({ context_type: o.contextType, context_id: o.contextId })) || [],
+                                  is_lead_pastor: false,
+                                }),
+                              })
+                              await fetchTree()
+                            } finally { setSaving(false) }
+                          }}
+                          disabled={!activeParent || saving}
+                          className="inline-flex items-center px-3 py-1.5 rounded-full text-xs sans font-medium border transition-colors disabled:opacity-40"
+                          style={{ borderColor: activeParent ? '#6b7280' : 'var(--border)', color: activeParent ? 'var(--foreground)' : 'var(--muted-foreground)', background: activeParent ? '#6b728008' : 'transparent' }}>
+                          {v.name}
+                        </button>
+                      ))
+                    })()}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
