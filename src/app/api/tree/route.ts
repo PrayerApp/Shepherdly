@@ -309,6 +309,20 @@ export async function GET() {
     assignmentsByLayer.get(a.layer_id)!.push(a)
   }
 
+  // Pre-compute Lead Pastor + first staff for supervisor fallback
+  const sortedLayers = [...(layers || [])].sort((a, b) => a.rank - b.rank)
+  const leadPastorAssignment = ((assignments || []) as AssignmentRow[]).find(a => {
+    const p = personMap.get(a.person_id)
+    return p?.is_lead_pastor
+  })
+  const leadPastorNodeId = leadPastorAssignment
+    ? `${leadPastorAssignment.person_id}::layer-${leadPastorAssignment.layer_id}`
+    : null
+  const firstStaffLayer = sortedLayers.find(l => l.category === 'staff')
+  const firstStaffAssignment = firstStaffLayer
+    ? (assignmentsByLayer.get(firstStaffLayer.id) || [])[0]
+    : null
+
   for (const a of (assignments || []) as AssignmentRow[]) {
     const person = personMap.get(a.person_id)
     if (!person) continue
@@ -338,10 +352,27 @@ export async function GET() {
 
     // Find supervisor's node ID
     let supervisorId: string | null = null
+    let isUnconnected = false
     if (a.supervisor_person_id) {
       const supAssignment = ((assignments || []) as AssignmentRow[]).find(x => x.person_id === a.supervisor_person_id)
       if (supAssignment) {
         supervisorId = `${a.supervisor_person_id}::layer-${supAssignment.layer_id}`
+      }
+    }
+
+    // Auto-pool unconnected staff/volunteers below their parent layer
+    if (!supervisorId && !person.is_lead_pastor && layer.category !== 'elder') {
+      isUnconnected = true
+      if (layer.category === 'staff') {
+        // Staff without supervisor → pool under Lead Pastor (or elder placeholder)
+        supervisorId = leadPastorNodeId || `placeholder-${sortedLayers.find(l => l.category === 'elder')?.id}`
+      } else if (layer.category === 'volunteer') {
+        // Volunteer without supervisor → pool under first staff (or staff placeholder)
+        if (firstStaffAssignment) {
+          supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
+        } else {
+          supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
+        }
       }
     }
 
@@ -357,7 +388,7 @@ export async function GET() {
       isStaff: isStaffOrElder,
       isLeadPastor: !!person.is_lead_pastor,
       contextLabel,
-      warning: null,
+      warning: isUnconnected ? 'Unconnected' : null,
       layerId: a.layer_id,
       layerCategory: layer.category,
       sortOrder: a.sort_order || 0,
@@ -379,22 +410,6 @@ export async function GET() {
   //     This lets admins add reports under any staff/LP.
   //  3. Non-LP elders do NOT get children in the manual hierarchy.
   //
-  const sortedLayers = [...(layers || [])].sort((a, b) => a.rank - b.rank)
-
-  // Find Lead Pastor node ID
-  const leadPastorAssignment = ((assignments || []) as AssignmentRow[]).find(a => {
-    const p = personMap.get(a.person_id)
-    return p?.is_lead_pastor
-  })
-  const leadPastorNodeId = leadPastorAssignment
-    ? `${leadPastorAssignment.person_id}::layer-${leadPastorAssignment.layer_id}`
-    : null
-
-  // Find first staff layer and its first assignment for volunteer placeholder
-  const firstStaffLayer = sortedLayers.find(l => l.category === 'staff')
-  const firstStaffAssignment = firstStaffLayer
-    ? (assignmentsByLayer.get(firstStaffLayer.id) || [])[0]
-    : null
 
   const mkPlaceholder = (id: string, label: string, layerId: string, layerCategory: string, supervisorId: string | null, supervisorPersonId?: string) => ({
     id,

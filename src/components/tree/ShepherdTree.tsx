@@ -184,21 +184,220 @@ function GripIcon({ color }: { color: string }) {
   )
 }
 
+/* ── Department Modal (create/edit with tag-picker) ────────── */
+function DepartmentModal({
+  departments, departmentMembers, allStaffPeople,
+  onClose, onChange,
+}: {
+  departments: DepartmentOption[]; departmentMembers: DepartmentMember[]
+  allStaffPeople: { id: string; name: string }[]
+  onClose: () => void; onChange: () => void
+}) {
+  const [selectedDeptId, setSelectedDeptId] = useState<string | null>(departments[0]?.id || null)
+  const [newDeptName, setNewDeptName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [search, setSearch] = useState('')
+  const [showDropdown, setShowDropdown] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Local members state for the selected department
+  const [localMembers, setLocalMembers] = useState<Set<string>>(() => {
+    if (!departments[0]) return new Set()
+    return new Set(departmentMembers.filter(dm => dm.department_id === departments[0].id).map(dm => dm.person_id))
+  })
+  const [membersDirty, setMembersDirty] = useState(false)
+
+  const selectDept = (deptId: string) => {
+    setSelectedDeptId(deptId)
+    setLocalMembers(new Set(departmentMembers.filter(dm => dm.department_id === deptId).map(dm => dm.person_id)))
+    setMembersDirty(false)
+    setSearch('')
+  }
+
+  const createDept = async () => {
+    if (!newDeptName.trim() || saving) return
+    setSaving(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'add_department', name: newDeptName.trim() }),
+      })
+      const data = await res.json()
+      setNewDeptName('')
+      onChange()
+      if (data.department) {
+        setSelectedDeptId(data.department.id)
+        setLocalMembers(new Set())
+        setMembersDirty(false)
+      }
+    } finally { setSaving(false) }
+  }
+
+  const removeDept = async (deptId: string) => {
+    if (!confirm('Remove this department? Oversight entries using it will also be removed.')) return
+    setSaving(true)
+    try {
+      await fetch('/api/tree', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'remove_department', department_id: deptId }),
+      })
+      if (selectedDeptId === deptId) setSelectedDeptId(null)
+      onChange()
+    } finally { setSaving(false) }
+  }
+
+  const saveMembers = async () => {
+    if (!selectedDeptId || saving) return
+    setSaving(true)
+    try {
+      await fetch('/api/tree', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set_department_members', department_id: selectedDeptId, person_ids: [...localMembers] }),
+      })
+      setMembersDirty(false)
+      onChange()
+    } finally { setSaving(false) }
+  }
+
+  const addMember = (personId: string) => {
+    setLocalMembers(prev => new Set([...prev, personId]))
+    setMembersDirty(true)
+    setSearch('')
+    setShowDropdown(false)
+    inputRef.current?.focus()
+  }
+
+  const removeMember = (personId: string) => {
+    setLocalMembers(prev => { const s = new Set(prev); s.delete(personId); return s })
+    setMembersDirty(true)
+  }
+
+  const personNameMap = new Map(allStaffPeople.map(p => [p.id, p.name]))
+  const memberList = [...localMembers].map(id => ({ id, name: personNameMap.get(id) || 'Unknown' })).sort((a, b) => a.name.localeCompare(b.name))
+  const filtered = search.length >= 1
+    ? allStaffPeople.filter(p => !localMembers.has(p.id) && p.name.toLowerCase().includes(search.toLowerCase())).slice(0, 8)
+    : []
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center z-[60]" style={{ background: 'rgba(0,0,0,0.35)' }}>
+      <div className="w-[520px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(85vh, 700px)', display: 'flex', flexDirection: 'column' }}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Staff Teams / Departments</h3>
+          <button onClick={onClose} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+        </div>
+
+        <div className="flex flex-1 overflow-hidden">
+          {/* Left: department list */}
+          <div className="w-[160px] border-r overflow-y-auto py-2 shrink-0" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
+            {departments.map(dept => (
+              <button key={dept.id} onClick={() => selectDept(dept.id)}
+                className="w-full text-left px-3 py-2 text-xs sans flex items-center justify-between group"
+                style={{ background: selectedDeptId === dept.id ? 'white' : 'transparent', color: selectedDeptId === dept.id ? '#c17f3e' : 'var(--foreground)', fontWeight: selectedDeptId === dept.id ? 600 : 400 }}>
+                <span className="truncate">{dept.name}</span>
+                <span className="text-[9px] opacity-0 group-hover:opacity-100" style={{ color: 'var(--danger, #9b3a3a)' }}
+                  onClick={(e) => { e.stopPropagation(); removeDept(dept.id) }}>×</span>
+              </button>
+            ))}
+            <div className="px-2 pt-2">
+              <div className="flex gap-1">
+                <input type="text" placeholder="New…" value={newDeptName}
+                  onChange={e => setNewDeptName(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && createDept()}
+                  className="flex-1 px-2 py-1 rounded border text-[11px] sans min-w-0"
+                  style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
+                <button onClick={createDept} disabled={saving || !newDeptName.trim()}
+                  className="px-2 py-1 rounded text-[11px] sans font-medium disabled:opacity-50 shrink-0"
+                  style={{ background: '#c17f3e', color: 'white' }}>+</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Right: tag-picker for members */}
+          <div className="flex-1 overflow-y-auto p-4">
+            {!selectedDeptId ? (
+              <div className="text-xs sans text-center py-8" style={{ color: 'var(--muted-foreground)' }}>
+                Select or create a department to manage members.
+              </div>
+            ) : (
+              <>
+                <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: '#c17f3e' }}>
+                  Members — {departments.find(d => d.id === selectedDeptId)?.name}
+                </div>
+
+                {/* Tag chips */}
+                <div className="flex flex-wrap gap-1.5 mb-3 min-h-[28px]">
+                  {memberList.map(m => (
+                    <span key={m.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] sans font-medium"
+                      style={{ background: '#c17f3e15', color: '#c17f3e' }}>
+                      {m.name}
+                      <button onClick={() => removeMember(m.id)} className="text-[10px] leading-none hover:opacity-70">×</button>
+                    </span>
+                  ))}
+                  {memberList.length === 0 && (
+                    <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No members yet — type to add.</span>
+                  )}
+                </div>
+
+                {/* Search input */}
+                <div className="relative">
+                  <input ref={inputRef} type="text" placeholder="Type a name to add…" value={search}
+                    onChange={e => { setSearch(e.target.value); setShowDropdown(true) }}
+                    onFocus={() => search.length >= 1 && setShowDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowDropdown(false), 150)}
+                    className="w-full px-3 py-2 rounded-lg border text-xs sans"
+                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
+
+                  {showDropdown && filtered.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-10 max-h-48 overflow-y-auto"
+                      style={{ borderColor: 'var(--border)' }}>
+                      {filtered.map(p => (
+                        <button key={p.id} onMouseDown={() => addMember(p.id)}
+                          className="w-full text-left px-3 py-2 text-xs sans hover:bg-gray-50"
+                          style={{ color: 'var(--foreground)' }}>
+                          {p.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {showDropdown && search.length >= 1 && filtered.length === 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-10 px-3 py-2"
+                      style={{ borderColor: 'var(--border)' }}>
+                      <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No matching staff found</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Save */}
+                {membersDirty && (
+                  <button onClick={saveMembers} disabled={saving}
+                    className="mt-3 w-full px-3 py-2 rounded-lg text-xs sans font-medium disabled:opacity-50"
+                    style={{ background: '#c17f3e', color: 'white' }}>
+                    {saving ? 'Saving…' : 'Save Members'}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ── Manage Layers Modal ───────────────────────────────────── */
 function ManageLayersModal({
   elderLayers, staffLayers, volunteerLayers, pcoLists, listLayerLinks, layers,
-  departments, departmentMembers, allStaffPeople,
+  departments, departmentMembers,
   newLayerName, setNewLayerName, newLayerCategory, setNewLayerCategory,
-  saving, addLayer, removeLayer, onClose, onConfirm, onDepartmentsChange,
+  saving, addLayer, removeLayer, onClose, onConfirm, onOpenDeptModal,
 }: {
   elderLayers: LayerOption[]; staffLayers: LayerOption[]; volunteerLayers: LayerOption[]
   pcoLists: PcoListOption[]; listLayerLinks: ListLayerLink[]; layers: LayerOption[]
   departments: DepartmentOption[]; departmentMembers: DepartmentMember[]
-  allStaffPeople: { id: string; name: string }[]
   newLayerName: string; setNewLayerName: (v: string) => void
   newLayerCategory: 'staff' | 'volunteer'; setNewLayerCategory: (v: 'staff' | 'volunteer') => void
   saving: boolean; addLayer: () => void; removeLayer: (id: string) => void
-  onClose: () => void; onConfirm: () => void; onDepartmentsChange: () => void
+  onClose: () => void; onConfirm: () => void; onOpenDeptModal: () => void
 }) {
   // Local state for drag-reorder (changes only apply on confirm)
   const [localStaffLayers, setLocalStaffLayers] = useState(staffLayers)
@@ -210,63 +409,6 @@ function ManageLayersModal({
   const [confirming, setConfirming] = useState(false)
   const dragItem = useRef<{ category: 'staff' | 'volunteer'; index: number } | null>(null)
   const dragOverItem = useRef<{ category: 'staff' | 'volunteer'; index: number } | null>(null)
-
-  // Department management
-  const [newDeptName, setNewDeptName] = useState('')
-  const [deptSaving, setDeptSaving] = useState(false)
-  const [editingDeptId, setEditingDeptId] = useState<string | null>(null)
-  const [editingDeptMembers, setEditingDeptMembers] = useState<Set<string>>(new Set())
-  const [deptMemberSearch, setDeptMemberSearch] = useState('')
-
-  const addDepartment = async () => {
-    if (!newDeptName.trim() || deptSaving) return
-    setDeptSaving(true)
-    try {
-      await fetch('/api/tree', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add_department', name: newDeptName.trim() }),
-      })
-      setNewDeptName('')
-      onDepartmentsChange()
-    } finally { setDeptSaving(false) }
-  }
-
-  const removeDepartment = async (deptId: string) => {
-    if (!confirm('Remove this department? Oversight entries using it will also be removed.')) return
-    setDeptSaving(true)
-    try {
-      await fetch('/api/tree', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'remove_department', department_id: deptId }),
-      })
-      if (editingDeptId === deptId) setEditingDeptId(null)
-      onDepartmentsChange()
-    } finally { setDeptSaving(false) }
-  }
-
-  const openDeptMembers = (deptId: string) => {
-    const members = departmentMembers.filter(dm => dm.department_id === deptId).map(dm => dm.person_id)
-    setEditingDeptMembers(new Set(members))
-    setEditingDeptId(deptId)
-    setDeptMemberSearch('')
-  }
-
-  const saveDeptMembers = async () => {
-    if (!editingDeptId || deptSaving) return
-    setDeptSaving(true)
-    try {
-      await fetch('/api/tree', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set_department_members', department_id: editingDeptId, person_ids: [...editingDeptMembers] }),
-      })
-      setEditingDeptId(null)
-      onDepartmentsChange()
-    } finally { setDeptSaving(false) }
-  }
-
-  const filteredStaffForDept = deptMemberSearch.length >= 2
-    ? allStaffPeople.filter(p => p.name.toLowerCase().includes(deptMemberSearch.toLowerCase()))
-    : allStaffPeople
 
   const handleDragStart = (category: 'staff' | 'volunteer', index: number) => {
     dragItem.current = { category, index }
@@ -463,81 +605,30 @@ function ManageLayersModal({
             </div>
           </div>
 
-          {/* Departments */}
+          {/* Departments — just a list with link to the department modal */}
           <div className="border-t pt-3 mt-3" style={{ borderColor: 'var(--border)' }}>
-            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#c17f3e' }}>Departments / Staff Teams</div>
-            <p className="text-[10px] sans mb-3" style={{ color: 'var(--muted-foreground)' }}>
-              Create departments and tag staff to them. Departments appear as oversight options in the assign modal.
-            </p>
-
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] sans font-semibold uppercase tracking-wide" style={{ color: '#c17f3e' }}>Departments / Staff Teams</div>
+              <button onClick={() => onOpenDeptModal()}
+                className="text-[10px] sans font-medium px-2 py-0.5 rounded"
+                style={{ color: '#c17f3e', background: '#c17f3e10' }}>
+                Manage
+              </button>
+            </div>
+            {departments.length === 0 && (
+              <p className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>No departments yet.</p>
+            )}
             {departments.map(dept => {
               const memberCount = departmentMembers.filter(dm => dm.department_id === dept.id).length
-              const isEditing = editingDeptId === dept.id
               return (
-                <div key={dept.id} className="mb-2">
-                  <div className="group flex items-center gap-2 px-3 py-2 rounded-lg" style={{ background: '#c17f3e08' }}>
-                    <span className="text-xs sans font-medium flex-1" style={{ color: '#c17f3e' }}>
-                      {dept.name}
-                      <span className="ml-1 text-[10px]" style={{ color: 'var(--muted-foreground)' }}>({memberCount})</span>
-                    </span>
-                    <button onClick={() => isEditing ? setEditingDeptId(null) : openDeptMembers(dept.id)}
-                      className="text-[10px] sans font-medium px-2 py-0.5 rounded"
-                      style={{ color: '#c17f3e', background: isEditing ? '#c17f3e15' : 'transparent' }}>
-                      {isEditing ? 'Close' : 'Members'}
-                    </button>
-                    <button onClick={() => removeDepartment(dept.id)}
-                      className="text-[9px] sans opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: 'var(--danger, #9b3a3a)' }}>×</button>
-                  </div>
-
-                  {isEditing && (
-                    <div className="ml-3 mt-1 p-2 rounded-lg border" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
-                      <input type="text" placeholder="Search staff…" value={deptMemberSearch}
-                        onChange={e => setDeptMemberSearch(e.target.value)}
-                        className="w-full px-2 py-1 rounded border text-xs sans mb-2"
-                        style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
-                      <div className="max-h-36 overflow-y-auto">
-                        {filteredStaffForDept.map(p => {
-                          const checked = editingDeptMembers.has(p.id)
-                          return (
-                            <label key={p.id} className="flex items-center gap-2 px-1 py-1 rounded cursor-pointer hover:bg-white text-xs sans">
-                              <input type="checkbox" checked={checked}
-                                onChange={() => {
-                                  const next = new Set(editingDeptMembers)
-                                  checked ? next.delete(p.id) : next.add(p.id)
-                                  setEditingDeptMembers(next)
-                                }}
-                                className="rounded" style={{ accentColor: '#c17f3e' }} />
-                              {p.name}
-                            </label>
-                          )
-                        })}
-                        {filteredStaffForDept.length === 0 && (
-                          <div className="text-[10px] sans py-2 text-center" style={{ color: 'var(--muted-foreground)' }}>No matches</div>
-                        )}
-                      </div>
-                      <button onClick={saveDeptMembers} disabled={deptSaving}
-                        className="mt-2 w-full px-2 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
-                        style={{ background: '#c17f3e', color: 'white' }}>
-                        {deptSaving ? 'Saving…' : 'Save Members'}
-                      </button>
-                    </div>
-                  )}
+                <div key={dept.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg mb-1" style={{ background: '#c17f3e08' }}>
+                  <span className="text-xs sans font-medium flex-1" style={{ color: '#c17f3e' }}>
+                    {dept.name}
+                    <span className="ml-1 text-[10px]" style={{ color: 'var(--muted-foreground)' }}>({memberCount} members)</span>
+                  </span>
                 </div>
               )
             })}
-
-            <div className="flex items-center gap-2 mt-2">
-              <input type="text" placeholder="New department name…" value={newDeptName}
-                onChange={e => setNewDeptName(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && addDepartment()}
-                className="flex-1 px-2 py-1.5 rounded-lg border text-xs sans"
-                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
-              <button onClick={addDepartment} disabled={deptSaving || !newDeptName.trim()}
-                className="px-3 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
-                style={{ background: '#c17f3e', color: 'white' }}>
-                Add
-              </button>
-            </div>
           </div>
         </div>
 
@@ -602,6 +693,7 @@ export default function ShepherdTree() {
 
   // Layer management modal
   const [layerModalOpen, setLayerModalOpen] = useState(false)
+  const [deptModalOpen, setDeptModalOpen] = useState(false)
   const [newLayerName, setNewLayerName] = useState('')
   const [newLayerCategory, setNewLayerCategory] = useState<'staff' | 'volunteer'>('staff')
 
@@ -1023,6 +1115,11 @@ export default function ShepherdTree() {
               style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
               Manage Layers
             </button>
+            <button onClick={() => setDeptModalOpen(true)}
+              className="text-xs sans px-4 py-2 rounded-lg font-medium border"
+              style={{ borderColor: 'var(--border)', color: '#c17f3e' }}>
+              Departments
+            </button>
           </div>
         )}
       </div>
@@ -1217,7 +1314,7 @@ export default function ShepherdTree() {
               // ── Regular node ──
               const isShepherd = node.role === 'shepherd'
               const isManual = !!node.layerId
-              const color = node.isLeadPastor ? '#7c3aed' : isManual ? '#3b6ea5' : isShepherd ? '#4a7c59' : '#6b7280'
+              const color = node.warning === 'Unconnected' ? '#9b3a3a' : node.isLeadPastor ? '#7c3aed' : isManual ? '#3b6ea5' : isShepherd ? '#4a7c59' : '#6b7280'
               const health = healthColor(node)
               const isSelected = selected?.id === node.id
               const initials = node.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
@@ -1270,7 +1367,7 @@ export default function ShepherdTree() {
 
                   {node.warning && (
                     <g transform={`translate(${NODE_W - 16}, 4)`}>
-                      <polygon points="6,0 12,11 0,11" fill="#c17f3e" />
+                      <polygon points="6,0 12,11 0,11" fill={node.warning === 'Unconnected' ? '#9b3a3a' : '#c17f3e'} />
                       <text x={6} y={9} textAnchor="middle" fontSize={8} fontWeight="700" fill="white">!</text>
                     </g>
                   )}
@@ -1509,7 +1606,7 @@ export default function ShepherdTree() {
                 )}
                 {selected.warning && (
                   <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
-                    style={{ background: '#fef3cd', color: '#856404' }}>{selected.warning}</span>
+                    style={{ background: selected.warning === 'Unconnected' ? '#9b3a3a20' : '#fef3cd', color: selected.warning === 'Unconnected' ? '#9b3a3a' : '#856404' }}>{selected.warning}</span>
                 )}
               </div>
 
@@ -1807,7 +1904,6 @@ export default function ShepherdTree() {
           layers={layers}
           departments={departments}
           departmentMembers={departmentMembers}
-          allStaffPeople={allStaffPeople}
           newLayerName={newLayerName}
           setNewLayerName={setNewLayerName}
           newLayerCategory={newLayerCategory}
@@ -1817,8 +1913,18 @@ export default function ShepherdTree() {
           removeLayer={removeLayer}
           onClose={() => setLayerModalOpen(false)}
           onConfirm={fetchTree}
-          onDepartmentsChange={fetchTree}
+          onOpenDeptModal={() => { setLayerModalOpen(false); setDeptModalOpen(true) }}
         />}
+
+        {deptModalOpen && (
+          <DepartmentModal
+            departments={departments}
+            departmentMembers={departmentMembers}
+            allStaffPeople={allStaffPeople}
+            onClose={() => setDeptModalOpen(false)}
+            onChange={fetchTree}
+          />
+        )}
       </div>
     </div>
   )
