@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react'
 interface AutoSyncSettings {
   enabled: boolean
   frequency: 'daily' | 'weekly' | 'monthly'
+  fixedMonths: number
 }
 
 const FREQ_LABELS: Record<string, string> = {
@@ -14,7 +15,7 @@ const FREQ_LABELS: Record<string, string> = {
 }
 
 export default function PcoAutoSyncSettings() {
-  const [settings, setSettings] = useState<AutoSyncSettings>({ enabled: false, frequency: 'daily' })
+  const [settings, setSettings] = useState<AutoSyncSettings>({ enabled: false, frequency: 'daily', fixedMonths: 6 })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -24,7 +25,7 @@ export default function PcoAutoSyncSettings() {
       .then(r => r.json())
       .then(data => {
         if (data.enabled !== undefined) {
-          setSettings({ enabled: data.enabled, frequency: data.frequency || 'daily' })
+          setSettings({ enabled: data.enabled, frequency: data.frequency || 'daily', fixedMonths: data.fixedMonths ?? 6 })
         }
       })
       .catch(() => {})
@@ -43,6 +44,7 @@ export default function PcoAutoSyncSettings() {
           action: 'save_auto_sync',
           enabled: newSettings.enabled,
           frequency: newSettings.frequency,
+          fixedMonths: newSettings.fixedMonths,
         }),
       })
       setSaved(true)
@@ -107,6 +109,37 @@ export default function PcoAutoSyncSettings() {
           ))}
         </div>
       )}
+
+      {/* Fixed-data threshold */}
+      <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--border)' }}>
+        <h4 className="text-sm sans font-medium mb-1" style={{ color: 'var(--foreground)' }}>
+          Fixed Data Threshold
+        </h4>
+        <p className="text-xs sans mb-3" style={{ color: 'var(--foreground-muted)' }}>
+          Data older than this is considered fixed and won&apos;t be re-synced.
+          Only data newer than this threshold is fetched on each sync.
+          Use &ldquo;Force Full Sync&rdquo; to re-sync everything.
+        </p>
+        <div className="flex items-center gap-2">
+          <select
+            value={settings.fixedMonths}
+            onChange={(e) => handleSave({ ...settings, fixedMonths: parseInt(e.target.value, 10) })}
+            disabled={saving}
+            className="px-3 py-2 rounded-lg border text-sm sans"
+            style={{ borderColor: 'var(--border)', color: 'var(--foreground)', background: 'var(--card)' }}
+          >
+            <option value={3}>3 months</option>
+            <option value={6}>6 months</option>
+            <option value={9}>9 months</option>
+            <option value={12}>12 months</option>
+            <option value={18}>18 months</option>
+            <option value={24}>24 months</option>
+          </select>
+          <span className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
+            ago
+          </span>
+        </div>
+      </div>
     </div>
   )
 }

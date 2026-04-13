@@ -23,6 +23,7 @@ interface ResourceInfo {
   dbCount: number     // already in our DB
   toSync: number      // how many to fetch this run (0 = skip)
   updatedSince: string | null
+  createdSince: string | null
   isNested: boolean
   cursor?: any        // for nested resources
 }
@@ -183,6 +184,7 @@ export default function PcoSyncPanel() {
                 offset,
                 syncLogId,
                 updatedSince: info.updatedSince || null,
+                createdSince: info.createdSince || null,
               }),
             })
             const pageData = await pageRes.json()

@@ -83,12 +83,13 @@ export async function GET(request: NextRequest) {
       const { data: settings } = await admin
         .from('app_settings')
         .select('key, value')
-        .in('key', ['pco_sync_enabled', 'pco_sync_frequency'])
+        .in('key', ['pco_sync_enabled', 'pco_sync_frequency', 'sync_fixed_months'])
 
       const settingsMap = Object.fromEntries((settings || []).map(s => [s.key, s.value]))
       return NextResponse.json({
         enabled: settingsMap.pco_sync_enabled === 'true',
         frequency: settingsMap.pco_sync_frequency || 'daily',
+        fixedMonths: parseInt(settingsMap.sync_fixed_months || '6', 10),
       })
     }
 
@@ -152,6 +153,12 @@ export async function POST(request: NextRequest) {
         { key: 'pco_sync_frequency', value: body.frequency || 'daily' },
         { onConflict: 'key' }
       )
+      if (body.fixedMonths !== undefined) {
+        await admin.from('app_settings').upsert(
+          { key: 'sync_fixed_months', value: String(body.fixedMonths) },
+          { onConflict: 'key' }
+        )
+      }
       return NextResponse.json({ success: true })
     }
 
@@ -179,11 +186,30 @@ export async function POST(request: NextRequest) {
         ? (Date.now() - new Date(lastSuccessfulSync).getTime()) / 86400000
         : Infinity
 
+      // ── Fixed-data threshold ────────────────────────────────────
+      // Data older than this is "fixed" — already grabbed, never re-synced.
+      // Only data newer than the threshold gets re-fetched each sync.
+      // Force full sync ignores this and re-syncs everything.
+      let fixedMonths = 6 // default
+      try {
+        const { data: setting } = await admin
+          .from('app_settings').select('value')
+          .eq('key', 'sync_fixed_months').single()
+        if (setting?.value) fixedMonths = parseInt(setting.value, 10) || 6
+      } catch { /* use default */ }
+
+      const hasExistingData = lastSuccessfulSync !== null
+      // Only apply threshold on subsequent syncs (first sync grabs everything)
+      const fixedThreshold = (!forceFullSync && hasExistingData)
+        ? new Date(Date.now() - fixedMonths * 30 * 86400000).toISOString()
+        : null
+
       const resourceInfo: Record<string, {
         pcoCount: number
         dbCount: number
         toSync: number
         updatedSince: string | null
+        createdSince: string | null
         isNested: boolean
         cursor?: NestedCursor
       }> = {}
@@ -199,52 +225,57 @@ export async function POST(request: NextRequest) {
         } catch { /* table might not exist yet */ }
 
         // Per-resource cache: skip if we have data and last sync was within cacheDays (unless force)
-        const cacheDays = res.cacheDays ?? (res.isNested ? 7 : 0)  // nested default 7d, flat default 0 (no cache)
+        const cacheDays = res.cacheDays ?? (res.isNested ? 7 : 0)
         if (!forceFullSync && cacheDays > 0 && dbCount > 0 && daysSinceLastSync < cacheDays) {
           resourceInfo[res.key] = {
             pcoCount: dbCount,
             dbCount,
-            toSync: 0,     // skip — cache still fresh
+            toSync: 0,
             updatedSince: null,
+            createdSince: null,
             isNested: !!res.isNested,
           }
           continue
         }
 
+        // Determine createdSince for resources that support it
+        const createdSince = (res.supportsCreatedSince && fixedThreshold) ? fixedThreshold : null
+
         if (res.isNested) {
-          // Nested resources: DON'T build cursor now — parents may not be synced yet.
-          // Cursor will be built lazily on first sync_page call.
           resourceInfo[res.key] = {
-            pcoCount: -1,  // unknown until cursor is built
+            pcoCount: -1,
             dbCount,
-            toSync: -1,    // signal to client: always attempt
+            toSync: -1,
             updatedSince: null,
+            createdSince,
             isNested: true,
-            // no cursor — will be built lazily
           }
         } else {
-          const pcoCount = await getResourceCount(client, res)
-          let toSync: number
+          // For resources with updatedSince support: use threshold as the "since" date
+          // (data before threshold is fixed, we only fetch updates after it)
           let updatedSince: string | null = null
-
-          if (pcoCount < 0) {
-            // Count failed — always attempt sync anyway
-            toSync = -1
+          if (res.supportsUpdatedSince && fixedThreshold) {
+            updatedSince = fixedThreshold
           } else if (res.supportsUpdatedSince) {
             updatedSince = await getLastUpdated(admin, res.table, churchId!)
-            toSync = updatedSince
-              ? await getResourceCount(client, res, updatedSince)
-              : pcoCount
-            if (toSync < 0) toSync = pcoCount  // fallback if updated count fails
+          }
+
+          const pcoCount = await getResourceCount(client, res, updatedSince, createdSince)
+          let toSync: number
+
+          if (pcoCount < 0) {
+            toSync = -1
+          } else if (updatedSince || createdSince) {
+            // We're filtering — pcoCount is already the filtered count
+            toSync = pcoCount
           } else if (res.syncStrategy === 'upsert' && dbCount === pcoCount && pcoCount > 0) {
-            // Already have all records — skip (upsert would be a no-op)
             toSync = 0
           } else {
             toSync = pcoCount
           }
 
           resourceInfo[res.key] = {
-            pcoCount: Math.max(pcoCount, 0), dbCount, toSync, updatedSince, isNested: false,
+            pcoCount: Math.max(pcoCount, 0), dbCount, toSync, updatedSince, createdSince, isNested: false,
           }
         }
       }
@@ -266,7 +297,7 @@ export async function POST(request: NextRequest) {
 
     // ── Sync one page ──────────────────────────────────────────
     if (body.action === 'sync_page') {
-      const { resourceKey, offset = 0, syncLogId, updatedSince, cursor } = body
+      const { resourceKey, offset = 0, syncLogId, updatedSince, createdSince, cursor } = body
       const resource = SYNC_RESOURCES.find(r => r.key === resourceKey)
       if (!resource) return NextResponse.json({ error: 'Invalid resource' }, { status: 400 })
       if (!credentials?.app_id || !credentials?.app_secret) {
@@ -332,7 +363,7 @@ export async function POST(request: NextRequest) {
       } else {
         // ── Flat pagination ──────────────────────────────────────
         try {
-          const result = await fetchResourcePage(client, resource, offset, 100, updatedSince)
+          const result = await fetchResourcePage(client, resource, offset, 100, updatedSince, createdSince)
           rows = result.rows
           hasMore = result.hasMore
           totalCount = result.totalCount

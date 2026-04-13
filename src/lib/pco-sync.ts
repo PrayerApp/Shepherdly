@@ -29,6 +29,10 @@ export interface SyncResource {
   filterRow?: (item: any) => boolean
   /** If set, skip this resource when data exists and last sync was within this many days (unless force) */
   cacheDays?: number
+  /** Supports created_at-based threshold filtering (for fixed-data optimization) */
+  supportsCreatedSince?: boolean
+  /** PCO query param name for created_at filter, e.g. 'where[created_at][gte]' */
+  createdSinceParam?: string
   /** Nested resource: fetched per-parent from another table */
   isNested?: boolean
   nestedParentTable?: string
@@ -228,7 +232,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
-  // ── 8. Attendance / Check-Ins (own category, last 12 months only)
+  // ── 8. Attendance / Check-Ins ──────────────────────────────
   {
     key: 'attendance',
     label: 'Check-ins',
@@ -238,15 +242,9 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
-    cacheDays: 90,
-    queryParams: { order: '-created_at' },
-    /** Stop syncing once we hit check-ins older than 12 months */
-    filterRow: (c) => {
-      const createdAt = c.attributes?.created_at
-      if (!createdAt) return false
-      const twelveMonthsAgo = Date.now() - (365 * 86400000)
-      return new Date(createdAt).getTime() > twelveMonthsAgo
-    },
+    /** Supports created_at threshold — only resync data newer than the fixed threshold */
+    supportsCreatedSince: true,
+    createdSinceParam: 'where[created_at][gte]',
     mapRow: (c) => ({
       pco_id: c.id,
       pco_event_id: c.id,
@@ -466,6 +464,7 @@ export async function getResourceCount(
   client: PcoClient,
   resource: SyncResource,
   updatedSince?: string | null,
+  createdSince?: string | null,
 ): Promise<number> {
   if (resource.isNested) return 0  // nested counts come from getNestedResourceInfo
   try {
@@ -473,6 +472,9 @@ export async function getResourceCount(
     if (updatedSince && resource.supportsUpdatedSince) {
       params['where[updated_at][gte]'] = updatedSince
       params['order'] = 'updated_at'
+    }
+    if (createdSince && resource.supportsCreatedSince && resource.createdSinceParam) {
+      params[resource.createdSinceParam] = createdSince
     }
     const result = await client.get(resource.endpoint, params)
     return result.meta?.total_count || 0
@@ -488,6 +490,7 @@ export async function fetchResourcePage(
   offset: number,
   perPage: number,
   updatedSince?: string | null,
+  createdSince?: string | null,
 ): Promise<{ rows: Record<string, any>[]; hasMore: boolean; totalCount: number }> {
   const params: Record<string, string> = {
     per_page: String(perPage),
@@ -498,6 +501,9 @@ export async function fetchResourcePage(
     params['where[updated_at][gte]'] = updatedSince
     params['order'] = 'updated_at'
   }
+  if (createdSince && resource.supportsCreatedSince && resource.createdSinceParam) {
+    params[resource.createdSinceParam] = createdSince
+  }
 
   const result = await client.get(resource.endpoint, params)
   const data = result.data || []
@@ -505,12 +511,9 @@ export async function fetchResourcePage(
   const filtered = resource.filterRow ? data.filter(resource.filterRow) : data
   const rows = filtered.map((item: any) => resource.mapRow(item, included))
 
-  // If filterRow dropped ALL items on a full page, signal that we've hit the cutoff
-  const filteredOutAll = resource.filterRow && data.length > 0 && filtered.length === 0
-
   return {
     rows,
-    hasMore: filteredOutAll ? false : !!result.links?.next,
+    hasMore: !!result.links?.next,
     totalCount: result.meta?.total_count || 0,
   }
 }
