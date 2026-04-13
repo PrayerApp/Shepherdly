@@ -27,6 +27,8 @@ export interface SyncResource {
   mapRow: (item: any, included?: any[]) => Record<string, any>
   /** Optional client-side filter applied before mapRow — return false to skip */
   filterRow?: (item: any) => boolean
+  /** If set, skip this resource when data exists and last sync was within this many days (unless force) */
+  cacheDays?: number
   /** Nested resource: fetched per-parent from another table */
   isNested?: boolean
   nestedParentTable?: string
@@ -92,6 +94,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     mapRow: (gt) => ({
       pco_id: gt.id,
       name: gt.attributes.name || 'Unknown Type',
@@ -108,6 +111,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     mapRow: (g) => ({
       pco_id: g.id,
       name: g.attributes.name || 'Unnamed Group',
@@ -130,6 +134,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     isNested: true,
     nestedParentTable: 'groups',
     nestedEndpointTemplate: '/groups/v2/groups/{parentId}/memberships',
@@ -157,6 +162,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     mapRow: (e) => ({
       pco_id: e.id,
       pco_person_id: e.relationships?.person?.data?.id || null,
@@ -181,6 +187,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     mapRow: (ev) => ({
       pco_id: ev.id,
       pco_group_id: ev.relationships?.group?.data?.id || null,
@@ -203,6 +210,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     isNested: true,
     nestedParentTable: 'group_events',
     nestedEndpointTemplate: '/groups/v2/events/{parentId}/attendances',
@@ -229,6 +237,7 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    cacheDays: 90,
     mapRow: (c) => ({
       pco_id: c.id,
       pco_event_id: c.id,
