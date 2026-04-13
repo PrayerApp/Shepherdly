@@ -361,18 +361,19 @@ export async function GET() {
     }
 
     // Mark unconnected staff/volunteers (no supervisor, not LP, not elder)
-    // They won't be pooled in the tree — they'll appear in the bottom panel instead
     if (!supervisorId && !person.is_lead_pastor && layer.category !== 'elder') {
       isUnconnected = true
-      // Volunteers without supervisor → pool under first staff (or staff placeholder)
-      if (layer.category === 'volunteer') {
+      if (layer.category === 'staff') {
+        // Staff without supervisor: SKIP from tree entirely — bottom panel only
+        continue
+      } else if (layer.category === 'volunteer') {
+        // Volunteers without supervisor → pool under first staff (or staff placeholder)
         if (firstStaffAssignment) {
           supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
         } else {
           supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
         }
       }
-      // Staff without supervisor: NOT pooled in tree — shown in bottom panel only
     }
 
     nodes.push({
@@ -731,16 +732,15 @@ export async function GET() {
   }
 
   // ── Unassigned data for bottom panel ─────────────────────────
-  // Staff with no supervisor (unconnected)
+  // Staff with no supervisor (unconnected) — these were skipped from tree nodes above
   const unconnectedStaff: { id: string; name: string; layerName: string }[] = []
-  for (const n of nodes) {
-    if (n.isBridge || n.isPlaceholder || !n.personId) continue
-    if (n.layerId && n.warning === 'Unconnected') {
-      const layer = layerMap.get(n.layerId)
-      if (layer && layer.category === 'staff') {
-        unconnectedStaff.push({ id: n.personId, name: n.name, layerName: layer.name })
-      }
-    }
+  for (const a of (assignments || []) as AssignmentRow[]) {
+    const layer = layerMap.get(a.layer_id)
+    if (!layer || layer.category !== 'staff') continue
+    if (a.supervisor_person_id) continue // has a supervisor → connected
+    const person = personMap.get(a.person_id)
+    if (!person || person.is_lead_pastor) continue
+    unconnectedStaff.push({ id: a.person_id, name: person.name || 'Unknown', layerName: layer.name })
   }
   // Group types with no overseer
   const unlinkedGroupTypes = (groupTypes || [])
