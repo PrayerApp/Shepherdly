@@ -6,8 +6,8 @@ interface TreeNode {
   id: string
   personId?: string   // real DB person ID (for API calls); id may be compound like "uuid::group-xxx"
   name: string
-  role: 'shepherd' | 'member' | 'group' | 'team'
-  nodeType?: 'person' | 'group' | 'team'
+  role: 'shepherd' | 'member'
+  nodeType?: 'person'
   supervisorId: string | null
   flockCount: number
   lastCheckin: string | null
@@ -387,7 +387,7 @@ export default function ShepherdTree() {
         <div>
           <h1 className="font-serif text-xl" style={{ color: 'var(--primary)' }}>Shepherd Tree</h1>
           <p className="sans text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-            {nodes.filter(n => n.role === 'group').length} groups · {nodes.filter(n => n.role === 'team').length} teams · {nodes.filter(n => n.role === 'shepherd').length} shepherds · pinch to zoom
+            {new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId || n.id)).size} shepherds · {nodes.length} nodes · pinch to zoom
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -483,50 +483,10 @@ export default function ShepherdTree() {
 
             {/* Nodes */}
             {nodes.map(node => {
-              const isGroup = node.role === 'group' || node.role === 'team'
               const isShepherd = node.role === 'shepherd'
-              const color = isGroup
-                ? (node.role === 'group' ? '#2563eb' : '#7c3aed')
-                : isShepherd ? '#4a7c59' : '#6b7280'
+              const color = isShepherd ? '#4a7c59' : '#6b7280'
               const health = healthColor(node)
               const isSelected = selected?.id === node.id
-
-              if (isGroup) {
-                // ── Group/Team structural node ──
-                const icon = node.role === 'group' ? 'G' : 'T'
-                return (
-                  <g
-                    key={node.id}
-                    className="tree-node"
-                    transform={`translate(${node.x - NODE_W / 2}, ${node.y})`}
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => setSelected(isSelected ? null : node)}
-                  >
-                    <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
-                      fill={color + '0C'} stroke={isSelected ? color : color + '40'}
-                      strokeWidth={isSelected ? 2.5 : 1.5} strokeDasharray="6 3"
-                      filter="url(#shadow)" />
-                    <rect x={0} y={0} width={4} height={NODE_H} rx={2}
-                      fill={color} style={{ clipPath: 'inset(0 0 0 0 round 10px 0 0 10px)' }} />
-                    {/* Icon badge */}
-                    <rect x={12} y={NODE_H / 2 - 14} width={28} height={28} rx={6} fill={color + '20'} />
-                    <text x={26} y={NODE_H / 2 + 1} textAnchor="middle" dominantBaseline="middle"
-                      fontSize={13} fontWeight="700" fontFamily="system-ui" fill={color}>
-                      {icon}
-                    </text>
-                    {/* Name */}
-                    <text x={48} y={NODE_H / 2 - 7} fontSize={12} fontWeight="600" fontFamily="Georgia, serif"
-                      fill="var(--foreground)">
-                      {node.name.slice(0, 24)}{node.name.length > 24 ? '…' : ''}
-                    </text>
-                    {/* Type + count */}
-                    <text x={48} y={NODE_H / 2 + 9} fontSize={10} fontFamily="system-ui"
-                      fill="var(--muted-foreground)">
-                      {node.contextLabel || (node.role === 'group' ? 'Group' : 'Team')} · {node.flockCount} members
-                    </text>
-                  </g>
-                )
-              }
 
               // ── Person node ──
               const initials = node.name
@@ -598,20 +558,15 @@ export default function ShepherdTree() {
 
         {/* Detail panel */}
         {selected && (() => {
-          const isGroup = selected.role === 'group' || selected.role === 'team'
           const isShepherd = selected.role === 'shepherd'
-          const detailColor = isGroup
-            ? (selected.role === 'group' ? '#2563eb' : '#7c3aed')
-            : isShepherd ? '#4a7c59' : '#6b7280'
-          const initials = isGroup
-            ? (selected.role === 'group' ? 'G' : 'T')
-            : selected.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
+          const detailColor = isShepherd ? '#4a7c59' : '#6b7280'
+          const initials = selected.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
           return (
             <div className="absolute right-4 top-4 w-72 bg-white rounded-2xl shadow-xl border p-5"
               style={{ borderColor: 'var(--border)' }}>
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3">
-                  <div className={`w-11 h-11 ${isGroup ? 'rounded-lg' : 'rounded-full'} flex items-center justify-center text-sm font-semibold sans`}
+                  <div className="w-11 h-11 rounded-full flex items-center justify-center text-sm font-semibold sans"
                     style={{ background: detailColor + '20', color: detailColor }}>
                     {initials}
                   </div>
@@ -620,7 +575,7 @@ export default function ShepherdTree() {
                       {selected.name}
                     </div>
                     <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>
-                      {selected.contextLabel || (isGroup ? (selected.role === 'group' ? 'Group' : 'Team') : isShepherd ? 'Shepherd' : 'Member')}
+                      {selected.contextLabel || (isShepherd ? 'Shepherd' : 'Member')}
                     </div>
                   </div>
                 </div>
@@ -632,7 +587,7 @@ export default function ShepherdTree() {
               <div className="flex items-center gap-2 mb-4">
                 <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
                   style={{ background: detailColor + '15', color: detailColor }}>
-                  {isGroup ? (selected.role === 'group' ? 'Group' : 'Team') : isShepherd ? 'Shepherd' : 'Member'}
+                  {isShepherd ? 'Shepherd' : 'Member'}
                 </span>
                 {selected.warning && (
                   <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
@@ -641,26 +596,6 @@ export default function ShepherdTree() {
                   </span>
                 )}
               </div>
-
-              {/* Group/Team detail */}
-              {isGroup && (
-                <>
-                  <div className="rounded-xl p-3 mb-4" style={{ background: 'var(--muted)' }}>
-                    <div className="text-2xl font-serif text-center" style={{ color: 'var(--primary)' }}>
-                      {selected.flockCount}
-                    </div>
-                    <div className="text-xs sans text-center mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-                      Members
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setConnecting({ shepherdId: realId(selected), shepherdName: selected.name })}
-                    className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
-                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-                    Add Members to Flock
-                  </button>
-                </>
-              )}
 
               {/* Shepherd detail */}
               {isShepherd && (
@@ -713,7 +648,7 @@ export default function ShepherdTree() {
               )}
 
               {/* Member: assign shepherd */}
-              {!isShepherd && !isGroup && !connecting && (
+              {!isShepherd && !connecting && (
                 <div className="flex gap-2">
                   <button
                     onClick={() => setConnecting({ shepherdId: '', shepherdName: '' })}

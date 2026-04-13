@@ -71,20 +71,16 @@ export async function GET() {
   const trackedServiceTypeIds = new Set((serviceTypes || []).filter(st => st.is_tracked).map(st => st.id))
   const trackedServiceTypePcoIds = new Set((serviceTypes || []).filter(st => st.is_tracked).map(st => st.pco_id))
 
-  // Check if a group belongs to a tracked group type
   function isGroupTracked(group: { group_type_id?: string | null; pco_group_type_id?: string | null }): boolean {
     if (group.group_type_id && trackedGroupTypeIds.has(group.group_type_id)) return true
     if (group.pco_group_type_id && trackedGroupTypePcoIds.has(group.pco_group_type_id)) return true
-    // Groups without a type: include by default
     if (!group.group_type_id && !group.pco_group_type_id) return true
     return false
   }
 
-  // Check if a team belongs to a tracked service type
   function isTeamTracked(team: { service_type_id?: string | null; pco_service_type_id?: string | null }): boolean {
     if (team.service_type_id && trackedServiceTypeIds.has(team.service_type_id)) return true
     if (team.pco_service_type_id && trackedServiceTypePcoIds.has(team.pco_service_type_id)) return true
-    // Teams without a type: include by default
     if (!team.service_type_id && !team.pco_service_type_id) return true
     return false
   }
@@ -133,43 +129,20 @@ export async function GET() {
     teamMembers.get(tm.team_id)!.push({ personId: tm.person_id, role: tm.role || 'member' })
   }
 
-  // Track contexts for ALL people
-  const leaderPersonIds = new Set<string>()
-  const personContexts = new Map<string, Set<string>>()
-
-  const addContext = (personId: string, label: string) => {
-    if (!personContexts.has(personId)) personContexts.set(personId, new Set())
-    personContexts.get(personId)!.add(label)
-  }
-
-  // ── Build tree nodes ─────────────────────────────────────────
-  // The tree has three types of nodes:
-  //   - 'group' / 'team': structural container nodes (represent a group or team)
-  //   - 'shepherd': person with leader role
-  //   - 'member': person with non-leader role
-  //
-  // Structure:
-  //   Group/Team Node (root)
-  //     ├── Leader (shepherd) — if group has a PCO leader
-  //     │    ├── Member
-  //     │    └── Member
-  //     ├── Member (directly under group if no leader)
-  //     └── Member
-
-  // People can appear in multiple groups/teams — each appearance gets a
-  // unique node ID (personId::contextNodeId) so the tree shows them under
-  // every group/team they belong to. `personId` is preserved for API calls.
+  // ── Build PERSON-BASED tree ──────────────────────────────────
+  // Structure: Leaders are roots (per group/team), members hang under them.
+  // People can appear multiple times (once per group/team they belong to).
+  // Each node gets a compound ID: personId::contextId
   const nodes: any[] = []
 
-  // Helper: create a person node scoped to a group/team context
   const personNode = (
-    personId: string, contextNodeId: string, role: 'shepherd' | 'member',
-    supervisorId: string, contextLabel: string, flockCount: number,
+    personId: string, contextId: string, role: 'shepherd' | 'member',
+    supervisorId: string | null, contextLabel: string, flockCount: number,
   ) => {
     const person = personMap.get(personId)!
     return {
-      id: `${personId}::${contextNodeId}`,
-      personId,                          // real DB person ID for API calls
+      id: `${personId}::${contextId}`,
+      personId,
       name: person.name || 'Unknown',
       role,
       nodeType: 'person' as const,
@@ -193,41 +166,30 @@ export async function GET() {
 
     const groupTypeName = getGroupTypeName(group)
     const contextLabel = groupTypeName ? `${groupTypeName}: ${group.name}` : group.name || 'Group'
-    const groupNodeId = `group-${groupId}`
-
-    nodes.push({
-      id: groupNodeId,
-      name: group.name || 'Unnamed Group',
-      role: 'group',
-      nodeType: 'group',
-      supervisorId: null,
-      flockCount: validMembers.length,
-      lastCheckin: null,
-      isCurrentUser: false,
-      contextLabel: groupTypeName || 'Group',
-      warning: null,
-    })
+    const contextId = `group-${groupId}`
 
     const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
     const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
 
     if (leaders.length > 0) {
+      // Leaders are root nodes for this group context
       for (const leader of leaders) {
-        const leaderNodeId = `${leader.personId}::${groupNodeId}`
         nodes.push(personNode(
-          leader.personId, groupNodeId, 'shepherd', groupNodeId, contextLabel,
+          leader.personId, contextId, 'shepherd', null, contextLabel,
           Math.ceil(nonLeaders.length / leaders.length),
         ))
       }
+      // Distribute members round-robin among leaders
       for (let i = 0; i < nonLeaders.length; i++) {
         const m = nonLeaders[i]
         const assignedLeader = leaders[i % leaders.length]
-        const leaderNodeId = `${assignedLeader.personId}::${groupNodeId}`
-        nodes.push(personNode(m.personId, groupNodeId, 'member', leaderNodeId, contextLabel, 0))
+        const leaderNodeId = `${assignedLeader.personId}::${contextId}`
+        nodes.push(personNode(m.personId, contextId, 'member', leaderNodeId, contextLabel, 0))
       }
     } else {
+      // No leaders — all members appear as roots
       for (const m of validMembers) {
-        nodes.push(personNode(m.personId, groupNodeId, 'member', groupNodeId, contextLabel, 0))
+        nodes.push(personNode(m.personId, contextId, 'member', null, contextLabel, 0))
       }
     }
   }
@@ -243,20 +205,7 @@ export async function GET() {
 
     const serviceTypeName = getServiceTypeName(team)
     const contextLabel = serviceTypeName ? `${serviceTypeName}: ${team.name}` : team.name || 'Team'
-    const teamNodeId = `team-${teamId}`
-
-    nodes.push({
-      id: teamNodeId,
-      name: team.name || 'Unnamed Team',
-      role: 'team',
-      nodeType: 'team',
-      supervisorId: null,
-      flockCount: validMembers.length,
-      lastCheckin: null,
-      isCurrentUser: false,
-      contextLabel: serviceTypeName || 'Team',
-      warning: null,
-    })
+    const contextId = `team-${teamId}`
 
     const leaders = validMembers.filter(m => /leader|co.?leader/i.test(m.role))
     const nonLeaders = validMembers.filter(m => !/leader|co.?leader/i.test(m.role))
@@ -264,19 +213,19 @@ export async function GET() {
     if (leaders.length > 0) {
       for (const leader of leaders) {
         nodes.push(personNode(
-          leader.personId, teamNodeId, 'shepherd', teamNodeId, contextLabel,
+          leader.personId, contextId, 'shepherd', null, contextLabel,
           Math.ceil(nonLeaders.length / leaders.length),
         ))
       }
       for (let i = 0; i < nonLeaders.length; i++) {
         const m = nonLeaders[i]
         const assignedLeader = leaders[i % leaders.length]
-        const leaderNodeId = `${assignedLeader.personId}::${teamNodeId}`
-        nodes.push(personNode(m.personId, teamNodeId, 'member', leaderNodeId, contextLabel, 0))
+        const leaderNodeId = `${assignedLeader.personId}::${contextId}`
+        nodes.push(personNode(m.personId, contextId, 'member', leaderNodeId, contextLabel, 0))
       }
     } else {
       for (const m of validMembers) {
-        nodes.push(personNode(m.personId, teamNodeId, 'member', teamNodeId, contextLabel, 0))
+        nodes.push(personNode(m.personId, contextId, 'member', null, contextLabel, 0))
       }
     }
   }
@@ -287,9 +236,7 @@ export async function GET() {
     if (!personMap.has(r.shepherd_id) || !personMap.has(r.person_id)) continue
     if (r.shepherd_id === r.person_id) continue
 
-    const manualContextId = `manual-${r.shepherd_id}`
-
-    // Add a shepherd root node if not already added for this shepherd
+    // Add shepherd as root if not already added for manual context
     if (!manualShepherdIds.has(r.shepherd_id)) {
       manualShepherdIds.add(r.shepherd_id)
       const person = personMap.get(r.shepherd_id)!
@@ -311,7 +258,7 @@ export async function GET() {
     const shepherdTreeId = `${r.shepherd_id}::manual`
     const person = personMap.get(r.person_id)!
     nodes.push({
-      id: `${r.person_id}::${manualContextId}`,
+      id: `${r.person_id}::manual-${r.shepherd_id}`,
       personId: r.person_id,
       name: person.name || 'Unknown',
       role: 'member',
@@ -329,6 +276,43 @@ export async function GET() {
     if (shepherdNode) shepherdNode.flockCount++
   }
 
+  // ── Also add manual root leaders that have no manual flock yet ──
+  // (e.g. Joe Henseler added as root via "Add Person" but nobody assigned under him)
+  // These people were marked is_leader=true when added via addPersonToTree
+  // They show up in manualRelationships only if someone is under them.
+  // Check for people who are leaders but don't appear in any tree node yet:
+  const peopleInTree = new Set<string>()
+  for (const n of nodes) {
+    if (n.personId) peopleInTree.add(n.personId)
+  }
+
+  // People marked as is_leader who aren't in any tracked group/team/manual context
+  // Check the is_leader flag
+  const { data: leaderPeople } = await admin.from('people')
+    .select('id, name')
+    .eq('church_id', churchId!)
+    .eq('is_leader', true)
+    .not('name', 'like', '\\_%').not('name', 'like', '-%')
+    .neq('membership_type', 'SYSTEM USE - Do Not Delete')
+
+  for (const lp of leaderPeople || []) {
+    if (!peopleInTree.has(lp.id)) {
+      nodes.push({
+        id: `${lp.id}::leader-root`,
+        personId: lp.id,
+        name: lp.name || 'Unknown',
+        role: 'shepherd',
+        nodeType: 'person',
+        supervisorId: null,
+        flockCount: 0,
+        lastCheckin: lastCheckin[lp.id] || null,
+        isCurrentUser: false,
+        contextLabel: 'Leader',
+        warning: null,
+      })
+    }
+  }
+
   // ── Mark current user (all appearances) ──────────────────
   let currentUserPersonId: string | null = null
   if (currentUser?.person_id && personMap.has(currentUser.person_id)) {
@@ -343,11 +327,27 @@ export async function GET() {
     }
   }
 
+  // Count stats
+  const shepherdCount = new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId)).size
+  const groupCount = new Set(
+    Array.from(groupMembers.keys()).filter(gid => {
+      const g = groupMap.get(gid)
+      return g && isGroupTracked(g) && (groupMembers.get(gid) || []).some(m => personMap.has(m.personId))
+    })
+  ).size
+  const teamCount = new Set(
+    Array.from(teamMembers.keys()).filter(tid => {
+      const t = teamMap.get(tid)
+      return t && isTeamTracked(t) && (teamMembers.get(tid) || []).some(m => personMap.has(m.personId))
+    })
+  ).size
+
   return NextResponse.json({
     nodes,
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
-    serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name })),
+    serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
+    stats: { shepherdCount, groupCount, teamCount },
   })
 }
 
