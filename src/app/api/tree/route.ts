@@ -16,9 +16,8 @@ export async function GET() {
   const admin = createAdminClient()
   const churchId = currentUser?.church_id
 
-  // Parallel fetch all needed data (use range to bypass 1000-row default)
+  // Phase 1: Fetch memberships, config, and relationships (NOT people yet)
   const [
-    { data: people },
     { data: groupMemberships },
     { data: groups },
     { data: teamMemberships },
@@ -27,12 +26,8 @@ export async function GET() {
     { data: recentReports },
     { data: groupTypes },
     { data: serviceTypes },
+    { data: leaderPeople },
   ] = await Promise.all([
-    admin.from('people').select('id, name, pco_id, status, membership_type')
-      .eq('church_id', churchId!)
-      .not('name', 'like', '\\_%').not('name', 'like', '-%')
-      .neq('membership_type', 'SYSTEM USE - Do Not Delete')
-      .range(0, 49999),
     admin.from('group_memberships').select('person_id, group_id, role, is_active')
       .eq('church_id', churchId!).eq('is_active', true)
       .range(0, 49999),
@@ -53,9 +48,34 @@ export async function GET() {
       .eq('church_id', churchId!).order('name'),
     admin.from('service_types').select('id, pco_id, name, is_tracked')
       .eq('church_id', churchId!).order('name'),
+    admin.from('people').select('id, name')
+      .eq('church_id', churchId!).eq('is_leader', true),
   ])
 
-  if (!people || people.length === 0) {
+  // Phase 2: Collect all person IDs we actually need for the tree
+  const neededPersonIds = new Set<string>()
+  for (const gm of groupMemberships || []) { if (gm.person_id) neededPersonIds.add(gm.person_id) }
+  for (const tm of teamMemberships || []) { if (tm.person_id) neededPersonIds.add(tm.person_id) }
+  for (const r of manualRelationships || []) {
+    if (r.shepherd_id) neededPersonIds.add(r.shepherd_id)
+    if (r.person_id) neededPersonIds.add(r.person_id)
+  }
+  for (const lp of leaderPeople || []) { neededPersonIds.add(lp.id) }
+  // Add the current user's person
+  if (currentUser?.person_id) neededPersonIds.add(currentUser.person_id)
+
+  // Fetch only needed people in batches (avoids 33K+ row limit issue)
+  const personIds = [...neededPersonIds]
+  const people: { id: string; name: string; pco_id: string | null; status: string; membership_type: string }[] = []
+  for (let i = 0; i < personIds.length; i += 500) {
+    const batch = personIds.slice(i, i + 500)
+    const { data } = await admin.from('people')
+      .select('id, name, pco_id, status, membership_type')
+      .in('id', batch)
+    if (data) people.push(...data)
+  }
+
+  if (people.length === 0) {
     return NextResponse.json({ nodes: [], currentUserRole: currentUser?.role, groupTypes: [], serviceTypes: [] })
   }
 
@@ -382,13 +402,6 @@ export async function GET() {
   const peopleInTree = new Set<string>()
   for (const n of nodes) { if (n.personId) peopleInTree.add(n.personId) }
 
-  const { data: leaderPeople } = await admin.from('people')
-    .select('id, name')
-    .eq('church_id', churchId!)
-    .eq('is_leader', true)
-    .not('name', 'like', '\\_%').not('name', 'like', '-%')
-    .neq('membership_type', 'SYSTEM USE - Do Not Delete')
-
   for (const lp of leaderPeople || []) {
     if (!peopleInTree.has(lp.id)) {
       nodes.push({
@@ -540,4 +553,47 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ message: `Assigned ${created} members`, count: created })
+}
+
+// DELETE: Remove a person from the tree (manual assignments only — not PCO data)
+export async function DELETE(request: Request) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const { data: currentUser } = await supabase
+    .from('users')
+    .select('id, name, role, church_id')
+    .eq('user_id', user.id)
+    .single()
+
+  if (!currentUser || !['super_admin', 'staff'].includes(currentUser.role)) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  const body = await request.json()
+  const { person_id } = body
+
+  if (!person_id) {
+    return NextResponse.json({ error: 'person_id required' }, { status: 400 })
+  }
+
+  const admin = createAdminClient()
+
+  // Remove is_leader flag
+  await admin.from('people')
+    .update({ is_leader: false })
+    .eq('id', person_id)
+    .eq('church_id', currentUser.church_id!)
+
+  // Remove all shepherding_relationships where this person is shepherd OR sheep
+  await admin.from('shepherding_relationships')
+    .delete()
+    .eq('shepherd_id', person_id)
+
+  await admin.from('shepherding_relationships')
+    .delete()
+    .eq('person_id', person_id)
+
+  return NextResponse.json({ success: true })
 }

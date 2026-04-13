@@ -199,6 +199,18 @@ export default function ShepherdTree() {
     fetchTree()
   }
 
+  /** Remove person from tree (manual assignments + is_leader flag) */
+  const removeFromTree = async (personId: string, personName: string) => {
+    if (!confirm(`Remove ${personName} from the tree? This removes manual assignments and leader status. PCO group/team memberships are not affected.`)) return
+    await fetch('/api/tree', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ person_id: personId }),
+    })
+    setSelected(null)
+    fetchTree()
+  }
+
   /** Add person as root leader */
   const addAsRoot = async (personId: string) => {
     await fetch(`/api/people/${personId}`, {
@@ -587,6 +599,14 @@ export default function ShepherdTree() {
                     style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
                     View Check-ins
                   </a>
+                )}
+                {['super_admin', 'staff'].includes(currentUserRole || '') && (
+                  <button
+                    onClick={() => removeFromTree(realId(selected), selected.name)}
+                    className="w-full text-center text-xs sans py-2 rounded-lg font-medium border mt-1"
+                    style={{ borderColor: 'var(--danger, #9b3a3a)', color: 'var(--danger, #9b3a3a)' }}>
+                    Remove from Tree
+                  </button>
                 )}
               </div>
             </div>
