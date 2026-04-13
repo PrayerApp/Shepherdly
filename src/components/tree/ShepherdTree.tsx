@@ -1078,6 +1078,20 @@ export default function ShepherdTree() {
     return () => document.removeEventListener('mousedown', handler)
   }, [filterOpen])
 
+  // All people on manual layers (for department tagging)
+  const allStaffPeople = useMemo(() => {
+    const seen = new Set<string>()
+    const result: { id: string; name: string }[] = []
+    for (const n of allNodes) {
+      const pid = n.personId || n.id
+      if (!seen.has(pid) && n.layerId) {
+        seen.add(pid)
+        result.push({ id: pid, name: n.name })
+      }
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name))
+  }, [allNodes])
+
   // ── Render states ────────────────────────────────────────────
 
   if (loading) return (
@@ -1142,20 +1156,6 @@ export default function ShepherdTree() {
   const elderLayers = layers.filter(l => l.category === 'elder')
   const staffLayers = layers.filter(l => l.category === 'staff')
   const volunteerLayers = layers.filter(l => l.category === 'volunteer')
-
-  // All people on manual layers (for department tagging)
-  const allStaffPeople = useMemo(() => {
-    const seen = new Set<string>()
-    const result: { id: string; name: string }[] = []
-    for (const n of allNodes) {
-      const pid = n.personId || n.id
-      if (!seen.has(pid) && n.layerId) {
-        seen.add(pid)
-        result.push({ id: pid, name: n.name })
-      }
-    }
-    return result.sort((a, b) => a.name.localeCompare(b.name))
-  }, [allNodes])
 
   return (
     <div className="flex flex-col h-full">
