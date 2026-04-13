@@ -1385,75 +1385,75 @@ export default function ShepherdTree() {
           const trackedGTs = groupTypes.filter(gt => gt.is_tracked)
           return (
             <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
-              <div className="w-[480px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>
+              <div className="w-[400px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
+                {/* Header — fixed */}
+                <div className="flex items-center justify-between px-5 pt-4 pb-3" style={{ borderBottom: '1px solid var(--border)' }}>
+                  <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>
                     Edit Roles — {editRolesFor.personName}
                   </h3>
                   <button onClick={() => setEditRolesFor(null)}
                     className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
                 </div>
 
-                {/* Staff toggle */}
-                <div className="flex items-center justify-between px-3 py-2.5 rounded-lg mb-4" style={{ background: 'var(--muted)' }}>
-                  <div>
-                    <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>Staff Member</div>
-                    <div className="text-[11px] sans" style={{ color: 'var(--muted-foreground)' }}>Tag this person as church staff</div>
+                {/* Scrollable content */}
+                <div className="overflow-y-auto px-5 py-3" style={{ flex: 1 }}>
+                  {/* Staff toggle */}
+                  <div className="flex items-center justify-between px-3 py-2 rounded-lg mb-3" style={{ background: 'var(--muted)' }}>
+                    <div>
+                      <div className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>Staff Member</div>
+                      <div className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>Tag as church staff</div>
+                    </div>
+                    <button
+                      onClick={() => toggleStaff(pid, !editRolesFor.isStaff)}
+                      disabled={savingRoles}
+                      className="relative w-9 h-5 rounded-full transition-colors flex-shrink-0"
+                      style={{ background: editRolesFor.isStaff ? 'var(--primary)' : 'var(--border)' }}>
+                      <span className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"
+                        style={{ transform: editRolesFor.isStaff ? 'translateX(16px)' : 'translateX(0)' }} />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => toggleStaff(pid, !editRolesFor.isStaff)}
-                    disabled={savingRoles}
-                    className="relative w-10 h-6 rounded-full transition-colors"
-                    style={{ background: editRolesFor.isStaff ? 'var(--primary)' : 'var(--border)' }}>
-                    <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"
-                      style={{ transform: editRolesFor.isStaff ? 'translateX(16px)' : 'translateX(0)' }} />
-                  </button>
-                </div>
 
-                {/* Oversight: Group Types */}
-                <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>
-                  Oversees Group Types
-                </p>
-                <div className="space-y-1 mb-4">
-                  {trackedGTs.length === 0 && (
-                    <p className="text-xs sans py-2" style={{ color: 'var(--muted-foreground)' }}>No tracked group types</p>
-                  )}
-                  {trackedGTs.map(gt => {
-                    const active = currentOversight.some(o => o.contextType === 'group_type' && o.contextId === gt.id)
-                    return (
-                      <label key={gt.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-50">
-                        <input type="checkbox" checked={active} disabled={savingRoles}
-                          onChange={() => toggleOversight(pid, 'group_type', gt.id, !active)}
-                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                        <div>
-                          <span className="text-sm sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
-                        </div>
-                      </label>
-                    )
-                  })}
-                </div>
+                  {/* Oversight: Group Types */}
+                  <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--muted-foreground)' }}>
+                    Oversees Group Types
+                  </p>
+                  <div className="mb-3">
+                    {trackedGTs.length === 0 && (
+                      <p className="text-xs sans py-1" style={{ color: 'var(--muted-foreground)' }}>No tracked group types</p>
+                    )}
+                    {trackedGTs.map(gt => {
+                      const active = currentOversight.some(o => o.contextType === 'group_type' && o.contextId === gt.id)
+                      return (
+                        <label key={gt.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
+                          <input type="checkbox" checked={active} disabled={savingRoles}
+                            onChange={() => toggleOversight(pid, 'group_type', gt.id, !active)}
+                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
 
-                {/* Oversight: Service Types */}
-                <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>
-                  Oversees Service Types
-                </p>
-                <div className="space-y-1 mb-2">
-                  {serviceTypes.length === 0 && (
-                    <p className="text-xs sans py-2" style={{ color: 'var(--muted-foreground)' }}>No service types</p>
-                  )}
-                  {serviceTypes.map(st => {
-                    const active = currentOversight.some(o => o.contextType === 'service_type' && o.contextId === st.id)
-                    return (
-                      <label key={st.id} className="flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer hover:bg-gray-50">
-                        <input type="checkbox" checked={active} disabled={savingRoles}
-                          onChange={() => toggleOversight(pid, 'service_type', st.id, !active)}
-                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                        <div>
-                          <span className="text-sm sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
-                        </div>
-                      </label>
-                    )
-                  })}
+                  {/* Oversight: Service Types */}
+                  <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--muted-foreground)' }}>
+                    Oversees Service Types
+                  </p>
+                  <div className="mb-1">
+                    {serviceTypes.length === 0 && (
+                      <p className="text-xs sans py-1" style={{ color: 'var(--muted-foreground)' }}>No service types</p>
+                    )}
+                    {serviceTypes.map(st => {
+                      const active = currentOversight.some(o => o.contextType === 'service_type' && o.contextId === st.id)
+                      return (
+                        <label key={st.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
+                          <input type="checkbox" checked={active} disabled={savingRoles}
+                            onChange={() => toggleOversight(pid, 'service_type', st.id, !active)}
+                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
+                        </label>
+                      )
+                    })}
+                  </div>
                 </div>
               </div>
             </div>

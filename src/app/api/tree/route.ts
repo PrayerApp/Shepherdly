@@ -404,22 +404,7 @@ export async function GET() {
     }
   }
 
-  // ── Manual 1:1 shepherding relationships ──────────────────
-  const manualShepherdIds = new Set<string>()
-  for (const r of manualRels) {
-    if (!manualShepherdIds.has(r.shepherd_id)) {
-      manualShepherdIds.add(r.shepherd_id)
-      nodes.push(mkNode(r.shepherd_id, 'manual', 'shepherd', null, 'Manual Assignment', 0))
-    }
-
-    const shepherdTreeId = `${r.shepherd_id}::manual`
-    nodes.push(mkNode(r.person_id, `manual-${r.shepherd_id}`, 'member', shepherdTreeId, 'Manual Assignment', 0))
-
-    const shepherdNode = nodes.find(n => n.id === shepherdTreeId)
-    if (shepherdNode) shepherdNode.flockCount++
-  }
-
-  // ── Root leaders without any group/team/manual context ────
+  // ── Root leaders (created BEFORE manual processing so they can be re-parented) ──
   const peopleInTree = new Set<string>()
   for (const n of nodes) { if (n.personId) peopleInTree.add(n.personId) }
 
@@ -442,7 +427,80 @@ export async function GET() {
         groupTypeId: null,
         serviceTypeId: null,
       })
+      peopleInTree.add(lp.id)
     }
+  }
+
+  // ── Manual 1:1 shepherding relationships ──────────────────
+  // Manual relationships define a supervisor chain. Instead of creating
+  // duplicate "manual" nodes, we re-parent existing root nodes under
+  // their manual shepherd. This avoids duplicates like Dave Peters
+  // appearing both as a root shepherd and as a member under Joe.
+  //
+  // Algorithm:
+  //  1. Build the manual hierarchy graph
+  //  2. Process top-down (roots first)
+  //  3. For each shepherd: ensure they have a node, then re-parent
+  //     their sheep's existing root nodes under them
+
+  const manualShepherdOf = new Map<string, string>() // personId → shepherdPersonId
+  const manualSheepOf = new Map<string, string[]>()  // shepherdId → [sheepPersonIds]
+  for (const r of manualRels) {
+    manualShepherdOf.set(r.person_id, r.shepherd_id)
+    if (!manualSheepOf.has(r.shepherd_id)) manualSheepOf.set(r.shepherd_id, [])
+    manualSheepOf.get(r.shepherd_id)!.push(r.person_id)
+  }
+
+  // Find manual chain roots (shepherds who are NOT someone else's sheep)
+  const manualRootIds = [...manualSheepOf.keys()].filter(id => !manualShepherdOf.has(id))
+
+  const processManualChain = (shepherdId: string, parentNodeId: string | null) => {
+    // Find this shepherd's existing root-level nodes
+    const existingRoots = nodes.filter(n => n.personId === shepherdId && !n.supervisorId)
+
+    let shepherdNodeId: string
+    if (existingRoots.length > 0) {
+      // Re-parent all root nodes under the parent (if there is one)
+      if (parentNodeId) {
+        for (const n of existingRoots) n.supervisorId = parentNodeId
+      }
+      // Use the first root node as the anchor for children
+      shepherdNodeId = existingRoots[0].id
+    } else {
+      // No existing node — create one
+      shepherdNodeId = `${shepherdId}::manual`
+      const sheep = manualSheepOf.get(shepherdId) || []
+      nodes.push(mkNode(shepherdId, 'manual', 'shepherd', parentNodeId, 'Shepherd', sheep.length))
+      peopleInTree.add(shepherdId)
+    }
+
+    // Process each sheep
+    const sheep = manualSheepOf.get(shepherdId) || []
+    for (const sheepId of sheep) {
+      const sheepRoots = nodes.filter(n => n.personId === sheepId && !n.supervisorId)
+
+      if (manualSheepOf.has(sheepId)) {
+        // This sheep is also a shepherd — recurse (they'll get re-parented)
+        processManualChain(sheepId, shepherdNodeId)
+      } else if (sheepRoots.length > 0) {
+        // Sheep has existing root nodes — re-parent them
+        for (const n of sheepRoots) n.supervisorId = shepherdNodeId
+      } else {
+        // Pure sheep with no other tree appearance — create a member node
+        nodes.push(mkNode(sheepId, `manual-${shepherdId}`, 'member', shepherdNodeId, 'Assigned', 0))
+        peopleInTree.add(sheepId)
+      }
+    }
+
+    // Update flock count on the shepherd's anchor node
+    const shepherdNode = nodes.find(n => n.id === shepherdNodeId)
+    if (shepherdNode) {
+      shepherdNode.flockCount = nodes.filter(n => n.supervisorId === shepherdNodeId).length
+    }
+  }
+
+  for (const rootId of manualRootIds) {
+    processManualChain(rootId, null)
   }
 
   // ── Mark current user (all appearances) ──────────────────
