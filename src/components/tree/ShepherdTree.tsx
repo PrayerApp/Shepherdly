@@ -12,13 +12,14 @@ interface TreeNode {
   lastCheckin: string | null
   isCurrentUser: boolean
   isStaff?: boolean
+  isLeadPastor?: boolean
   contextLabel: string | null
   warning: string | null
   groupTypeId?: string | null
   serviceTypeId?: string | null
+  layerId?: string | null
+  layerCategory?: string | null
 }
-
-interface OversightEntry { contextType: string; contextId: string; typeName: string }
 
 interface LayoutNode extends TreeNode {
   x: number
@@ -31,11 +32,14 @@ const NODE_W = 220
 const NODE_H = 72
 const H_GAP = 40
 const V_GAP = 100
-const CO_LEADER_GAP = 12 // tight gap between co-leaders
+const CO_LEADER_GAP = 12
 
 interface CoLeaderLink { from: string; to: string }
 interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
 interface ServiceTypeOption { id: string; name: string }
+interface LayerOption { id: string; name: string; category: string; rank: number }
+interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null }
+interface OversightEntry { contextType: string; contextId: string; typeName: string }
 
 function buildTree(nodes: TreeNode[]): LayoutNode[] {
   const map = new Map<string, LayoutNode>()
@@ -83,7 +87,6 @@ function buildTree(nodes: TreeNode[]): LayoutNode[] {
   return [...map.values()]
 }
 
-/** Post-process layout: pull co-leaders close together and compute midpoints */
 function applyCoLeaderLayout(
   nodes: LayoutNode[],
   coLeaderLinks: CoLeaderLink[],
@@ -96,11 +99,9 @@ function applyCoLeaderLayout(
     const toNode = nodeMap.get(link.to)
     if (!fromNode || !toNode) continue
 
-    // Calculate how far apart they are and how much to close the gap
     const currentGap = toNode.x - fromNode.x
     const desiredGap = NODE_W + CO_LEADER_GAP
     if (Math.abs(currentGap) <= desiredGap) {
-      // Already close enough
       const mx = (fromNode.x + toNode.x) / 2
       const my = fromNode.y + NODE_H
       midpoints.set(link.from, { mx, my })
@@ -110,7 +111,6 @@ function applyCoLeaderLayout(
     const shift = (Math.abs(currentGap) - desiredGap) / 2
     const sign = currentGap > 0 ? 1 : -1
 
-    // Collect all descendants of a node
     const getDescendants = (node: LayoutNode): LayoutNode[] => {
       const result: LayoutNode[] = []
       const stack = [...node.children]
@@ -122,12 +122,10 @@ function applyCoLeaderLayout(
       return result
     }
 
-    // Shift from-node and descendants towards to-node
     const fromDescendants = getDescendants(fromNode)
     fromNode.x += shift * sign
     for (const d of fromDescendants) d.x += shift * sign
 
-    // Shift to-node and descendants towards from-node
     const toDescendants = getDescendants(toNode)
     toNode.x -= shift * sign
     for (const d of toDescendants) d.x -= shift * sign
@@ -182,52 +180,50 @@ export default function ShepherdTree() {
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
   const [groupTypes, setGroupTypes] = useState<GroupTypeOption[]>([])
   const [serviceTypes, setServiceTypes] = useState<ServiceTypeOption[]>([])
+  const [layers, setLayers] = useState<LayerOption[]>([])
+  const [assignmentsMap, setAssignmentsMap] = useState<Record<string, AssignmentInfo>>({})
   const [oversightMap, setOversightMap] = useState<Record<string, OversightEntry[]>>({})
 
-  // Edit roles modal
-  const [editRolesFor, setEditRolesFor] = useState<{ personId: string; personName: string; isStaff: boolean } | null>(null)
-  const [savingRoles, setSavingRoles] = useState(false)
+  // Assignment modal
+  type AssignModal = {
+    personId: string
+    personName: string
+    layerId: string
+    supervisorPersonId: string
+    oversightEntries: { context_type: string; context_id: string }[]
+    isLeadPastor: boolean
+    isEdit: boolean
+  }
+  const [assignModal, setAssignModal] = useState<AssignModal | null>(null)
+  const [assignSearch, setAssignSearch] = useState('')
+  const [assignResults, setAssignResults] = useState<{ id: string; name: string }[]>([])
+  const [saving, setSaving] = useState(false)
+
+  // Layer management modal
+  const [layerModalOpen, setLayerModalOpen] = useState(false)
+  const [newLayerName, setNewLayerName] = useState('')
+  const [newLayerCategory, setNewLayerCategory] = useState<'staff' | 'volunteer'>('staff')
 
   // Search-to-navigate
   const [treeSearch, setTreeSearch] = useState('')
   const [treeSearchResults, setTreeSearchResults] = useState<LayoutNode[]>([])
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null)
 
-  // Filter — persisted in localStorage
+  // Filter
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterTab, setFilterTab] = useState<'groups' | 'services'>('groups')
   const [hiddenGroupTypes, setHiddenGroupTypes] = useState<Set<string>>(new Set())
   const [hiddenServiceTypes, setHiddenServiceTypes] = useState<Set<string>>(new Set())
   const [filterLoaded, setFilterLoaded] = useState(false)
 
-  // Modal state
-  type ModalMode =
-    | { type: 'add_to_flock'; personId: string; personName: string }
-    | { type: 'assign_shepherd'; personId: string; personName: string }
-    | { type: 'add_person' }
-  const [modal, setModal] = useState<ModalMode | null>(null)
-  const [searchTerm, setSearchTerm] = useState('')
-  const [addSearch, setAddSearch] = useState('')
-  const [addResults, setAddResults] = useState<{ id: string; name: string; pco_id: string | null }[]>([])
-  const [assignTab, setAssignTab] = useState<'person' | 'group_type' | 'service_type'>('person')
-  const [addPlacement, setAddPlacement] = useState<'root' | 'under_shepherd' | 'over_group_type' | 'over_service_type'>('root')
-  const [bulkAssigning, setBulkAssigning] = useState(false)
-
   // Pan & zoom
   const [transform, setTransform] = useState({ x: 0, y: 60, scale: 1 })
   const dragging = useRef(false)
   const lastPos = useRef({ x: 0, y: 0 })
 
-  const closeModal = () => {
-    setModal(null)
-    setSearchTerm('')
-    setAddSearch('')
-    setAddResults([])
-    setAssignTab('person')
-    setAddPlacement('root')
-  }
+  const isAdmin = ['super_admin', 'staff'].includes(currentUserRole || '')
 
-  // Load filter from localStorage on mount
+  // ── Persistence ──────────────────────────────────────────────
   useEffect(() => {
     try {
       const saved = localStorage.getItem('shepherdly-tree-filter')
@@ -240,7 +236,6 @@ export default function ShepherdTree() {
     setFilterLoaded(true)
   }, [])
 
-  // Save filter to localStorage when it changes (after initial load)
   useEffect(() => {
     if (!filterLoaded) return
     try {
@@ -251,7 +246,6 @@ export default function ShepherdTree() {
     } catch { /* ignore */ }
   }, [hiddenGroupTypes, hiddenServiceTypes, filterLoaded])
 
-  // Save/load default filter
   const saveDefaultFilter = () => {
     try {
       localStorage.setItem('shepherdly-tree-filter-default', JSON.stringify({
@@ -268,7 +262,6 @@ export default function ShepherdTree() {
         setHiddenGroupTypes(new Set(parsed.hiddenGroupTypes || []))
         setHiddenServiceTypes(new Set(parsed.hiddenServiceTypes || []))
       } else {
-        // No default saved — show everything
         setHiddenGroupTypes(new Set())
         setHiddenServiceTypes(new Set())
       }
@@ -279,7 +272,7 @@ export default function ShepherdTree() {
   }
   const hasDefaultFilter = typeof window !== 'undefined' && !!localStorage.getItem('shepherdly-tree-filter-default')
 
-  // Search-to-navigate
+  // ── Search-to-navigate ───────────────────────────────────────
   useEffect(() => {
     if (treeSearch.length < 2) { setTreeSearchResults([]); return }
     const q = treeSearch.toLowerCase()
@@ -310,19 +303,20 @@ export default function ShepherdTree() {
     setTimeout(() => setHighlightedNodeId(null), 3000)
   }, [transform.scale])
 
-  // Apply filter to raw nodes before building tree
-  // Staff members always remain visible even when their group/team type is filtered out
+  // ── Filter ───────────────────────────────────────────────────
+  // Staff/Elder nodes (isStaff or layerCategory) are immune from filtering
   const filteredNodes = useMemo(() => {
     if (hiddenGroupTypes.size === 0 && hiddenServiceTypes.size === 0) return allNodes
     return allNodes.filter(n => {
-      if (n.isStaff) return true // staff always visible
+      if (n.isStaff) return true
+      if (n.layerId) return true // manual hierarchy nodes always visible
       if (n.groupTypeId && hiddenGroupTypes.has(n.groupTypeId)) return false
       if (n.serviceTypeId && hiddenServiceTypes.has(n.serviceTypeId)) return false
       return true
     })
   }, [allNodes, hiddenGroupTypes, hiddenServiceTypes])
 
-  // Rebuild tree when filtered nodes or co-leader links change
+  // Rebuild tree when filtered nodes change
   useEffect(() => {
     if (filteredNodes.length === 0) { setNodes([]); setEdges([]); return }
     const laid = buildTree(filteredNodes)
@@ -332,6 +326,7 @@ export default function ShepherdTree() {
     setEdges(getAllEdges(laid))
   }, [filteredNodes, coLeaderLinks])
 
+  // ── Fetch tree ───────────────────────────────────────────────
   const fetchTree = useCallback(async () => {
     setLoading(true)
     const res = await fetch('/api/tree')
@@ -340,12 +335,13 @@ export default function ShepherdTree() {
 
     setAllNodes(data.nodes || [])
     setCoLeaderLinks(data.coLeaderLinks || [])
+    setLayers(data.layers || [])
+    setAssignmentsMap(data.assignments || {})
     setOversightMap(data.oversightMap || {})
     setCurrentUserRole(data.currentUserRole || null)
     setGroupTypes(data.groupTypes || [])
     setServiceTypes(data.serviceTypes || [])
 
-    // Initial transform: center tree
     const laid = buildTree(data.nodes || [])
     const midpoints = applyCoLeaderLayout(laid, data.coLeaderLinks || [])
     setCoLeaderMidpoints(midpoints)
@@ -363,129 +359,107 @@ export default function ShepherdTree() {
 
   useEffect(() => { fetchTree() }, [fetchTree])
 
-  // People search for add-person modal
+  // People search for assign modal
   useEffect(() => {
-    if (addSearch.length < 2) { setAddResults([]); return }
+    if (assignSearch.length < 2) { setAssignResults([]); return }
     const t = setTimeout(async () => {
-      const res = await fetch(`/api/people?search=${encodeURIComponent(addSearch)}&all=true`)
+      const res = await fetch(`/api/people?search=${encodeURIComponent(assignSearch)}&all=true`)
       const data = await res.json()
-      setAddResults((data.people || []).slice(0, 12).map((p: any) => ({
-        id: p.id, name: p.name, pco_id: p.pco_id,
+      setAssignResults((data.people || []).slice(0, 12).map((p: any) => ({
+        id: p.id, name: p.name,
       })))
     }, 300)
     return () => clearTimeout(t)
-  }, [addSearch])
+  }, [assignSearch])
 
   const realId = (node: TreeNode) => node.personId || node.id
 
   // ── Actions ──────────────────────────────────────────────────
 
-  const assignShepherd = async (personId: string, shepherdId: string) => {
-    const pid = personId.split('::')[0]
-    const sid = shepherdId.split('::')[0]
-    await fetch(`/api/people/${pid}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add_shepherd', shepherd_id: sid, context_type: 'manual' }),
+  const openAssignModal = (personId?: string, personName?: string) => {
+    const existing = personId ? assignmentsMap[personId] : null
+    const existingOversight = personId ? (oversightMap[personId] || []) : []
+    const existingPerson = personId ? allNodes.find(n => n.personId === personId) : null
+
+    setAssignModal({
+      personId: personId || '',
+      personName: personName || '',
+      layerId: existing?.layerId || layers[0]?.id || '',
+      supervisorPersonId: existing?.supervisorPersonId || '',
+      oversightEntries: existingOversight.map(o => ({ context_type: o.contextType, context_id: o.contextId })),
+      isLeadPastor: !!existingPerson?.isLeadPastor,
+      isEdit: !!existing,
     })
-    closeModal()
-    fetchTree()
+    setAssignSearch('')
+    setAssignResults([])
   }
 
-  const removeFromTree = async (personId: string, personName: string) => {
-    if (!confirm(`Remove ${personName} from the tree? This removes manual assignments and leader status. PCO group/team memberships are not affected.`)) return
-    await fetch('/api/tree', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ person_id: personId }),
-    })
-    setSelected(null)
-    fetchTree()
-  }
-
-  const addAsRoot = async (personId: string) => {
-    await fetch(`/api/people/${personId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_leader: true }),
-    })
-    closeModal()
-    fetchTree()
-  }
-
-  const addUnderShepherd = async (personId: string, shepherdId: string) => {
-    await fetch(`/api/people/${personId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'add_shepherd', shepherd_id: shepherdId, context_type: 'manual' }),
-    })
-    closeModal()
-    fetchTree()
-  }
-
-  const bulkAssignShepherd = async (shepherdId: string, typeKey: 'group_type_id' | 'service_type_id', typeId: string, typeName: string) => {
-    setBulkAssigning(true)
+  const saveAssignment = async () => {
+    if (!assignModal || !assignModal.personId || !assignModal.layerId) return
+    setSaving(true)
     try {
       const res = await fetch('/api/tree', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'bulk_assign',
-          shepherd_id: shepherdId,
-          [typeKey]: typeId,
+          action: 'save_assignment',
+          person_id: assignModal.personId,
+          layer_id: assignModal.layerId,
+          supervisor_person_id: assignModal.supervisorPersonId || null,
+          oversight: assignModal.oversightEntries,
+          is_lead_pastor: assignModal.isLeadPastor,
         }),
       })
       const data = await res.json()
       if (data.error) { alert('Error: ' + data.error); return }
-      alert(`Assigned as shepherd over "${typeName}"`)
-      closeModal()
-      fetchTree()
+      setAssignModal(null)
+      await fetchTree()
     } finally {
-      setBulkAssigning(false)
+      setSaving(false)
     }
   }
 
-  /** Toggle a single oversight assignment on or off */
-  const toggleOversight = async (personId: string, contextType: string, contextId: string, enabled: boolean) => {
-    setSavingRoles(true)
+  const removeAssignment = async (personId: string, personName: string) => {
+    if (!confirm(`Remove ${personName} from the manual hierarchy? They will still appear if they have PCO group/team memberships.`)) return
+    await fetch('/api/tree', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove_assignment', person_id: personId }),
+    })
+    setSelected(null)
+    setAssignModal(null)
+    await fetchTree()
+  }
+
+  const addLayer = async () => {
+    if (!newLayerName.trim()) return
+    setSaving(true)
     try {
-      await fetch('/api/tree', {
+      const res = await fetch('/api/tree', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'toggle_oversight', shepherd_id: personId, context_type: contextType, context_id: contextId, enabled }),
+        body: JSON.stringify({ action: 'add_layer', category: newLayerCategory, name: newLayerName.trim() }),
       })
-      // Also ensure is_leader is set if enabling any oversight
-      if (enabled) {
-        await fetch(`/api/people/${personId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ is_leader: true }),
-        })
-      }
+      const data = await res.json()
+      if (data.error) { alert('Error: ' + data.error); return }
+      setNewLayerName('')
       await fetchTree()
     } finally {
-      setSavingRoles(false)
+      setSaving(false)
     }
   }
 
-  /** Toggle staff tag */
-  const toggleStaff = async (personId: string, isStaff: boolean) => {
-    setSavingRoles(true)
-    try {
-      await fetch(`/api/people/${personId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_staff: isStaff }),
-      })
-      if (editRolesFor) setEditRolesFor({ ...editRolesFor, isStaff })
-      await fetchTree()
-    } finally {
-      setSavingRoles(false)
-    }
+  const removeLayer = async (layerId: string) => {
+    if (!confirm('Remove this layer? People assigned to it will be moved to another layer in the same category.')) return
+    await fetch('/api/tree', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove_layer', layer_id: layerId }),
+    })
+    await fetchTree()
   }
 
-  // ── Zoom helpers ────────────────────────────────────────────
-
+  // ── Zoom helpers ─────────────────────────────────────────────
   const zoomIn = () => setTransform(t => ({ ...t, scale: Math.min(3, t.scale * 1.3) }))
   const zoomOut = () => setTransform(t => ({ ...t, scale: Math.max(0.05, t.scale / 1.3) }))
   const fitAll = useCallback(() => {
@@ -500,15 +474,10 @@ export default function ShepherdTree() {
     const treeW = maxX - minX
     const treeH = maxY - minY
     const scale = Math.min(svgW / treeW, svgH / treeH, 1.5)
-    setTransform({
-      x: -minX - treeW / 2,
-      y: -minY + 20 / scale,
-      scale,
-    })
+    setTransform({ x: -minX - treeW / 2, y: -minY + 20 / scale, scale })
   }, [nodes])
 
   // ── Mouse / touch ────────────────────────────────────────────
-
   const onMouseDown = (e: React.MouseEvent) => {
     if ((e.target as Element).closest('.tree-node')) return
     dragging.current = true
@@ -531,17 +500,11 @@ export default function ShepherdTree() {
       e.preventDefault()
       e.stopPropagation()
       if (e.ctrlKey || e.metaKey) {
-        // Pinch / ctrl+scroll = zoom
         const sensitivity = 0.01
         const delta = 1 - e.deltaY * sensitivity
         setTransform(t => ({ ...t, scale: Math.min(3, Math.max(0.05, t.scale * delta)) }))
       } else {
-        // Regular scroll = pan
-        setTransform(t => ({
-          ...t,
-          x: t.x - e.deltaX / t.scale,
-          y: t.y - e.deltaY / t.scale,
-        }))
+        setTransform(t => ({ ...t, x: t.x - e.deltaX / t.scale, y: t.y - e.deltaY / t.scale }))
       }
     }
 
@@ -607,7 +570,7 @@ export default function ShepherdTree() {
     }
   }, [])
 
-  // Close filter dropdown when clicking outside
+  // Close dropdowns when clicking outside
   useEffect(() => {
     if (!filterOpen) return
     const handler = (e: MouseEvent) => {
@@ -639,35 +602,44 @@ export default function ShepherdTree() {
   if (nodes.length === 0 && allNodes.length === 0) return (
     <div className="flex-1 flex items-center justify-center text-center px-8">
       <div>
-        <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No leaders found</p>
+        <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No tree data yet</p>
         <p className="sans text-sm mb-4" style={{ color: 'var(--muted-foreground)' }}>
-          Sync your groups and teams from PCO, then add people to the tree.
+          Start by assigning people to the tree hierarchy. Sync groups and teams from PCO for automatic data below the volunteer layer.
         </p>
-        {['super_admin', 'staff'].includes(currentUserRole || '') && (
-          <button onClick={() => setModal({ type: 'add_person' })}
-            className="text-xs sans px-4 py-2 rounded-lg font-medium"
-            style={{ background: 'var(--primary)', color: 'white' }}>
-            + Add Person
-          </button>
+        {isAdmin && (
+          <div className="flex items-center justify-center gap-2">
+            <button onClick={() => openAssignModal()}
+              className="text-xs sans px-4 py-2 rounded-lg font-medium"
+              style={{ background: 'var(--primary)', color: 'white' }}>
+              + Assign Person
+            </button>
+            <button onClick={() => setLayerModalOpen(true)}
+              className="text-xs sans px-4 py-2 rounded-lg font-medium border"
+              style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+              Manage Layers
+            </button>
+          </div>
         )}
       </div>
     </div>
   )
 
-  // Build set of primary co-leader IDs (the "from" in each link) for edge origin override
   const primaryCoLeaderIds = new Set(coLeaderLinks.map(l => l.from))
 
-  // Deduplicated shepherd list for dropdowns
-  const shepherdOptions = allNodes
-    .filter(n => n.role === 'shepherd')
-    .filter((n, i, arr) => arr.findIndex(x => realId(x) === realId(n)) === i)
-    .sort((a, b) => a.name.localeCompare(b.name))
+  // People with manual assignments for supervisor dropdown
+  const assignedPeople = Object.entries(assignmentsMap).map(([pid, info]) => {
+    const person = allNodes.find(n => n.personId === pid)
+    return { id: pid, name: person?.name || 'Unknown', ...info }
+  }).sort((a, b) => a.layerName.localeCompare(b.layerName) || a.name.localeCompare(b.name))
 
-  // Tracked types for filter
   const trackedGroupTypes = groupTypes.filter(gt => gt.is_tracked)
   const trackedServiceTypes = serviceTypes
-
   const activeFilterCount = hiddenGroupTypes.size + hiddenServiceTypes.size
+
+  // Layer categories for the assign modal
+  const elderLayers = layers.filter(l => l.category === 'elder')
+  const staffLayers = layers.filter(l => l.category === 'staff')
+  const volunteerLayers = layers.filter(l => l.category === 'volunteer')
 
   return (
     <div className="flex flex-col h-full">
@@ -677,7 +649,7 @@ export default function ShepherdTree() {
         <div className="shrink-0">
           <h1 className="font-serif text-lg" style={{ color: 'var(--primary)' }}>Shepherd Tree</h1>
           <p className="sans text-[11px] mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-            {new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId || n.id)).size} shepherds · {nodes.length} people · scroll to pan, ctrl+scroll to zoom
+            {new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId || n.id)).size} shepherds · {nodes.length} nodes · scroll to pan, ctrl+scroll to zoom
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -707,19 +679,30 @@ export default function ShepherdTree() {
             )}
           </div>
 
-          {/* Health legend - hidden on small screens */}
+          {/* Health legend */}
           <div className="hidden lg:flex items-center gap-2.5 text-[11px] sans mr-1" style={{ color: 'var(--muted-foreground)' }}>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#4a7c59' }} />Healthy</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#c17f3e' }} />Attention</span>
             <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#9b3a3a' }} />At risk</span>
           </div>
 
-          {['super_admin', 'staff'].includes(currentUserRole || '') && (
-            <button onClick={() => setModal({ type: 'add_person' })}
-              className="text-xs sans px-3 py-1.5 rounded-lg font-medium"
-              style={{ background: 'var(--primary)', color: 'white' }}>
-              + Add Person
-            </button>
+          {isAdmin && (
+            <>
+              <button onClick={() => setLayerModalOpen(true)}
+                className="text-xs sans px-3 py-1.5 rounded-lg font-medium border"
+                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                title="Manage Layers">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="inline -mt-0.5 mr-1">
+                  <circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+                </svg>
+                Layers
+              </button>
+              <button onClick={() => openAssignModal()}
+                className="text-xs sans px-3 py-1.5 rounded-lg font-medium"
+                style={{ background: 'var(--primary)', color: 'white' }}>
+                + Assign Person
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -738,10 +721,9 @@ export default function ShepherdTree() {
           <rect width="100%" height="100%" fill="url(#grid)" />
 
           <g transform={`translate(${(svgRef.current?.clientWidth ?? 800) / 2 + transform.x * transform.scale}, ${transform.y}) scale(${transform.scale})`}>
-            {/* Edges — use co-leader midpoint as origin when applicable */}
+            {/* Edges */}
             {edges.map(({ from, to }) => {
               let fx = from.x, fy = from.y + NODE_H
-              // If parent is a primary co-leader, draw edge from midpoint instead
               if (primaryCoLeaderIds.has(from.id) && coLeaderMidpoints.has(from.id)) {
                 const mid = coLeaderMidpoints.get(from.id)!
                 fx = mid.mx
@@ -769,10 +751,8 @@ export default function ShepherdTree() {
               const midY = fromNode.y + NODE_H
               return (
                 <g key={`co-${link.from}-${link.to}`}>
-                  {/* Horizontal bar between cards */}
                   <line x1={x1} y1={y} x2={x2} y2={y}
                     stroke="#4a7c59" strokeWidth="2" strokeDasharray="6 3" />
-                  {/* Junction dot at bottom center — edge origin for children */}
                   <circle cx={midX} cy={midY} r={5} fill="#4a7c59" opacity="0.7" />
                 </g>
               )
@@ -781,7 +761,8 @@ export default function ShepherdTree() {
             {/* Nodes */}
             {nodes.map(node => {
               const isShepherd = node.role === 'shepherd'
-              const color = isShepherd ? '#4a7c59' : '#6b7280'
+              const isManual = !!node.layerId
+              const color = node.isLeadPastor ? '#7c3aed' : isManual ? '#3b6ea5' : isShepherd ? '#4a7c59' : '#6b7280'
               const health = healthColor(node)
               const isSelected = selected?.id === node.id
               const initials = node.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
@@ -804,13 +785,34 @@ export default function ShepherdTree() {
                   <rect x={0} y={0} width={4} height={NODE_H} rx={2}
                     fill={color} style={{ clipPath: 'inset(0 0 0 0 round 10px 0 0 10px)' }} />
 
-                  {isShepherd && !node.warning && <circle cx={NODE_W - 10} cy={10} r={4} fill={health} />}
-                  {node.isStaff && (
+                  {isShepherd && !node.warning && !isManual && <circle cx={NODE_W - 10} cy={10} r={4} fill={health} />}
+
+                  {/* Badges */}
+                  {node.isLeadPastor && (
+                    <g transform={`translate(${NODE_W - 82}, ${NODE_H - 16})`}>
+                      <rect x={0} y={0} width={74} height={14} rx={3} fill="#7c3aed" opacity="0.85" />
+                      <text x={37} y={10} textAnchor="middle" fontSize={8} fontWeight="700" fontFamily="system-ui" fill="white">LEAD PASTOR</text>
+                    </g>
+                  )}
+                  {!node.isLeadPastor && isManual && node.layerCategory === 'elder' && (
+                    <g transform={`translate(${NODE_W - 48}, ${NODE_H - 16})`}>
+                      <rect x={0} y={0} width={40} height={14} rx={3} fill="#7c3aed" opacity="0.7" />
+                      <text x={20} y={10} textAnchor="middle" fontSize={8} fontWeight="700" fontFamily="system-ui" fill="white">ELDER</text>
+                    </g>
+                  )}
+                  {isManual && node.layerCategory === 'staff' && (
                     <g transform={`translate(${NODE_W - 44}, ${NODE_H - 16})`}>
                       <rect x={0} y={0} width={36} height={14} rx={3} fill="#3b6ea5" opacity="0.85" />
                       <text x={18} y={10} textAnchor="middle" fontSize={8} fontWeight="700" fontFamily="system-ui" fill="white">STAFF</text>
                     </g>
                   )}
+                  {!isManual && node.isStaff && (
+                    <g transform={`translate(${NODE_W - 44}, ${NODE_H - 16})`}>
+                      <rect x={0} y={0} width={36} height={14} rx={3} fill="#3b6ea5" opacity="0.85" />
+                      <text x={18} y={10} textAnchor="middle" fontSize={8} fontWeight="700" fontFamily="system-ui" fill="white">STAFF</text>
+                    </g>
+                  )}
+
                   {node.warning && (
                     <g transform={`translate(${NODE_W - 16}, 4)`}>
                       <polygon points="6,0 12,11 0,11" fill="#c17f3e" />
@@ -855,13 +857,11 @@ export default function ShepherdTree() {
           </g>
         </svg>
 
-        {/* ── Floating controls (right side, map-style stacked circles) ── */}
+        {/* ── Floating controls ── */}
         <div className="absolute right-4 top-1/2 -translate-y-1/2 flex flex-col items-center gap-2.5 z-40 filter-dropdown">
-          {/* Filter button */}
           <button onClick={() => setFilterOpen(!filterOpen)}
             className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors relative"
-            style={{ borderColor: 'var(--border)' }}
-            title="Filter">
+            style={{ borderColor: 'var(--border)' }} title="Filter">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={activeFilterCount > 0 ? 'var(--primary)' : '#6b7280'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
             </svg>
@@ -872,47 +872,34 @@ export default function ShepherdTree() {
               </span>
             )}
           </button>
-
-          {/* Zoom in */}
           <button onClick={zoomIn}
             className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors text-lg font-bold"
-            style={{ borderColor: 'var(--border)', color: '#6b7280' }}
-            title="Zoom in">+</button>
-
-          {/* Zoom out */}
+            style={{ borderColor: 'var(--border)', color: '#6b7280' }} title="Zoom in">+</button>
           <button onClick={zoomOut}
             className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors text-lg font-bold"
-            style={{ borderColor: 'var(--border)', color: '#6b7280' }}
-            title="Zoom out">-</button>
-
-          {/* Fit all */}
+            style={{ borderColor: 'var(--border)', color: '#6b7280' }} title="Zoom out">-</button>
           <button onClick={fitAll}
             className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors"
-            style={{ borderColor: 'var(--border)' }}
-            title="Fit all">
+            style={{ borderColor: 'var(--border)' }} title="Fit all">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
             </svg>
           </button>
-
-          {/* Zoom level indicator */}
           <span className="text-[10px] sans font-medium" style={{ color: 'var(--muted-foreground)' }}>
             {Math.round(transform.scale * 100)}%
           </span>
         </div>
 
-        {/* ── Filter panel (opens from floating button) ── */}
+        {/* ── Filter panel ── */}
         {filterOpen && (
           <div className="absolute right-[72px] top-1/2 -translate-y-1/2 w-72 bg-white rounded-2xl shadow-2xl border z-50 filter-dropdown overflow-hidden"
             style={{ borderColor: 'var(--border)' }}>
-            {/* Header */}
             <div className="flex items-center justify-between px-4 pt-4 pb-2">
               <span className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Filter Tree</span>
               <button onClick={() => setFilterOpen(false)}
                 className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
             </div>
 
-            {/* Tabs */}
             <div className="flex mx-4 mb-3 rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
               <button onClick={() => setFilterTab('groups')}
                 className="flex-1 px-3 py-1.5 text-xs font-medium sans transition-colors"
@@ -926,22 +913,17 @@ export default function ShepherdTree() {
               </button>
             </div>
 
-            {/* Checkbox list */}
             <div className="px-4 pb-2 max-h-56 overflow-y-auto">
               {filterTab === 'groups' && (
                 <>
-                  {/* Select All */}
                   {trackedGroupTypes.length > 0 && (
                     <label className="flex items-center gap-2.5 px-1 py-1.5 cursor-pointer hover:bg-gray-50 rounded border-b mb-1 pb-2" style={{ borderColor: 'var(--border)' }}>
                       <input type="checkbox"
                         checked={hiddenGroupTypes.size === 0}
                         ref={el => { if (el) el.indeterminate = hiddenGroupTypes.size > 0 && hiddenGroupTypes.size < trackedGroupTypes.length }}
                         onChange={() => {
-                          if (hiddenGroupTypes.size === 0) {
-                            setHiddenGroupTypes(new Set(trackedGroupTypes.map(gt => gt.id)))
-                          } else {
-                            setHiddenGroupTypes(new Set())
-                          }
+                          if (hiddenGroupTypes.size === 0) setHiddenGroupTypes(new Set(trackedGroupTypes.map(gt => gt.id)))
+                          else setHiddenGroupTypes(new Set())
                         }}
                         className="rounded" style={{ accentColor: 'var(--primary)' }} />
                       <span className="text-xs sans font-semibold" style={{ color: 'var(--foreground)' }}>Select All</span>
@@ -969,7 +951,6 @@ export default function ShepherdTree() {
                   )}
                 </>
               )}
-
               {filterTab === 'services' && (
                 <>
                   {trackedServiceTypes.length > 0 && (
@@ -978,11 +959,8 @@ export default function ShepherdTree() {
                         checked={hiddenServiceTypes.size === 0}
                         ref={el => { if (el) el.indeterminate = hiddenServiceTypes.size > 0 && hiddenServiceTypes.size < trackedServiceTypes.length }}
                         onChange={() => {
-                          if (hiddenServiceTypes.size === 0) {
-                            setHiddenServiceTypes(new Set(trackedServiceTypes.map(st => st.id)))
-                          } else {
-                            setHiddenServiceTypes(new Set())
-                          }
+                          if (hiddenServiceTypes.size === 0) setHiddenServiceTypes(new Set(trackedServiceTypes.map(st => st.id)))
+                          else setHiddenServiceTypes(new Set())
                         }}
                         className="rounded" style={{ accentColor: 'var(--primary)' }} />
                       <span className="text-xs sans font-semibold" style={{ color: 'var(--foreground)' }}>Select All</span>
@@ -1012,15 +990,12 @@ export default function ShepherdTree() {
               )}
             </div>
 
-            {/* Footer actions */}
             <div className="px-4 py-3 border-t flex items-center justify-between" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
-              <div className="flex items-center gap-2">
-                <button onClick={resetToDefault}
-                  className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg border hover:bg-white transition-colors"
-                  style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
-                  {hasDefaultFilter ? 'Reset to Default' : 'Show All'}
-                </button>
-              </div>
+              <button onClick={resetToDefault}
+                className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg border hover:bg-white transition-colors"
+                style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
+                {hasDefaultFilter ? 'Reset to Default' : 'Show All'}
+              </button>
               <button onClick={() => { saveDefaultFilter(); setFilterOpen(false) }}
                 className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg transition-colors"
                 style={{ background: 'var(--primary)', color: 'white' }}>
@@ -1030,11 +1005,16 @@ export default function ShepherdTree() {
           </div>
         )}
 
-        {/* ── Detail panel (right side) ── */}
+        {/* ── Detail panel ── */}
         {selected && (() => {
           const isShepherd = selected.role === 'shepherd'
-          const detailColor = isShepherd ? '#4a7c59' : '#6b7280'
+          const isManual = !!selected.layerId
+          const detailColor = selected.isLeadPastor ? '#7c3aed' : isManual ? '#3b6ea5' : isShepherd ? '#4a7c59' : '#6b7280'
           const initials = selected.name.split(' ').map((p: string) => p[0]).join('').slice(0, 2).toUpperCase()
+          const pid = realId(selected)
+          const assignment = assignmentsMap[pid]
+          const personOversight = oversightMap[pid] || []
+
           return (
             <div className="absolute right-4 top-4 w-72 bg-white rounded-2xl shadow-xl border p-5"
               style={{ borderColor: 'var(--border)' }}>
@@ -1056,19 +1036,37 @@ export default function ShepherdTree() {
               </div>
 
               <div className="flex items-center gap-2 mb-3 flex-wrap">
-                <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
-                  style={{ background: detailColor + '15', color: detailColor }}>
-                  {isShepherd ? 'Shepherd' : 'Member'}
-                </span>
-                {selected.isStaff && (
+                {selected.isLeadPastor && (
                   <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
-                    style={{ background: '#3b6ea520', color: '#3b6ea5' }}>Staff</span>
+                    style={{ background: '#7c3aed20', color: '#7c3aed' }}>Lead Pastor</span>
+                )}
+                {assignment && (
+                  <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
+                    style={{ background: detailColor + '15', color: detailColor }}>
+                    {assignment.layerName}
+                  </span>
+                )}
+                {!assignment && (
+                  <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
+                    style={{ background: detailColor + '15', color: detailColor }}>
+                    {isShepherd ? 'Volunteer Leader' : 'Member'}
+                  </span>
                 )}
                 {selected.warning && (
                   <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
                     style={{ background: '#fef3cd', color: '#856404' }}>{selected.warning}</span>
                 )}
               </div>
+
+              {/* Oversight list */}
+              {personOversight.length > 0 && (
+                <div className="mb-3 px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--muted-foreground)' }}>Oversees</div>
+                  {personOversight.map((o, i) => (
+                    <div key={i} className="text-xs sans" style={{ color: 'var(--foreground)' }}>{o.typeName}</div>
+                  ))}
+                </div>
+              )}
 
               {isShepherd && (
                 <div className="grid grid-cols-2 gap-3 mb-3">
@@ -1084,39 +1082,27 @@ export default function ShepherdTree() {
               )}
 
               <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => setModal({ type: 'add_to_flock', personId: realId(selected), personName: selected.name })}
-                  className="w-full text-center text-xs sans py-2 rounded-lg font-medium"
-                  style={{ background: 'var(--primary)', color: 'white' }}>
-                  Add Sheep to Flock
-                </button>
-                <button
-                  onClick={() => setModal({ type: 'assign_shepherd', personId: realId(selected), personName: selected.name })}
-                  className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
-                  style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-                  Assign Shepherd Above
-                </button>
-                {['super_admin', 'staff'].includes(currentUserRole || '') && (
+                {isAdmin && (
                   <button
-                    onClick={() => setEditRolesFor({ personId: realId(selected), personName: selected.name, isStaff: !!selected.isStaff })}
-                    className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
-                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-                    Edit Roles & Oversight
+                    onClick={() => openAssignModal(pid, selected.name)}
+                    className="w-full text-center text-xs sans py-2 rounded-lg font-medium"
+                    style={{ background: 'var(--primary)', color: 'white' }}>
+                    {assignment ? 'Edit Assignment' : 'Assign to Layer'}
                   </button>
                 )}
                 {isShepherd && (
-                  <a href={`/checkins?shepherd=${realId(selected)}`}
+                  <a href={`/checkins?shepherd=${pid}`}
                     className="w-full text-center text-xs sans py-2 rounded-lg font-medium border"
                     style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
                     View Check-ins
                   </a>
                 )}
-                {['super_admin', 'staff'].includes(currentUserRole || '') && (
+                {isAdmin && assignment && (
                   <button
-                    onClick={() => removeFromTree(realId(selected), selected.name)}
+                    onClick={() => removeAssignment(pid, selected.name)}
                     className="w-full text-center text-xs sans py-2 rounded-lg font-medium border mt-1"
                     style={{ borderColor: 'var(--danger, #9b3a3a)', color: 'var(--danger, #9b3a3a)' }}>
-                    Remove from Tree
+                    Remove from Hierarchy
                   </button>
                 )}
               </div>
@@ -1125,342 +1111,302 @@ export default function ShepherdTree() {
         })()}
 
         {/* ══════════════════════════════════════════════════════
-            MODAL: Add to Flock
+            MODAL: Assign / Edit Person
            ══════════════════════════════════════════════════════ */}
-        {modal?.type === 'add_to_flock' && (
-          <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[440px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>
-                  Add sheep under {modal.personName}
+        {assignModal && (
+          <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
+            <div className="w-[440px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(85vh, 700px)', display: 'flex', flexDirection: 'column' }}>
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+                <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>
+                  {assignModal.isEdit ? `Edit — ${assignModal.personName}` : 'Assign Person to Tree'}
                 </h3>
-                <button onClick={closeModal} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+                <button onClick={() => setAssignModal(null)}
+                  className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              <div className="flex rounded-lg overflow-hidden border mb-3" style={{ borderColor: 'var(--border)' }}>
-                {([
-                  { key: 'person' as const, label: 'Person' },
-                  { key: 'group_type' as const, label: 'Group Type' },
-                  { key: 'service_type' as const, label: 'Service Type' },
-                ]).map(tab => (
-                  <button key={tab.key} onClick={() => setAssignTab(tab.key)}
-                    className="flex-1 px-2 py-1.5 text-xs font-medium sans transition-colors"
-                    style={{ background: assignTab === tab.key ? 'var(--primary)' : 'white', color: assignTab === tab.key ? 'white' : 'var(--muted-foreground)' }}>
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              {assignTab === 'person' && (
-                <>
-                  <input type="text" placeholder="Search by name..." value={searchTerm}
-                    onChange={e => setSearchTerm(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border text-sm sans mb-3"
-                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} autoFocus />
-                  <div className="max-h-56 overflow-y-auto space-y-1">
-                    {allNodes
-                      .filter(n => searchTerm && n.name.toLowerCase().includes(searchTerm.toLowerCase()) && realId(n) !== modal.personId)
-                      .filter((n, i, arr) => arr.findIndex(x => realId(x) === realId(n)) === i)
-                      .slice(0, 10)
-                      .map(n => (
-                        <button key={n.id} onClick={() => assignShepherd(realId(n), modal.personId)}
-                          className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left hover:bg-gray-50 transition-colors">
-                          <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
-                            style={{ background: '#6b728018', color: '#6b7280' }}>
-                            {n.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+              {/* Scrollable content */}
+              <div className="overflow-y-auto px-5 py-4 flex-1 space-y-4">
+                {/* Person search (only if not editing) */}
+                {!assignModal.isEdit && (
+                  <div>
+                    <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Person</label>
+                    {assignModal.personId ? (
+                      <div className="flex items-center gap-2 px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
+                        <span className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{assignModal.personName}</span>
+                        <button onClick={() => setAssignModal({ ...assignModal, personId: '', personName: '' })}
+                          className="text-xs ml-auto" style={{ color: 'var(--muted-foreground)' }}>Change</button>
+                      </div>
+                    ) : (
+                      <>
+                        <input type="text" placeholder="Search by name..." value={assignSearch}
+                          onChange={e => setAssignSearch(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border text-sm sans"
+                          style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} autoFocus />
+                        {assignResults.length > 0 && (
+                          <div className="mt-1 max-h-40 overflow-y-auto border rounded-lg" style={{ borderColor: 'var(--border)' }}>
+                            {assignResults.map(p => (
+                              <button key={p.id} onClick={() => {
+                                setAssignModal({ ...assignModal, personId: p.id, personName: p.name })
+                                setAssignSearch('')
+                                setAssignResults([])
+                              }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50 text-sm sans"
+                                style={{ color: 'var(--foreground)' }}>
+                                <div className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-medium sans shrink-0"
+                                  style={{ background: '#4a7c5918', color: '#4a7c59' }}>
+                                  {p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
+                                </div>
+                                {p.name}
+                                {assignmentsMap[p.id] && (
+                                  <span className="ml-auto text-[10px]" style={{ color: 'var(--muted-foreground)' }}>
+                                    Already: {assignmentsMap[p.id].layerName}
+                                  </span>
+                                )}
+                              </button>
+                            ))}
                           </div>
-                          <div>
-                            <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{n.name}</div>
-                            <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>{n.contextLabel || 'Person'}</div>
-                          </div>
-                        </button>
-                      ))}
-                    {!searchTerm && <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>Type a name to search</p>}
-                    {searchTerm && allNodes.filter(n => n.name.toLowerCase().includes(searchTerm.toLowerCase()) && realId(n) !== modal.personId).length === 0 && (
-                      <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>No matches found</p>
+                        )}
+                      </>
                     )}
                   </div>
-                </>
-              )}
-
-              {assignTab === 'group_type' && (
-                <div className="max-h-64 overflow-y-auto space-y-1">
-                  <p className="text-xs sans mb-2" style={{ color: 'var(--muted-foreground)' }}>
-                    Make {modal.personName} the shepherd over all members of a group type
-                  </p>
-                  {groupTypes.map(gt => (
-                    <button key={gt.id} disabled={bulkAssigning}
-                      onClick={() => bulkAssignShepherd(modal.personId, 'group_type_id', gt.id, gt.name)}
-                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left hover:bg-gray-50 transition-colors">
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold sans shrink-0"
-                        style={{ background: '#4a7c5918', color: '#4a7c59' }}>G</div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{gt.name}</div>
-                        <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>{gt.is_tracked ? 'Tracked' : 'Not tracked'}</div>
-                      </div>
-                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning...</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {assignTab === 'service_type' && (
-                <div className="max-h-64 overflow-y-auto space-y-1">
-                  <p className="text-xs sans mb-2" style={{ color: 'var(--muted-foreground)' }}>
-                    Make {modal.personName} the shepherd over all members of a service type
-                  </p>
-                  {serviceTypes.map(st => (
-                    <button key={st.id} disabled={bulkAssigning}
-                      onClick={() => bulkAssignShepherd(modal.personId, 'service_type_id', st.id, st.name)}
-                      className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-left hover:bg-gray-50 transition-colors">
-                      <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold sans shrink-0"
-                        style={{ background: '#3b6ea518', color: '#3b6ea5' }}>S</div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{st.name}</div>
-                        <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Service Type</div>
-                      </div>
-                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning...</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ══════════════════════════════════════════════════════
-            MODAL: Assign Shepherd Above
-           ══════════════════════════════════════════════════════ */}
-        {modal?.type === 'assign_shepherd' && (
-          <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[440px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>
-                  Assign shepherd over {modal.personName}
-                </h3>
-                <button onClick={closeModal} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
-              </div>
-              <input type="text" placeholder="Search for a shepherd..." value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border text-sm sans mb-3"
-                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} autoFocus />
-              <div className="max-h-56 overflow-y-auto space-y-1">
-                {allNodes
-                  .filter(n => searchTerm && n.name.toLowerCase().includes(searchTerm.toLowerCase()) && realId(n) !== modal.personId)
-                  .filter((n, i, arr) => arr.findIndex(x => realId(x) === realId(n)) === i)
-                  .slice(0, 10)
-                  .map(n => (
-                    <button key={n.id} onClick={() => assignShepherd(modal.personId, realId(n))}
-                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left hover:bg-gray-50 transition-colors">
-                      <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
-                        style={{ background: n.role === 'shepherd' ? '#4a7c5918' : '#6b728018', color: n.role === 'shepherd' ? '#4a7c59' : '#6b7280' }}>
-                        {n.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
-                      </div>
-                      <div>
-                        <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{n.name}</div>
-                        <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>
-                          {n.contextLabel || (n.role === 'shepherd' ? 'Shepherd' : 'Person')}
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                {!searchTerm && <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>Type a name to search</p>}
-                {searchTerm && allNodes.filter(n => n.name.toLowerCase().includes(searchTerm.toLowerCase()) && realId(n) !== modal.personId).length === 0 && (
-                  <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>No matches found</p>
                 )}
-              </div>
-            </div>
-          </div>
-        )}
 
-        {/* ══════════════════════════════════════════════════════
-            MODAL: Add Person to Tree
-           ══════════════════════════════════════════════════════ */}
-        {modal?.type === 'add_person' && (
-          <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[560px] bg-white rounded-2xl shadow-xl border p-5" style={{ borderColor: 'var(--border)' }}>
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="font-serif text-base" style={{ color: 'var(--primary)' }}>Add Person to Tree</h3>
-                <button onClick={closeModal} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
-              </div>
-
-              <p className="text-xs sans mb-3" style={{ color: 'var(--muted-foreground)' }}>
-                Search for anyone, then choose how to place them in the tree.
-              </p>
-              <input type="text" placeholder="Search by name..." value={addSearch}
-                onChange={e => setAddSearch(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border text-sm sans mb-3"
-                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} autoFocus />
-
-              <div className="flex rounded-lg overflow-hidden border mb-3" style={{ borderColor: 'var(--border)' }}>
-                {([
-                  { key: 'root' as const, label: 'As Root' },
-                  { key: 'under_shepherd' as const, label: 'Under Shepherd' },
-                  { key: 'over_group_type' as const, label: 'Over Group Type' },
-                  { key: 'over_service_type' as const, label: 'Over Service Type' },
-                ]).map(tab => (
-                  <button key={tab.key} onClick={() => setAddPlacement(tab.key)}
-                    className="flex-1 px-1.5 py-1.5 text-[11px] font-medium sans transition-colors"
-                    style={{ background: addPlacement === tab.key ? 'var(--primary)' : 'white', color: addPlacement === tab.key ? 'white' : 'var(--muted-foreground)' }}>
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="max-h-64 overflow-y-auto space-y-1">
-                {addResults.map(p => {
-                  const alreadyInTree = allNodes.some(n => (n.personId || n.id) === p.id)
-                  return (
-                    <div key={p.id} className="flex items-center gap-3 px-3 py-2.5 rounded-lg"
-                      style={{ background: alreadyInTree ? 'var(--muted)' : 'white' }}>
-                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium sans shrink-0"
-                        style={{ background: '#4a7c5918', color: '#4a7c59' }}>
-                        {p.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm sans font-medium" style={{ color: 'var(--foreground)' }}>{p.name}</div>
-                        {alreadyInTree && <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Already in tree</div>}
-                      </div>
-
-                      <div className="shrink-0">
-                        {addPlacement === 'root' && (
-                          <button onClick={() => addAsRoot(p.id)}
-                            className="text-xs sans px-3 py-1.5 rounded font-medium"
-                            style={{ background: 'var(--primary)', color: 'white' }}>
-                            Add as Root
-                          </button>
-                        )}
-
-                        {addPlacement === 'under_shepherd' && (
-                          <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
-                            style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
-                            defaultValue="" onChange={e => { if (e.target.value) addUnderShepherd(p.id, e.target.value) }}>
-                            <option value="" disabled>Select shepherd...</option>
-                            {shepherdOptions.map(n => (
-                              <option key={realId(n)} value={realId(n)}>{n.name}</option>
-                            ))}
-                          </select>
-                        )}
-
-                        {addPlacement === 'over_group_type' && (
-                          <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
-                            style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
-                            defaultValue="" onChange={e => { if (e.target.value) bulkAssignShepherd(p.id, 'group_type_id', e.target.value, groupTypes.find(g => g.id === e.target.value)?.name || '') }}>
-                            <option value="" disabled>Select group type...</option>
-                            {groupTypes.map(gt => (
-                              <option key={gt.id} value={gt.id}>{gt.name}</option>
-                            ))}
-                          </select>
-                        )}
-
-                        {addPlacement === 'over_service_type' && (
-                          <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
-                            style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
-                            defaultValue="" onChange={e => { if (e.target.value) bulkAssignShepherd(p.id, 'service_type_id', e.target.value, serviceTypes.find(s => s.id === e.target.value)?.name || '') }}>
-                            <option value="" disabled>Select service type...</option>
-                            {serviceTypes.map(st => (
-                              <option key={st.id} value={st.id}>{st.name}</option>
-                            ))}
-                          </select>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-                {addSearch.length >= 2 && addResults.length === 0 && (
-                  <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>No matches</p>
-                )}
-                {addSearch.length < 2 && (
-                  <p className="text-xs sans text-center py-4" style={{ color: 'var(--muted-foreground)' }}>Type at least 2 characters to search</p>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ══════════════════════════════════════════════════════
-            MODAL: Edit Roles & Oversight
-           ══════════════════════════════════════════════════════ */}
-        {editRolesFor && (() => {
-          const pid = editRolesFor.personId
-          const currentOversight = oversightMap[pid] || []
-          const trackedGTs = groupTypes.filter(gt => gt.is_tracked)
-          return (
-            <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
-              <div className="w-[400px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
-                {/* Header — fixed */}
-                <div className="flex items-center justify-between px-5 pt-4 pb-3" style={{ borderBottom: '1px solid var(--border)' }}>
-                  <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>
-                    Edit Roles — {editRolesFor.personName}
-                  </h3>
-                  <button onClick={() => setEditRolesFor(null)}
-                    className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+                {/* Layer selection */}
+                <div>
+                  <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Layer</label>
+                  <div className="space-y-1">
+                    {elderLayers.map(l => (
+                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-purple-400 bg-purple-50' : 'border-transparent hover:bg-gray-50'}`}>
+                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
+                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
+                          style={{ accentColor: '#7c3aed' }} />
+                        <span className="text-xs sans font-medium" style={{ color: '#7c3aed' }}>{l.name}</span>
+                      </label>
+                    ))}
+                    {staffLayers.map(l => (
+                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-blue-400 bg-blue-50' : 'border-transparent hover:bg-gray-50'}`}>
+                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
+                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
+                          style={{ accentColor: '#3b6ea5' }} />
+                        <span className="text-xs sans font-medium" style={{ color: '#3b6ea5' }}>{l.name}</span>
+                      </label>
+                    ))}
+                    {volunteerLayers.map(l => (
+                      <label key={l.id} className={`flex items-center gap-2.5 px-3 py-2 rounded-lg cursor-pointer border transition-colors ${assignModal.layerId === l.id ? 'border-green-400 bg-green-50' : 'border-transparent hover:bg-gray-50'}`}>
+                        <input type="radio" name="layer" checked={assignModal.layerId === l.id}
+                          onChange={() => setAssignModal({ ...assignModal, layerId: l.id })}
+                          style={{ accentColor: '#4a7c59' }} />
+                        <span className="text-xs sans font-medium" style={{ color: '#4a7c59' }}>{l.name}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
 
-                {/* Scrollable content */}
-                <div className="overflow-y-auto px-5 py-3" style={{ flex: 1 }}>
-                  {/* Staff toggle */}
-                  <div className="flex items-center justify-between px-3 py-2 rounded-lg mb-3" style={{ background: 'var(--muted)' }}>
+                {/* Reports to (supervisor) */}
+                <div>
+                  <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Reports To</label>
+                  <select
+                    value={assignModal.supervisorPersonId}
+                    onChange={e => setAssignModal({ ...assignModal, supervisorPersonId: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border text-sm sans"
+                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                    <option value="">None (top of tree)</option>
+                    {assignedPeople
+                      .filter(p => p.id !== assignModal.personId)
+                      .map(p => (
+                        <option key={p.id} value={p.id}>{p.name} ({p.layerName})</option>
+                      ))}
+                  </select>
+                </div>
+
+                {/* Lead Pastor toggle (only for elder layer) */}
+                {elderLayers.some(l => l.id === assignModal.layerId) && (
+                  <div className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: '#7c3aed10' }}>
                     <div>
-                      <div className="text-xs sans font-medium" style={{ color: 'var(--foreground)' }}>Staff Member</div>
-                      <div className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>Tag as church staff</div>
+                      <div className="text-xs sans font-medium" style={{ color: '#7c3aed' }}>Lead Pastor</div>
+                      <div className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>Top of the shepherd tree</div>
                     </div>
                     <button
-                      onClick={() => toggleStaff(pid, !editRolesFor.isStaff)}
-                      disabled={savingRoles}
+                      onClick={() => setAssignModal({ ...assignModal, isLeadPastor: !assignModal.isLeadPastor })}
                       className="relative w-9 h-5 rounded-full transition-colors flex-shrink-0"
-                      style={{ background: editRolesFor.isStaff ? 'var(--primary)' : 'var(--border)' }}>
+                      style={{ background: assignModal.isLeadPastor ? '#7c3aed' : 'var(--border)' }}>
                       <span className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform"
-                        style={{ transform: editRolesFor.isStaff ? 'translateX(16px)' : 'translateX(0)' }} />
+                        style={{ transform: assignModal.isLeadPastor ? 'translateX(16px)' : 'translateX(0)' }} />
                     </button>
                   </div>
+                )}
 
-                  {/* Oversight: Group Types */}
-                  <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--muted-foreground)' }}>
-                    Oversees Group Types
+                {/* Oversight checkboxes */}
+                <div>
+                  <label className="text-[10px] sans font-semibold uppercase tracking-wide block mb-1.5" style={{ color: 'var(--muted-foreground)' }}>Oversees (optional)</label>
+                  <p className="text-[10px] sans mb-2" style={{ color: 'var(--muted-foreground)' }}>
+                    PCO group/team leaders of these types will appear under this person.
                   </p>
-                  <div className="mb-3">
-                    {trackedGTs.length === 0 && (
-                      <p className="text-xs sans py-1" style={{ color: 'var(--muted-foreground)' }}>No tracked group types</p>
-                    )}
-                    {trackedGTs.map(gt => {
-                      const active = currentOversight.some(o => o.contextType === 'group_type' && o.contextId === gt.id)
-                      return (
-                        <label key={gt.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
-                          <input type="checkbox" checked={active} disabled={savingRoles}
-                            onChange={() => toggleOversight(pid, 'group_type', gt.id, !active)}
-                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
-                        </label>
-                      )
-                    })}
+
+                  {groupTypes.filter(gt => gt.is_tracked).length > 0 && (
+                    <div className="mb-2">
+                      <div className="text-[9px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#4a7c59' }}>Group Types</div>
+                      {groupTypes.filter(gt => gt.is_tracked).map(gt => {
+                        const active = assignModal.oversightEntries.some(o => o.context_type === 'group_type' && o.context_id === gt.id)
+                        return (
+                          <label key={gt.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
+                            <input type="checkbox" checked={active}
+                              onChange={() => {
+                                const entries = active
+                                  ? assignModal.oversightEntries.filter(o => !(o.context_type === 'group_type' && o.context_id === gt.id))
+                                  : [...assignModal.oversightEntries, { context_type: 'group_type', context_id: gt.id }]
+                                setAssignModal({ ...assignModal, oversightEntries: entries })
+                              }}
+                              className="rounded" style={{ accentColor: '#4a7c59' }} />
+                            <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  {serviceTypes.length > 0 && (
+                    <div>
+                      <div className="text-[9px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#3b6ea5' }}>Service Types</div>
+                      {serviceTypes.map(st => {
+                        const active = assignModal.oversightEntries.some(o => o.context_type === 'service_type' && o.context_id === st.id)
+                        return (
+                          <label key={st.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
+                            <input type="checkbox" checked={active}
+                              onChange={() => {
+                                const entries = active
+                                  ? assignModal.oversightEntries.filter(o => !(o.context_type === 'service_type' && o.context_id === st.id))
+                                  : [...assignModal.oversightEntries, { context_type: 'service_type', context_id: st.id }]
+                                setAssignModal({ ...assignModal, oversightEntries: entries })
+                              }}
+                              className="rounded" style={{ accentColor: '#3b6ea5' }} />
+                            <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-5 py-3 border-t flex items-center justify-between shrink-0" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
+                <div>
+                  {assignModal.isEdit && (
+                    <button onClick={() => removeAssignment(assignModal.personId, assignModal.personName)}
+                      className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg"
+                      style={{ color: 'var(--danger, #9b3a3a)' }}>
+                      Remove
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setAssignModal(null)}
+                    className="text-[11px] sans font-medium px-3 py-1.5 rounded-lg border"
+                    style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
+                    Cancel
+                  </button>
+                  <button onClick={saveAssignment} disabled={saving || !assignModal.personId || !assignModal.layerId}
+                    className="text-[11px] sans font-medium px-3 py-1.5 rounded-lg disabled:opacity-50"
+                    style={{ background: 'var(--primary)', color: 'white' }}>
+                    {saving ? 'Saving...' : assignModal.isEdit ? 'Save Changes' : 'Assign'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════
+            MODAL: Manage Layers
+           ══════════════════════════════════════════════════════ */}
+        {layerModalOpen && (
+          <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
+            <div className="w-[400px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
+              <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+                <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers</h3>
+                <button onClick={() => setLayerModalOpen(false)}
+                  className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+              </div>
+
+              <div className="overflow-y-auto px-5 py-4 flex-1">
+                <p className="text-xs sans mb-4" style={{ color: 'var(--muted-foreground)' }}>
+                  The tree hierarchy: Elder → Staff → Volunteer → People (PCO data). Add sub-layers within Staff or Volunteer.
+                </p>
+
+                {/* Elder layers */}
+                <div className="mb-3">
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#7c3aed' }}>Elder</div>
+                  {elderLayers.map(l => (
+                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg" style={{ background: '#7c3aed10' }}>
+                      <span className="text-xs sans font-medium" style={{ color: '#7c3aed' }}>{l.name}</span>
+                      <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>Fixed</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Staff layers */}
+                <div className="mb-3">
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#3b6ea5' }}>Staff</div>
+                  {staffLayers.map(l => (
+                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg mb-1" style={{ background: '#3b6ea510' }}>
+                      <span className="text-xs sans font-medium" style={{ color: '#3b6ea5' }}>{l.name}</span>
+                      {staffLayers.length > 1 && (
+                        <button onClick={() => removeLayer(l.id)}
+                          className="text-[10px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Volunteer layers */}
+                <div className="mb-4">
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#4a7c59' }}>Volunteer</div>
+                  {volunteerLayers.map(l => (
+                    <div key={l.id} className="flex items-center justify-between px-3 py-2 rounded-lg mb-1" style={{ background: '#4a7c5910' }}>
+                      <span className="text-xs sans font-medium" style={{ color: '#4a7c59' }}>{l.name}</span>
+                      {volunteerLayers.length > 1 && (
+                        <button onClick={() => removeLayer(l.id)}
+                          className="text-[10px] sans" style={{ color: 'var(--danger, #9b3a3a)' }}>Remove</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Divider: People (PCO) — not a real layer, just info */}
+                <div className="mb-4">
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#6b7280' }}>People (Automatic)</div>
+                  <div className="px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
+                    <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>PCO group/team leaders and members appear automatically below the volunteer layer.</span>
                   </div>
+                </div>
 
-                  {/* Oversight: Service Types */}
-                  <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: 'var(--muted-foreground)' }}>
-                    Oversees Service Types
-                  </p>
-                  <div className="mb-1">
-                    {serviceTypes.length === 0 && (
-                      <p className="text-xs sans py-1" style={{ color: 'var(--muted-foreground)' }}>No service types</p>
-                    )}
-                    {serviceTypes.map(st => {
-                      const active = currentOversight.some(o => o.contextType === 'service_type' && o.contextId === st.id)
-                      return (
-                        <label key={st.id} className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-gray-50">
-                          <input type="checkbox" checked={active} disabled={savingRoles}
-                            onChange={() => toggleOversight(pid, 'service_type', st.id, !active)}
-                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
-                        </label>
-                      )
-                    })}
+                {/* Add sub-layer */}
+                <div className="border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>Add Sub-Layer</div>
+                  <div className="flex items-center gap-2">
+                    <select value={newLayerCategory} onChange={e => setNewLayerCategory(e.target.value as 'staff' | 'volunteer')}
+                      className="px-2 py-1.5 rounded-lg border text-xs sans"
+                      style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                      <option value="staff">Staff</option>
+                      <option value="volunteer">Volunteer</option>
+                    </select>
+                    <input type="text" placeholder="Layer name..." value={newLayerName}
+                      onChange={e => setNewLayerName(e.target.value)}
+                      className="flex-1 px-2 py-1.5 rounded-lg border text-xs sans"
+                      style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
+                    <button onClick={addLayer} disabled={saving || !newLayerName.trim()}
+                      className="px-3 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
+                      style={{ background: 'var(--primary)', color: 'white' }}>
+                      Add
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
-          )
-        })()}
+          </div>
+        )}
       </div>
     </div>
   )
