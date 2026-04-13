@@ -28,6 +28,9 @@ export async function GET() {
     { data: groupTypes },
     { data: serviceTypes },
     { data: recentReports },
+    { data: pcoLists },
+    { data: pcoListPeople },
+    { data: pcoListLayerLinks },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -49,6 +52,12 @@ export async function GET() {
       .eq('church_id', churchId!).order('name'),
     admin.from('check_in_reports').select('leader_id, created_at')
       .order('created_at', { ascending: false }),
+    admin.from('pco_lists').select('id, pco_id, name, description, total_people')
+      .eq('church_id', churchId!).order('name'),
+    admin.from('pco_list_people').select('list_id, person_id')
+      .eq('church_id', churchId!),
+    admin.from('pco_list_layer_links').select('id, list_id, layer_id')
+      .eq('church_id', churchId!),
   ])
 
   // ── Phase 2: Collect needed person IDs ───────────────────────
@@ -79,6 +88,8 @@ export async function GET() {
       currentUserRole: currentUser?.role,
       groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
       serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
+      pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
+      listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
       stats: { shepherdCount: 0, groupCount: 0, teamCount: 0 },
     })
   }
@@ -533,6 +544,8 @@ export async function GET() {
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
+    pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
+    listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
     stats: { shepherdCount, groupCount, teamCount },
   })
 
@@ -754,6 +767,24 @@ export async function POST(request: Request) {
         .eq('id', item.layer_id)
         .eq('church_id', churchId!)
     }
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Link a PCO list to a layer ──────────────────────────────
+  if (body.action === 'link_list') {
+    const { list_id, layer_id } = body
+    if (!list_id || !layer_id) return NextResponse.json({ error: 'list_id and layer_id required' }, { status: 400 })
+    const { error } = await admin.from('pco_list_layer_links')
+      .upsert({ list_id, layer_id, church_id: churchId }, { onConflict: 'list_id,church_id' })
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Unlink a PCO list from its layer ────────────────────────
+  if (body.action === 'unlink_list') {
+    const { list_id } = body
+    if (!list_id) return NextResponse.json({ error: 'list_id required' }, { status: 400 })
+    await admin.from('pco_list_layer_links').delete().eq('list_id', list_id).eq('church_id', churchId!)
     return NextResponse.json({ success: true })
   }
 

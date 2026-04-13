@@ -25,6 +25,8 @@ export interface SyncResource {
   syncStrategy: 'upsert' | 'replace'
   onConflict: string
   mapRow: (item: any, included?: any[]) => Record<string, any>
+  /** Optional client-side filter applied before mapRow — return false to skip */
+  filterRow?: (item: any) => boolean
   /** Nested resource: fetched per-parent from another table */
   isNested?: boolean
   nestedParentTable?: string
@@ -55,6 +57,7 @@ export const SYNC_CATEGORIES = [
   { key: 'people', label: 'People' },
   { key: 'groups', label: 'Groups' },
   { key: 'teams', label: 'Teams' },
+  { key: 'lists', label: 'Lists' },
 ] as const
 
 // ── Resource Definitions ────────────────────────────────────
@@ -390,6 +393,52 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
+  // ── 13. PCO Lists (only REFERENCE lists) ──────────────────────
+  {
+    key: 'pco_lists',
+    label: 'Reference Lists',
+    category: 'lists',
+    table: 'pco_lists',
+    endpoint: '/people/v2/lists',
+    supportsUpdatedSince: false,
+    syncStrategy: 'upsert',
+    onConflict: 'pco_id',
+    /** Filter: only keep lists whose name starts with "REFERENCE" */
+    filterRow: (list) => {
+      const name = list.attributes?.name || ''
+      return name.toUpperCase().startsWith('REFERENCE')
+    },
+    mapRow: (list) => ({
+      pco_id: list.id,
+      name: list.attributes.name || 'Unnamed List',
+      description: list.attributes.description || null,
+      total_people: list.attributes.total_people || 0,
+    }),
+  },
+
+  // ── 14. PCO List People (nested per list) ─────────────────────
+  {
+    key: 'pco_list_people',
+    label: 'List Members',
+    category: 'lists',
+    table: 'pco_list_people',
+    endpoint: '',
+    supportsUpdatedSince: false,
+    syncStrategy: 'upsert',
+    onConflict: 'list_id,person_id',
+    isNested: true,
+    nestedParentTable: 'pco_lists',
+    nestedEndpointTemplate: '/people/v2/lists/{parentId}/people',
+    mapRow: (p) => ({
+      _pco_list_id: p.attributes?._parentPcoId || null,
+      _pco_person_id: p.id,
+    }),
+    idMappings: [
+      { field: 'list_id', pcoField: '_pco_list_id', table: 'pco_lists' },
+      { field: 'person_id', pcoField: '_pco_person_id', table: 'people' },
+    ],
+  },
+
 ]
 
 // ── Flat Resource Helpers ───────────────────────────────────
@@ -435,7 +484,8 @@ export async function fetchResourcePage(
   const result = await client.get(resource.endpoint, params)
   const data = result.data || []
   const included = result.included || []
-  const rows = data.map((item: any) => resource.mapRow(item, included))
+  const filtered = resource.filterRow ? data.filter(resource.filterRow) : data
+  const rows = filtered.map((item: any) => resource.mapRow(item, included))
 
   return {
     rows,
@@ -760,6 +810,9 @@ export async function linkForeignKeys(admin: any, churchId: string) {
  *  NOTE: shepherding_relationships is NOT in this list — it's user-curated
  *  (manual assignments + bulk assigns), not PCO-synced data. */
 export const PCO_TABLES = [
+  'pco_list_people',
+  'pco_list_layer_links',
+  'pco_lists',
   'plan_team_members',
   'service_plans',
   'team_positions',

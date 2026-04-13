@@ -42,6 +42,8 @@ interface ServiceTypeOption { id: string; name: string }
 interface LayerOption { id: string; name: string; category: string; rank: number }
 interface AssignmentInfo { layerId: string; layerName: string; layerCategory: string; supervisorPersonId: string | null; sortOrder: number }
 interface OversightEntry { contextType: string; contextId: string; typeName: string }
+interface PcoListOption { id: string; name: string; totalPeople: number }
+interface ListLayerLink { listId: string; layerId: string }
 
 function buildTree(nodes: TreeNode[]): LayoutNode[] {
   const map = new Map<string, LayoutNode>()
@@ -168,6 +170,256 @@ function checkinLabel(node: TreeNode): string {
   return `${daysSince}d ago`
 }
 
+/* ── Drag handle icon (6 dots) ──────────────────────────────── */
+function GripIcon({ color }: { color: string }) {
+  return (
+    <svg width="10" height="16" viewBox="0 0 10 16" fill={color} className="shrink-0 opacity-40 group-hover:opacity-80 cursor-grab active:cursor-grabbing">
+      <circle cx="2.5" cy="2" r="1.5"/><circle cx="7.5" cy="2" r="1.5"/>
+      <circle cx="2.5" cy="6" r="1.5"/><circle cx="7.5" cy="6" r="1.5"/>
+      <circle cx="2.5" cy="10" r="1.5"/><circle cx="7.5" cy="10" r="1.5"/>
+      <circle cx="2.5" cy="14" r="1.5"/><circle cx="7.5" cy="14" r="1.5"/>
+    </svg>
+  )
+}
+
+/* ── Manage Layers Modal ───────────────────────────────────── */
+function ManageLayersModal({
+  elderLayers, staffLayers, volunteerLayers, pcoLists, listLayerLinks, layers,
+  newLayerName, setNewLayerName, newLayerCategory, setNewLayerCategory,
+  saving, addLayer, removeLayer, onClose, onConfirm,
+}: {
+  elderLayers: LayerOption[]; staffLayers: LayerOption[]; volunteerLayers: LayerOption[]
+  pcoLists: PcoListOption[]; listLayerLinks: ListLayerLink[]; layers: LayerOption[]
+  newLayerName: string; setNewLayerName: (v: string) => void
+  newLayerCategory: 'staff' | 'volunteer'; setNewLayerCategory: (v: 'staff' | 'volunteer') => void
+  saving: boolean; addLayer: () => void; removeLayer: (id: string) => void
+  onClose: () => void; onConfirm: () => void
+}) {
+  // Local state for drag-reorder (changes only apply on confirm)
+  const [localStaffLayers, setLocalStaffLayers] = useState(staffLayers)
+  const [localVolunteerLayers, setLocalVolunteerLayers] = useState(volunteerLayers)
+  const [localLinks, setLocalLinks] = useState<Record<string, string>>(
+    () => Object.fromEntries(listLayerLinks.map(ll => [ll.listId, ll.layerId]))
+  )
+  const [dirty, setDirty] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const dragItem = useRef<{ category: 'staff' | 'volunteer'; index: number } | null>(null)
+  const dragOverItem = useRef<{ category: 'staff' | 'volunteer'; index: number } | null>(null)
+
+  const handleDragStart = (category: 'staff' | 'volunteer', index: number) => {
+    dragItem.current = { category, index }
+  }
+
+  const handleDragEnter = (category: 'staff' | 'volunteer', index: number) => {
+    dragOverItem.current = { category, index }
+  }
+
+  const handleDragEnd = () => {
+    if (!dragItem.current || !dragOverItem.current) return
+    if (dragItem.current.category !== dragOverItem.current.category) return
+
+    const cat = dragItem.current.category
+    const setter = cat === 'staff' ? setLocalStaffLayers : setLocalVolunteerLayers
+    const source = cat === 'staff' ? [...localStaffLayers] : [...localVolunteerLayers]
+
+    const [removed] = source.splice(dragItem.current.index, 1)
+    source.splice(dragOverItem.current.index, 0, removed)
+    setter(source)
+    setDirty(true)
+    dragItem.current = null
+    dragOverItem.current = null
+  }
+
+  const handleLinkChange = (listId: string, layerId: string) => {
+    setLocalLinks(prev => {
+      const next = { ...prev }
+      if (layerId === '') { delete next[listId] } else { next[listId] = layerId }
+      return next
+    })
+    setDirty(true)
+  }
+
+  const handleConfirm = async () => {
+    setConfirming(true)
+    try {
+      // 1. Save layer order for staff
+      if (localStaffLayers.length > 1) {
+        const order = localStaffLayers.map((l, i) => ({ layer_id: l.id, rank: 100 + i }))
+        await fetch('/api/tree', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reorder_layers', order }),
+        })
+      }
+      // 2. Save layer order for volunteer
+      if (localVolunteerLayers.length > 1) {
+        const order = localVolunteerLayers.map((l, i) => ({ layer_id: l.id, rank: 200 + i }))
+        await fetch('/api/tree', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reorder_layers', order }),
+        })
+      }
+      // 3. Save list→layer links (diff against original)
+      const origLinks: Record<string, string> = Object.fromEntries(listLayerLinks.map(ll => [ll.listId, ll.layerId]))
+      for (const list of pcoLists) {
+        const newLayerId = localLinks[list.id]
+        const oldLayerId = origLinks[list.id]
+        if (newLayerId && newLayerId !== oldLayerId) {
+          await fetch('/api/tree', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'link_list', list_id: list.id, layer_id: newLayerId }),
+          })
+        } else if (!newLayerId && oldLayerId) {
+          await fetch('/api/tree', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'unlink_list', list_id: list.id }),
+          })
+        }
+      }
+      // 4. Reload tree
+      await onConfirm()
+      setDirty(false)
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  const renderLayerList = (categoryLayers: LayerOption[], setter: (v: LayerOption[]) => void, cat: 'staff' | 'volunteer', color: string, canReorder: boolean, canRemove: boolean) => (
+    categoryLayers.map((l, i) => (
+      <div key={l.id}
+        className="group flex items-center gap-2 px-3 py-2 rounded-lg mb-1"
+        style={{ background: color + '08' }}
+        draggable={canReorder && categoryLayers.length > 1}
+        onDragStart={() => handleDragStart(cat, i)}
+        onDragEnter={() => handleDragEnter(cat, i)}
+        onDragEnd={handleDragEnd}
+        onDragOver={(e) => e.preventDefault()}
+      >
+        {canReorder && categoryLayers.length > 1 && <GripIcon color={color} />}
+        <span className="text-xs sans font-medium flex-1" style={{ color }}>{l.name}</span>
+        {canRemove && categoryLayers.length > 1 && (
+          <button onClick={() => removeLayer(l.id)}
+            className="text-[9px] sans ml-1 opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: 'var(--danger, #9b3a3a)' }}>×</button>
+        )}
+      </div>
+    ))
+  )
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
+      <div className="w-[420px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(85vh, 700px)', display: 'flex', flexDirection: 'column' }}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers</h3>
+          <button onClick={onClose}
+            className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+        </div>
+
+        <div className="overflow-y-auto px-5 py-4 flex-1">
+          <p className="text-xs sans mb-4" style={{ color: 'var(--muted-foreground)' }}>
+            Drag to reorder sub-layers. Link PCO reference lists to layers. Changes apply when you confirm.
+          </p>
+
+          {/* Elder */}
+          <div className="mb-3">
+            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#7c3aed' }}>Elder</div>
+            {elderLayers.map(l => (
+              <div key={l.id} className="flex items-center gap-2 px-3 py-2 rounded-lg mb-1" style={{ background: '#7c3aed08' }}>
+                <span className="text-xs sans font-medium flex-1" style={{ color: '#7c3aed' }}>{l.name}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Staff */}
+          <div className="mb-3">
+            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#3b6ea5' }}>Staff</div>
+            {renderLayerList(localStaffLayers, setLocalStaffLayers, 'staff', '#3b6ea5', true, true)}
+          </div>
+
+          {/* Volunteer */}
+          <div className="mb-3">
+            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#4a7c59' }}>Volunteer</div>
+            {renderLayerList(localVolunteerLayers, setLocalVolunteerLayers, 'volunteer', '#4a7c59', true, true)}
+          </div>
+
+          {/* People (PCO) info */}
+          <div className="mb-4">
+            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#6b7280' }}>People (Automatic)</div>
+            <div className="px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
+              <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>PCO group/team leaders and members flow in automatically.</span>
+            </div>
+          </div>
+
+          {/* PCO List → Layer links */}
+          {pcoLists.length > 0 && (
+            <div className="border-t pt-3 mb-4" style={{ borderColor: 'var(--border)' }}>
+              <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>
+                PCO Reference Lists
+              </div>
+              <p className="text-[10px] sans mb-3" style={{ color: 'var(--muted-foreground)' }}>
+                Connect a PCO list to a layer. People on that list will appear at that layer.
+              </p>
+              {pcoLists.map(list => (
+                <div key={list.id} className="flex items-center gap-2 mb-2">
+                  <span className="text-xs sans flex-1 truncate" style={{ color: 'var(--foreground)' }}>
+                    {list.name}
+                    <span className="ml-1 text-[10px]" style={{ color: 'var(--muted-foreground)' }}>({list.totalPeople})</span>
+                  </span>
+                  <select
+                    value={localLinks[list.id] || ''}
+                    onChange={e => handleLinkChange(list.id, e.target.value)}
+                    className="px-2 py-1 rounded-lg border text-xs sans min-w-[120px]"
+                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                  >
+                    <option value="">— none —</option>
+                    {layers.map(l => (
+                      <option key={l.id} value={l.id}>{l.name} ({l.category})</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add sub-layer */}
+          <div className="border-t pt-3" style={{ borderColor: 'var(--border)' }}>
+            <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>Add Sub-Layer</div>
+            <div className="flex items-center gap-2">
+              <select value={newLayerCategory} onChange={e => setNewLayerCategory(e.target.value as 'staff' | 'volunteer')}
+                className="px-2 py-1.5 rounded-lg border text-xs sans"
+                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                <option value="staff">Staff</option>
+                <option value="volunteer">Volunteer</option>
+              </select>
+              <input type="text" placeholder="Layer name..." value={newLayerName}
+                onChange={e => setNewLayerName(e.target.value)}
+                className="flex-1 px-2 py-1.5 rounded-lg border text-xs sans"
+                style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
+              <button onClick={addLayer} disabled={saving || !newLayerName.trim()}
+                className="px-3 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
+                style={{ background: 'var(--primary)', color: 'white' }}>
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Confirm / Cancel footer */}
+        <div className="flex items-center justify-end gap-2 px-5 py-3 shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
+          <button onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-xs sans font-medium border"
+            style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+            Cancel
+          </button>
+          <button onClick={handleConfirm} disabled={confirming}
+            className="px-4 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
+            style={{ background: dirty ? 'var(--primary)' : 'var(--muted)', color: dirty ? 'white' : 'var(--muted-foreground)' }}>
+            {confirming ? 'Saving…' : 'Confirm'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function ShepherdTree() {
   const svgRef = useRef<SVGSVGElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -185,6 +437,10 @@ export default function ShepherdTree() {
   const [layers, setLayers] = useState<LayerOption[]>([])
   const [assignmentsMap, setAssignmentsMap] = useState<Record<string, AssignmentInfo>>({})
   const [oversightMap, setOversightMap] = useState<Record<string, OversightEntry[]>>({})
+
+  // PCO Lists
+  const [pcoLists, setPcoLists] = useState<PcoListOption[]>([])
+  const [listLayerLinks, setListLayerLinks] = useState<ListLayerLink[]>([])
 
   // Assignment modal
   type AssignModal = {
@@ -343,6 +599,8 @@ export default function ShepherdTree() {
     setCurrentUserRole(data.currentUserRole || null)
     setGroupTypes(data.groupTypes || [])
     setServiceTypes(data.serviceTypes || [])
+    setPcoLists(data.pcoLists || [])
+    setListLayerLinks(data.listLayerLinks || [])
 
     const laid = buildTree(data.nodes || [])
     const midpoints = applyCoLeaderLayout(laid, data.coLeaderLinks || [])
@@ -1359,117 +1617,23 @@ export default function ShepherdTree() {
         {/* ══════════════════════════════════════════════════════
             MODAL: Manage Layers
            ══════════════════════════════════════════════════════ */}
-        {layerModalOpen && (() => {
-          const moveLayer = async (categoryLayers: LayerOption[], layerId: string, direction: -1 | 1) => {
-            const idx = categoryLayers.findIndex(l => l.id === layerId)
-            if (idx < 0) return
-            const newIdx = idx + direction
-            if (newIdx < 0 || newIdx >= categoryLayers.length) return
-            const reordered = [...categoryLayers]
-            const temp = reordered[idx]
-            reordered[idx] = reordered[newIdx]
-            reordered[newIdx] = temp
-            // Base rank from category (staff=100, volunteer=200), then +1,+2,...
-            const baseRank = reordered[0].category === 'staff' ? 100 : 200
-            const order = reordered.map((l, i) => ({ layer_id: l.id, rank: baseRank + i }))
-            await fetch('/api/tree', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ action: 'reorder_layers', order }),
-            })
-            await fetchTree()
-          }
-
-          const renderLayerList = (categoryLayers: LayerOption[], color: string, canReorder: boolean, canRemove: boolean) => (
-            categoryLayers.map((l, i) => (
-              <div key={l.id} className="flex items-center gap-2 px-3 py-2 rounded-lg mb-1" style={{ background: color + '08' }}>
-                <span className="text-xs sans font-medium flex-1" style={{ color }}>{l.name}</span>
-                <div className="flex items-center gap-1 shrink-0">
-                  {canReorder && categoryLayers.length > 1 && (
-                    <>
-                      <button onClick={() => moveLayer(categoryLayers, l.id, -1)} disabled={i === 0}
-                        className="w-5 h-5 flex items-center justify-center rounded hover:bg-white disabled:opacity-20 text-xs"
-                        style={{ color }} title="Move up">▲</button>
-                      <button onClick={() => moveLayer(categoryLayers, l.id, 1)} disabled={i === categoryLayers.length - 1}
-                        className="w-5 h-5 flex items-center justify-center rounded hover:bg-white disabled:opacity-20 text-xs"
-                        style={{ color }} title="Move down">▼</button>
-                    </>
-                  )}
-                  {canRemove && categoryLayers.length > 1 && (
-                    <button onClick={() => removeLayer(l.id)}
-                      className="text-[9px] sans ml-1" style={{ color: 'var(--danger, #9b3a3a)' }}>×</button>
-                  )}
-                </div>
-              </div>
-            ))
-          )
-
-          return (
-          <div className="absolute inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
-            <div className="w-[380px] bg-white rounded-2xl shadow-xl border" style={{ borderColor: 'var(--border)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
-              <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-                <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers</h3>
-                <button onClick={() => setLayerModalOpen(false)}
-                  className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
-              </div>
-
-              <div className="overflow-y-auto px-5 py-4 flex-1">
-                <p className="text-xs sans mb-4" style={{ color: 'var(--muted-foreground)' }}>
-                  Reorder sub-layers within Staff or Volunteer. The category order (Elder → Staff → Volunteer → People) is fixed.
-                </p>
-
-                {/* Elder */}
-                <div className="mb-3">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#7c3aed' }}>Elder</div>
-                  {renderLayerList(elderLayers, '#7c3aed', false, false)}
-                </div>
-
-                {/* Staff */}
-                <div className="mb-3">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#3b6ea5' }}>Staff</div>
-                  {renderLayerList(staffLayers, '#3b6ea5', true, true)}
-                </div>
-
-                {/* Volunteer */}
-                <div className="mb-3">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1.5" style={{ color: '#4a7c59' }}>Volunteer</div>
-                  {renderLayerList(volunteerLayers, '#4a7c59', true, true)}
-                </div>
-
-                {/* People (PCO) info */}
-                <div className="mb-4">
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-1" style={{ color: '#6b7280' }}>People (Automatic)</div>
-                  <div className="px-3 py-2 rounded-lg" style={{ background: 'var(--muted)' }}>
-                    <span className="text-[10px] sans" style={{ color: 'var(--muted-foreground)' }}>PCO group/team leaders and members flow in automatically.</span>
-                  </div>
-                </div>
-
-                {/* Add sub-layer */}
-                <div className="border-t pt-3" style={{ borderColor: 'var(--border)' }}>
-                  <div className="text-[10px] sans font-semibold uppercase tracking-wide mb-2" style={{ color: 'var(--muted-foreground)' }}>Add Sub-Layer</div>
-                  <div className="flex items-center gap-2">
-                    <select value={newLayerCategory} onChange={e => setNewLayerCategory(e.target.value as 'staff' | 'volunteer')}
-                      className="px-2 py-1.5 rounded-lg border text-xs sans"
-                      style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-                      <option value="staff">Staff</option>
-                      <option value="volunteer">Volunteer</option>
-                    </select>
-                    <input type="text" placeholder="Layer name..." value={newLayerName}
-                      onChange={e => setNewLayerName(e.target.value)}
-                      className="flex-1 px-2 py-1.5 rounded-lg border text-xs sans"
-                      style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
-                    <button onClick={addLayer} disabled={saving || !newLayerName.trim()}
-                      className="px-3 py-1.5 rounded-lg text-xs sans font-medium disabled:opacity-50"
-                      style={{ background: 'var(--primary)', color: 'white' }}>
-                      Add
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          )
-        })()}
+        {layerModalOpen && <ManageLayersModal
+          elderLayers={elderLayers}
+          staffLayers={staffLayers}
+          volunteerLayers={volunteerLayers}
+          pcoLists={pcoLists}
+          listLayerLinks={listLayerLinks}
+          layers={layers}
+          newLayerName={newLayerName}
+          setNewLayerName={setNewLayerName}
+          newLayerCategory={newLayerCategory}
+          setNewLayerCategory={setNewLayerCategory}
+          saving={saving}
+          addLayer={addLayer}
+          removeLayer={removeLayer}
+          onClose={() => setLayerModalOpen(false)}
+          onConfirm={fetchTree}
+        />}
       </div>
     </div>
   )
