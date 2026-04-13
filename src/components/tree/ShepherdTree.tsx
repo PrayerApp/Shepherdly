@@ -185,10 +185,12 @@ export default function ShepherdTree() {
   const [treeSearchResults, setTreeSearchResults] = useState<LayoutNode[]>([])
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null)
 
-  // Filter
+  // Filter — persisted in localStorage
   const [filterOpen, setFilterOpen] = useState(false)
+  const [filterTab, setFilterTab] = useState<'groups' | 'services'>('groups')
   const [hiddenGroupTypes, setHiddenGroupTypes] = useState<Set<string>>(new Set())
   const [hiddenServiceTypes, setHiddenServiceTypes] = useState<Set<string>>(new Set())
+  const [filterLoaded, setFilterLoaded] = useState(false)
 
   // Modal state
   type ModalMode =
@@ -216,6 +218,58 @@ export default function ShepherdTree() {
     setAssignTab('person')
     setAddPlacement('root')
   }
+
+  // Load filter from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('shepherdly-tree-filter')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (parsed.hiddenGroupTypes) setHiddenGroupTypes(new Set(parsed.hiddenGroupTypes))
+        if (parsed.hiddenServiceTypes) setHiddenServiceTypes(new Set(parsed.hiddenServiceTypes))
+      }
+    } catch { /* ignore */ }
+    setFilterLoaded(true)
+  }, [])
+
+  // Save filter to localStorage when it changes (after initial load)
+  useEffect(() => {
+    if (!filterLoaded) return
+    try {
+      localStorage.setItem('shepherdly-tree-filter', JSON.stringify({
+        hiddenGroupTypes: [...hiddenGroupTypes],
+        hiddenServiceTypes: [...hiddenServiceTypes],
+      }))
+    } catch { /* ignore */ }
+  }, [hiddenGroupTypes, hiddenServiceTypes, filterLoaded])
+
+  // Save/load default filter
+  const saveDefaultFilter = () => {
+    try {
+      localStorage.setItem('shepherdly-tree-filter-default', JSON.stringify({
+        hiddenGroupTypes: [...hiddenGroupTypes],
+        hiddenServiceTypes: [...hiddenServiceTypes],
+      }))
+    } catch { /* ignore */ }
+  }
+  const resetToDefault = () => {
+    try {
+      const saved = localStorage.getItem('shepherdly-tree-filter-default')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        setHiddenGroupTypes(new Set(parsed.hiddenGroupTypes || []))
+        setHiddenServiceTypes(new Set(parsed.hiddenServiceTypes || []))
+      } else {
+        // No default saved — show everything
+        setHiddenGroupTypes(new Set())
+        setHiddenServiceTypes(new Set())
+      }
+    } catch {
+      setHiddenGroupTypes(new Set())
+      setHiddenServiceTypes(new Set())
+    }
+  }
+  const hasDefaultFilter = typeof window !== 'undefined' && !!localStorage.getItem('shepherdly-tree-filter-default')
 
   // Search-to-navigate
   useEffect(() => {
@@ -617,89 +671,6 @@ export default function ShepherdTree() {
               + Add Person
             </button>
           )}
-
-          {/* Filter button */}
-          <div className="relative filter-dropdown">
-            <button onClick={() => setFilterOpen(!filterOpen)}
-              className="flex items-center gap-1 text-xs sans px-2.5 py-1.5 rounded-lg border"
-              style={{ borderColor: activeFilterCount > 0 ? 'var(--primary)' : 'var(--border)', color: activeFilterCount > 0 ? 'var(--primary)' : 'var(--muted-foreground)' }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-              </svg>
-              Filter
-              {activeFilterCount > 0 && (
-                <span className="ml-0.5 w-4 h-4 rounded-full text-[10px] flex items-center justify-center font-bold"
-                  style={{ background: 'var(--primary)', color: 'white' }}>
-                  {activeFilterCount}
-                </span>
-              )}
-            </button>
-
-            {filterOpen && (
-              <div className="absolute top-full right-0 mt-1 w-64 bg-white rounded-xl shadow-xl border z-50 p-3"
-                style={{ borderColor: 'var(--border)' }}>
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-semibold sans" style={{ color: 'var(--foreground)' }}>Show / Hide Types</span>
-                  {activeFilterCount > 0 && (
-                    <button onClick={() => { setHiddenGroupTypes(new Set()); setHiddenServiceTypes(new Set()) }}
-                      className="text-[10px] sans underline" style={{ color: 'var(--primary)' }}>
-                      Clear all
-                    </button>
-                  )}
-                </div>
-
-                {trackedGroupTypes.length > 0 && (
-                  <>
-                    <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1 mt-2" style={{ color: 'var(--muted-foreground)' }}>Group Types</p>
-                    {trackedGroupTypes.map(gt => {
-                      const hidden = hiddenGroupTypes.has(gt.id)
-                      return (
-                        <label key={gt.id} className="flex items-center gap-2 px-1 py-1 cursor-pointer hover:bg-gray-50 rounded">
-                          <input type="checkbox" checked={!hidden}
-                            onChange={() => {
-                              setHiddenGroupTypes(prev => {
-                                const next = new Set(prev)
-                                if (hidden) next.delete(gt.id); else next.add(gt.id)
-                                return next
-                              })
-                            }}
-                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
-                        </label>
-                      )
-                    })}
-                  </>
-                )}
-
-                {trackedServiceTypes.length > 0 && (
-                  <>
-                    <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1 mt-3" style={{ color: 'var(--muted-foreground)' }}>Service Types</p>
-                    {trackedServiceTypes.map(st => {
-                      const hidden = hiddenServiceTypes.has(st.id)
-                      return (
-                        <label key={st.id} className="flex items-center gap-2 px-1 py-1 cursor-pointer hover:bg-gray-50 rounded">
-                          <input type="checkbox" checked={!hidden}
-                            onChange={() => {
-                              setHiddenServiceTypes(prev => {
-                                const next = new Set(prev)
-                                if (hidden) next.delete(st.id); else next.add(st.id)
-                                return next
-                              })
-                            }}
-                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
-                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
-                        </label>
-                      )
-                    })}
-                  </>
-                )}
-
-                {trackedGroupTypes.length === 0 && trackedServiceTypes.length === 0 && (
-                  <p className="text-xs sans py-2 text-center" style={{ color: 'var(--muted-foreground)' }}>No types configured</p>
-                )}
-              </div>
-            )}
-          </div>
         </div>
       </div>
 
@@ -828,22 +799,180 @@ export default function ShepherdTree() {
           </g>
         </svg>
 
-        {/* ── Zoom controls (bottom center) ── */}
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-white rounded-xl shadow-lg border px-2 py-1.5"
-          style={{ borderColor: 'var(--border)' }}>
-          <button onClick={zoomOut} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-sm font-bold"
-            style={{ color: 'var(--muted-foreground)' }}>-</button>
-          <span className="w-12 text-center text-[11px] sans font-medium" style={{ color: 'var(--muted-foreground)' }}>
+        {/* ── Floating controls (right side, map-style stacked circles) ── */}
+        <div className="absolute right-4 top-1/2 -translate-y-1/2 flex flex-col items-center gap-2.5 z-40 filter-dropdown">
+          {/* Filter button */}
+          <button onClick={() => setFilterOpen(!filterOpen)}
+            className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors relative"
+            style={{ borderColor: 'var(--border)' }}
+            title="Filter">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={activeFilterCount > 0 ? 'var(--primary)' : '#6b7280'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+            </svg>
+            {activeFilterCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-4.5 h-4.5 min-w-[18px] rounded-full text-[10px] flex items-center justify-center font-bold"
+                style={{ background: 'var(--primary)', color: 'white' }}>
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
+
+          {/* Zoom in */}
+          <button onClick={zoomIn}
+            className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors text-lg font-bold"
+            style={{ borderColor: 'var(--border)', color: '#6b7280' }}
+            title="Zoom in">+</button>
+
+          {/* Zoom out */}
+          <button onClick={zoomOut}
+            className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors text-lg font-bold"
+            style={{ borderColor: 'var(--border)', color: '#6b7280' }}
+            title="Zoom out">-</button>
+
+          {/* Fit all */}
+          <button onClick={fitAll}
+            className="w-11 h-11 rounded-full bg-white shadow-lg border flex items-center justify-center hover:bg-gray-50 transition-colors"
+            style={{ borderColor: 'var(--border)' }}
+            title="Fit all">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+          </button>
+
+          {/* Zoom level indicator */}
+          <span className="text-[10px] sans font-medium" style={{ color: 'var(--muted-foreground)' }}>
             {Math.round(transform.scale * 100)}%
           </span>
-          <button onClick={zoomIn} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-sm font-bold"
-            style={{ color: 'var(--muted-foreground)' }}>+</button>
-          <div className="w-px h-5 mx-1" style={{ background: 'var(--border)' }} />
-          <button onClick={fitAll} className="px-2 py-1 text-[11px] sans font-medium rounded-lg hover:bg-gray-100"
-            style={{ color: 'var(--muted-foreground)' }}>
-            Fit All
-          </button>
         </div>
+
+        {/* ── Filter panel (opens from floating button) ── */}
+        {filterOpen && (
+          <div className="absolute right-[72px] top-1/2 -translate-y-1/2 w-72 bg-white rounded-2xl shadow-2xl border z-50 filter-dropdown overflow-hidden"
+            style={{ borderColor: 'var(--border)' }}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 pt-4 pb-2">
+              <span className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Filter Tree</span>
+              <button onClick={() => setFilterOpen(false)}
+                className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex mx-4 mb-3 rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
+              <button onClick={() => setFilterTab('groups')}
+                className="flex-1 px-3 py-1.5 text-xs font-medium sans transition-colors"
+                style={{ background: filterTab === 'groups' ? 'var(--primary)' : 'white', color: filterTab === 'groups' ? 'white' : 'var(--muted-foreground)' }}>
+                Group Types
+              </button>
+              <button onClick={() => setFilterTab('services')}
+                className="flex-1 px-3 py-1.5 text-xs font-medium sans transition-colors"
+                style={{ background: filterTab === 'services' ? 'var(--primary)' : 'white', color: filterTab === 'services' ? 'white' : 'var(--muted-foreground)' }}>
+                Service Types
+              </button>
+            </div>
+
+            {/* Checkbox list */}
+            <div className="px-4 pb-2 max-h-56 overflow-y-auto">
+              {filterTab === 'groups' && (
+                <>
+                  {/* Select All */}
+                  {trackedGroupTypes.length > 0 && (
+                    <label className="flex items-center gap-2.5 px-1 py-1.5 cursor-pointer hover:bg-gray-50 rounded border-b mb-1 pb-2" style={{ borderColor: 'var(--border)' }}>
+                      <input type="checkbox"
+                        checked={hiddenGroupTypes.size === 0}
+                        ref={el => { if (el) el.indeterminate = hiddenGroupTypes.size > 0 && hiddenGroupTypes.size < trackedGroupTypes.length }}
+                        onChange={() => {
+                          if (hiddenGroupTypes.size === 0) {
+                            setHiddenGroupTypes(new Set(trackedGroupTypes.map(gt => gt.id)))
+                          } else {
+                            setHiddenGroupTypes(new Set())
+                          }
+                        }}
+                        className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                      <span className="text-xs sans font-semibold" style={{ color: 'var(--foreground)' }}>Select All</span>
+                    </label>
+                  )}
+                  {trackedGroupTypes.map(gt => {
+                    const hidden = hiddenGroupTypes.has(gt.id)
+                    return (
+                      <label key={gt.id} className="flex items-center gap-2.5 px-1 py-1.5 cursor-pointer hover:bg-gray-50 rounded">
+                        <input type="checkbox" checked={!hidden}
+                          onChange={() => {
+                            setHiddenGroupTypes(prev => {
+                              const next = new Set(prev)
+                              if (hidden) next.delete(gt.id); else next.add(gt.id)
+                              return next
+                            })
+                          }}
+                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                        <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
+                      </label>
+                    )
+                  })}
+                  {trackedGroupTypes.length === 0 && (
+                    <p className="text-xs sans py-4 text-center" style={{ color: 'var(--muted-foreground)' }}>No tracked group types</p>
+                  )}
+                </>
+              )}
+
+              {filterTab === 'services' && (
+                <>
+                  {trackedServiceTypes.length > 0 && (
+                    <label className="flex items-center gap-2.5 px-1 py-1.5 cursor-pointer hover:bg-gray-50 rounded border-b mb-1 pb-2" style={{ borderColor: 'var(--border)' }}>
+                      <input type="checkbox"
+                        checked={hiddenServiceTypes.size === 0}
+                        ref={el => { if (el) el.indeterminate = hiddenServiceTypes.size > 0 && hiddenServiceTypes.size < trackedServiceTypes.length }}
+                        onChange={() => {
+                          if (hiddenServiceTypes.size === 0) {
+                            setHiddenServiceTypes(new Set(trackedServiceTypes.map(st => st.id)))
+                          } else {
+                            setHiddenServiceTypes(new Set())
+                          }
+                        }}
+                        className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                      <span className="text-xs sans font-semibold" style={{ color: 'var(--foreground)' }}>Select All</span>
+                    </label>
+                  )}
+                  {trackedServiceTypes.map(st => {
+                    const hidden = hiddenServiceTypes.has(st.id)
+                    return (
+                      <label key={st.id} className="flex items-center gap-2.5 px-1 py-1.5 cursor-pointer hover:bg-gray-50 rounded">
+                        <input type="checkbox" checked={!hidden}
+                          onChange={() => {
+                            setHiddenServiceTypes(prev => {
+                              const next = new Set(prev)
+                              if (hidden) next.delete(st.id); else next.add(st.id)
+                              return next
+                            })
+                          }}
+                          className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                        <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
+                      </label>
+                    )
+                  })}
+                  {trackedServiceTypes.length === 0 && (
+                    <p className="text-xs sans py-4 text-center" style={{ color: 'var(--muted-foreground)' }}>No service types</p>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Footer actions */}
+            <div className="px-4 py-3 border-t flex items-center justify-between" style={{ borderColor: 'var(--border)', background: 'var(--muted)' }}>
+              <div className="flex items-center gap-2">
+                <button onClick={resetToDefault}
+                  className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg border hover:bg-white transition-colors"
+                  style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
+                  {hasDefaultFilter ? 'Reset to Default' : 'Show All'}
+                </button>
+              </div>
+              <button onClick={() => { saveDefaultFilter(); setFilterOpen(false) }}
+                className="text-[11px] sans font-medium px-2.5 py-1 rounded-lg transition-colors"
+                style={{ background: 'var(--primary)', color: 'white' }}>
+                Set as Default
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ── Detail panel (right side) ── */}
         {selected && (() => {
