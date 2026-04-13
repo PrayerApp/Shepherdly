@@ -58,6 +58,7 @@ export interface NestedCursor {
 export const SYNC_CATEGORIES = [
   { key: 'people', label: 'People' },
   { key: 'groups', label: 'Groups' },
+  { key: 'checkins', label: 'Check-ins' },
   { key: 'teams', label: 'Teams' },
   { key: 'lists', label: 'Lists' },
 ] as const
@@ -227,17 +228,25 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
-  // ── 8. Attendance / Check-Ins ──────────────────────────────
+  // ── 8. Attendance / Check-Ins (own category, last 12 months only)
   {
     key: 'attendance',
     label: 'Check-ins',
-    category: 'groups',
+    category: 'checkins',
     table: 'attendance_records',
     endpoint: '/check-ins/v2/check_ins',
     supportsUpdatedSince: false,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
     cacheDays: 90,
+    queryParams: { order: '-created_at' },
+    /** Stop syncing once we hit check-ins older than 12 months */
+    filterRow: (c) => {
+      const createdAt = c.attributes?.created_at
+      if (!createdAt) return false
+      const twelveMonthsAgo = Date.now() - (365 * 86400000)
+      return new Date(createdAt).getTime() > twelveMonthsAgo
+    },
     mapRow: (c) => ({
       pco_id: c.id,
       pco_event_id: c.id,
@@ -496,9 +505,12 @@ export async function fetchResourcePage(
   const filtered = resource.filterRow ? data.filter(resource.filterRow) : data
   const rows = filtered.map((item: any) => resource.mapRow(item, included))
 
+  // If filterRow dropped ALL items on a full page, signal that we've hit the cutoff
+  const filteredOutAll = resource.filterRow && data.length > 0 && filtered.length === 0
+
   return {
     rows,
-    hasMore: !!result.links?.next,
+    hasMore: filteredOutAll ? false : !!result.links?.next,
     totalCount: result.meta?.total_count || 0,
   }
 }
