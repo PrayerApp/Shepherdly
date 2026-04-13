@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 
 interface TreeNode {
   id: string
@@ -13,6 +13,8 @@ interface TreeNode {
   isCurrentUser: boolean
   contextLabel: string | null
   warning: string | null
+  groupTypeId?: string | null
+  serviceTypeId?: string | null
 }
 
 interface LayoutNode extends TreeNode {
@@ -26,6 +28,11 @@ const NODE_W = 220
 const NODE_H = 72
 const H_GAP = 40
 const V_GAP = 100
+const CO_LEADER_GAP = 12 // tight gap between co-leaders
+
+interface CoLeaderLink { from: string; to: string }
+interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
+interface ServiceTypeOption { id: string; name: string }
 
 function buildTree(nodes: TreeNode[]): LayoutNode[] {
   const map = new Map<string, LayoutNode>()
@@ -73,6 +80,63 @@ function buildTree(nodes: TreeNode[]): LayoutNode[] {
   return [...map.values()]
 }
 
+/** Post-process layout: pull co-leaders close together and compute midpoints */
+function applyCoLeaderLayout(
+  nodes: LayoutNode[],
+  coLeaderLinks: CoLeaderLink[],
+): Map<string, { mx: number; my: number }> {
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const midpoints = new Map<string, { mx: number; my: number }>()
+
+  for (const link of coLeaderLinks) {
+    const fromNode = nodeMap.get(link.from)
+    const toNode = nodeMap.get(link.to)
+    if (!fromNode || !toNode) continue
+
+    // Calculate how far apart they are and how much to close the gap
+    const currentGap = toNode.x - fromNode.x
+    const desiredGap = NODE_W + CO_LEADER_GAP
+    if (Math.abs(currentGap) <= desiredGap) {
+      // Already close enough
+      const mx = (fromNode.x + toNode.x) / 2
+      const my = fromNode.y + NODE_H
+      midpoints.set(link.from, { mx, my })
+      continue
+    }
+
+    const shift = (Math.abs(currentGap) - desiredGap) / 2
+    const sign = currentGap > 0 ? 1 : -1
+
+    // Collect all descendants of a node
+    const getDescendants = (node: LayoutNode): LayoutNode[] => {
+      const result: LayoutNode[] = []
+      const stack = [...node.children]
+      while (stack.length) {
+        const n = stack.pop()!
+        result.push(n)
+        stack.push(...n.children)
+      }
+      return result
+    }
+
+    // Shift from-node and descendants towards to-node
+    const fromDescendants = getDescendants(fromNode)
+    fromNode.x += shift * sign
+    for (const d of fromDescendants) d.x += shift * sign
+
+    // Shift to-node and descendants towards from-node
+    const toDescendants = getDescendants(toNode)
+    toNode.x -= shift * sign
+    for (const d of toDescendants) d.x -= shift * sign
+
+    const mx = (fromNode.x + toNode.x) / 2
+    const my = fromNode.y + NODE_H
+    midpoints.set(link.from, { mx, my })
+  }
+
+  return midpoints
+}
+
 function getAllEdges(nodes: LayoutNode[]): { from: LayoutNode; to: LayoutNode }[] {
   const map = new Map(nodes.map(n => [n.id, n]))
   const edges: { from: LayoutNode; to: LayoutNode }[] = []
@@ -101,19 +165,16 @@ function checkinLabel(node: TreeNode): string {
   return `${daysSince}d ago`
 }
 
-interface CoLeaderLink { from: string; to: string }
-interface GroupTypeOption { id: string; name: string; is_tracked: boolean }
-interface ServiceTypeOption { id: string; name: string }
-
 export default function ShepherdTree() {
   const svgRef = useRef<SVGSVGElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [nodes, setNodes] = useState<LayoutNode[]>([])
   const [edges, setEdges] = useState<{ from: LayoutNode; to: LayoutNode }[]>([])
   const [coLeaderLinks, setCoLeaderLinks] = useState<CoLeaderLink[]>([])
+  const [coLeaderMidpoints, setCoLeaderMidpoints] = useState<Map<string, { mx: number; my: number }>>(new Map())
   const [selected, setSelected] = useState<LayoutNode | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [viewMode, setViewMode] = useState<'2d' | '3d'>('2d')
   const [allNodes, setAllNodes] = useState<TreeNode[]>([])
   const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
   const [groupTypes, setGroupTypes] = useState<GroupTypeOption[]>([])
@@ -124,11 +185,16 @@ export default function ShepherdTree() {
   const [treeSearchResults, setTreeSearchResults] = useState<LayoutNode[]>([])
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null)
 
-  // Modal state — one unified modal for all assignment operations
+  // Filter
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [hiddenGroupTypes, setHiddenGroupTypes] = useState<Set<string>>(new Set())
+  const [hiddenServiceTypes, setHiddenServiceTypes] = useState<Set<string>>(new Set())
+
+  // Modal state
   type ModalMode =
-    | { type: 'add_to_flock'; personId: string; personName: string }   // adding sheep below a person
-    | { type: 'assign_shepherd'; personId: string; personName: string } // assigning shepherd above a person
-    | { type: 'add_person' }                                           // adding a new person to tree
+    | { type: 'add_to_flock'; personId: string; personName: string }
+    | { type: 'assign_shepherd'; personId: string; personName: string }
+    | { type: 'add_person' }
   const [modal, setModal] = useState<ModalMode | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [addSearch, setAddSearch] = useState('')
@@ -151,12 +217,11 @@ export default function ShepherdTree() {
     setAddPlacement('root')
   }
 
-  // Search-to-navigate: filter nodes as user types
+  // Search-to-navigate
   useEffect(() => {
     if (treeSearch.length < 2) { setTreeSearchResults([]); return }
     const q = treeSearch.toLowerCase()
     const matches = nodes.filter(n => n.name.toLowerCase().includes(q))
-    // Deduplicate by personId — show first appearance
     const seen = new Set<string>()
     const deduped: LayoutNode[] = []
     for (const m of matches) {
@@ -169,12 +234,10 @@ export default function ShepherdTree() {
   const navigateToNode = useCallback((node: LayoutNode) => {
     const svgEl = svgRef.current
     if (!svgEl) return
-    const svgW = svgEl.clientWidth
     const svgH = svgEl.clientHeight
-    // Center the view on the node
-    const targetScale = Math.max(transform.scale, 0.7) // at least 0.7 zoom
+    const targetScale = Math.max(transform.scale, 0.7)
     setTransform({
-      x: -node.x + (svgW / 2 - svgW / 2) / targetScale,
+      x: -node.x,
       y: -node.y + svgH / (2 * targetScale),
       scale: targetScale,
     })
@@ -182,9 +245,28 @@ export default function ShepherdTree() {
     setSelected(node)
     setTreeSearch('')
     setTreeSearchResults([])
-    // Clear highlight after 3 seconds
     setTimeout(() => setHighlightedNodeId(null), 3000)
   }, [transform.scale])
+
+  // Apply filter to raw nodes before building tree
+  const filteredNodes = useMemo(() => {
+    if (hiddenGroupTypes.size === 0 && hiddenServiceTypes.size === 0) return allNodes
+    return allNodes.filter(n => {
+      if (n.groupTypeId && hiddenGroupTypes.has(n.groupTypeId)) return false
+      if (n.serviceTypeId && hiddenServiceTypes.has(n.serviceTypeId)) return false
+      return true
+    })
+  }, [allNodes, hiddenGroupTypes, hiddenServiceTypes])
+
+  // Rebuild tree when filtered nodes or co-leader links change
+  useEffect(() => {
+    if (filteredNodes.length === 0) { setNodes([]); setEdges([]); return }
+    const laid = buildTree(filteredNodes)
+    const midpoints = applyCoLeaderLayout(laid, coLeaderLinks)
+    setCoLeaderMidpoints(midpoints)
+    setNodes(laid)
+    setEdges(getAllEdges(laid))
+  }, [filteredNodes, coLeaderLinks])
 
   const fetchTree = useCallback(async () => {
     setLoading(true)
@@ -197,7 +279,11 @@ export default function ShepherdTree() {
     setCurrentUserRole(data.currentUserRole || null)
     setGroupTypes(data.groupTypes || [])
     setServiceTypes(data.serviceTypes || [])
-    const laid = buildTree(data.nodes)
+
+    // Initial transform: center tree
+    const laid = buildTree(data.nodes || [])
+    const midpoints = applyCoLeaderLayout(laid, data.coLeaderLinks || [])
+    setCoLeaderMidpoints(midpoints)
     setNodes(laid)
     setEdges(getAllEdges(laid))
 
@@ -229,7 +315,6 @@ export default function ShepherdTree() {
 
   // ── Actions ──────────────────────────────────────────────────
 
-  /** Add a manual shepherd→person relationship */
   const assignShepherd = async (personId: string, shepherdId: string) => {
     const pid = personId.split('::')[0]
     const sid = shepherdId.split('::')[0]
@@ -242,7 +327,6 @@ export default function ShepherdTree() {
     fetchTree()
   }
 
-  /** Remove person from tree (manual assignments + is_leader flag) */
   const removeFromTree = async (personId: string, personName: string) => {
     if (!confirm(`Remove ${personName} from the tree? This removes manual assignments and leader status. PCO group/team memberships are not affected.`)) return
     await fetch('/api/tree', {
@@ -254,7 +338,6 @@ export default function ShepherdTree() {
     fetchTree()
   }
 
-  /** Add person as root leader */
   const addAsRoot = async (personId: string) => {
     await fetch(`/api/people/${personId}`, {
       method: 'PATCH',
@@ -265,7 +348,6 @@ export default function ShepherdTree() {
     fetchTree()
   }
 
-  /** Add person under a shepherd */
   const addUnderShepherd = async (personId: string, shepherdId: string) => {
     await fetch(`/api/people/${personId}`, {
       method: 'PATCH',
@@ -276,7 +358,6 @@ export default function ShepherdTree() {
     fetchTree()
   }
 
-  /** Bulk assign person as shepherd over a group_type or service_type */
   const bulkAssignShepherd = async (shepherdId: string, typeKey: 'group_type_id' | 'service_type_id', typeId: string, typeName: string) => {
     setBulkAssigning(true)
     try {
@@ -298,6 +379,29 @@ export default function ShepherdTree() {
       setBulkAssigning(false)
     }
   }
+
+  // ── Zoom helpers ────────────────────────────────────────────
+
+  const zoomIn = () => setTransform(t => ({ ...t, scale: Math.min(3, t.scale * 1.3) }))
+  const zoomOut = () => setTransform(t => ({ ...t, scale: Math.max(0.05, t.scale / 1.3) }))
+  const fitAll = useCallback(() => {
+    const svgEl = svgRef.current
+    if (!svgEl || nodes.length === 0) return
+    const svgW = svgEl.clientWidth
+    const svgH = svgEl.clientHeight
+    const minX = Math.min(...nodes.map(n => n.x)) - NODE_W / 2 - 40
+    const maxX = Math.max(...nodes.map(n => n.x)) + NODE_W / 2 + 40
+    const minY = Math.min(...nodes.map(n => n.y)) - 40
+    const maxY = Math.max(...nodes.map(n => n.y)) + NODE_H + 40
+    const treeW = maxX - minX
+    const treeH = maxY - minY
+    const scale = Math.min(svgW / treeW, svgH / treeH, 1.5)
+    setTransform({
+      x: -minX - treeW / 2,
+      y: -minY + 20 / scale,
+      scale,
+    })
+  }, [nodes])
 
   // ── Mouse / touch ────────────────────────────────────────────
 
@@ -322,10 +426,19 @@ export default function ShepherdTree() {
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault()
       e.stopPropagation()
-      const isPinch = e.ctrlKey
-      const sensitivity = isPinch ? 0.01 : 0.002
-      const delta = 1 - e.deltaY * sensitivity
-      setTransform(t => ({ ...t, scale: Math.min(3, Math.max(0.05, t.scale * delta)) }))
+      if (e.ctrlKey || e.metaKey) {
+        // Pinch / ctrl+scroll = zoom
+        const sensitivity = 0.01
+        const delta = 1 - e.deltaY * sensitivity
+        setTransform(t => ({ ...t, scale: Math.min(3, Math.max(0.05, t.scale * delta)) }))
+      } else {
+        // Regular scroll = pan
+        setTransform(t => ({
+          ...t,
+          x: t.x - e.deltaX / t.scale,
+          y: t.y - e.deltaY / t.scale,
+        }))
+      }
     }
 
     let lastTouchDist = 0
@@ -390,6 +503,17 @@ export default function ShepherdTree() {
     }
   }, [])
 
+  // Close filter dropdown when clicking outside
+  useEffect(() => {
+    if (!filterOpen) return
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Element
+      if (!target.closest('.filter-dropdown')) setFilterOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [filterOpen])
+
   // ── Render states ────────────────────────────────────────────
 
   if (loading) return (
@@ -397,7 +521,7 @@ export default function ShepherdTree() {
       <div className="text-center">
         <div className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin mx-auto mb-3"
           style={{ borderColor: 'var(--border)', borderTopColor: 'var(--accent)' }} />
-        <p className="sans text-sm">Loading shepherd tree…</p>
+        <p className="sans text-sm">Loading shepherd tree...</p>
       </div>
     </div>
   )
@@ -408,7 +532,7 @@ export default function ShepherdTree() {
     </div>
   )
 
-  if (nodes.length === 0) return (
+  if (nodes.length === 0 && allNodes.length === 0) return (
     <div className="flex-1 flex items-center justify-center text-center px-8">
       <div>
         <p className="font-serif text-2xl mb-2" style={{ color: 'var(--primary)' }}>No leaders found</p>
@@ -426,29 +550,38 @@ export default function ShepherdTree() {
     </div>
   )
 
+  // Build set of primary co-leader IDs (the "from" in each link) for edge origin override
+  const primaryCoLeaderIds = new Set(coLeaderLinks.map(l => l.from))
+
   // Deduplicated shepherd list for dropdowns
   const shepherdOptions = allNodes
     .filter(n => n.role === 'shepherd')
     .filter((n, i, arr) => arr.findIndex(x => realId(x) === realId(n)) === i)
     .sort((a, b) => a.name.localeCompare(b.name))
 
+  // Tracked types for filter
+  const trackedGroupTypes = groupTypes.filter(gt => gt.is_tracked)
+  const trackedServiceTypes = serviceTypes
+
+  const activeFilterCount = hiddenGroupTypes.size + hiddenServiceTypes.size
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-6 py-3 border-b shrink-0"
+      <div className="flex items-center justify-between px-4 py-2.5 border-b shrink-0"
         style={{ borderColor: 'var(--border)', background: 'white' }}>
-        <div>
-          <h1 className="font-serif text-xl" style={{ color: 'var(--primary)' }}>Shepherd Tree</h1>
-          <p className="sans text-xs mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
-            {new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId || n.id)).size} shepherds · {nodes.length} people · pinch to zoom
+        <div className="shrink-0">
+          <h1 className="font-serif text-lg" style={{ color: 'var(--primary)' }}>Shepherd Tree</h1>
+          <p className="sans text-[11px] mt-0.5" style={{ color: 'var(--muted-foreground)' }}>
+            {new Set(nodes.filter(n => n.role === 'shepherd').map(n => n.personId || n.id)).size} shepherds · {nodes.length} people · scroll to pan, ctrl+scroll to zoom
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          {/* Search-to-navigate */}
+        <div className="flex items-center gap-2">
+          {/* Search */}
           <div className="relative">
-            <input type="text" placeholder="Find person…" value={treeSearch}
+            <input type="text" placeholder="Find person..." value={treeSearch}
               onChange={e => setTreeSearch(e.target.value)}
-              className="w-40 md:w-52 px-3 py-1.5 rounded-lg border text-xs sans"
+              className="w-36 md:w-48 px-3 py-1.5 rounded-lg border text-xs sans"
               style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} />
             {treeSearchResults.length > 0 && (
               <div className="absolute top-full left-0 mt-1 w-64 bg-white rounded-lg shadow-xl border z-50 max-h-64 overflow-y-auto"
@@ -470,20 +603,13 @@ export default function ShepherdTree() {
             )}
           </div>
 
-          <div className="hidden md:flex items-center gap-3 text-xs sans mr-2" style={{ color: 'var(--muted-foreground)' }}>
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#4a7c59' }} />Healthy</span>
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#c17f3e' }} />Attention</span>
-            <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: '#9b3a3a' }} />At risk</span>
+          {/* Health legend - hidden on small screens */}
+          <div className="hidden lg:flex items-center gap-2.5 text-[11px] sans mr-1" style={{ color: 'var(--muted-foreground)' }}>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#4a7c59' }} />Healthy</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#c17f3e' }} />Attention</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full inline-block" style={{ background: '#9b3a3a' }} />At risk</span>
           </div>
-          <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
-            {(['2d', '3d'] as const).map(v => (
-              <button key={v} onClick={() => setViewMode(v)}
-                className="px-3 py-1.5 text-xs font-medium sans transition-colors"
-                style={{ background: viewMode === v ? 'var(--primary)' : 'white', color: viewMode === v ? 'white' : 'var(--muted-foreground)' }}>
-                {v.toUpperCase()}
-              </button>
-            ))}
-          </div>
+
           {['super_admin', 'staff'].includes(currentUserRole || '') && (
             <button onClick={() => setModal({ type: 'add_person' })}
               className="text-xs sans px-3 py-1.5 rounded-lg font-medium"
@@ -491,16 +617,94 @@ export default function ShepherdTree() {
               + Add Person
             </button>
           )}
-          <button onClick={() => setTransform({ x: 0, y: 60, scale: 1 })}
-            className="text-xs sans px-3 py-1.5 rounded-lg border"
-            style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
-            Reset View
-          </button>
+
+          {/* Filter button */}
+          <div className="relative filter-dropdown">
+            <button onClick={() => setFilterOpen(!filterOpen)}
+              className="flex items-center gap-1 text-xs sans px-2.5 py-1.5 rounded-lg border"
+              style={{ borderColor: activeFilterCount > 0 ? 'var(--primary)' : 'var(--border)', color: activeFilterCount > 0 ? 'var(--primary)' : 'var(--muted-foreground)' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+              </svg>
+              Filter
+              {activeFilterCount > 0 && (
+                <span className="ml-0.5 w-4 h-4 rounded-full text-[10px] flex items-center justify-center font-bold"
+                  style={{ background: 'var(--primary)', color: 'white' }}>
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+
+            {filterOpen && (
+              <div className="absolute top-full right-0 mt-1 w-64 bg-white rounded-xl shadow-xl border z-50 p-3"
+                style={{ borderColor: 'var(--border)' }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold sans" style={{ color: 'var(--foreground)' }}>Show / Hide Types</span>
+                  {activeFilterCount > 0 && (
+                    <button onClick={() => { setHiddenGroupTypes(new Set()); setHiddenServiceTypes(new Set()) }}
+                      className="text-[10px] sans underline" style={{ color: 'var(--primary)' }}>
+                      Clear all
+                    </button>
+                  )}
+                </div>
+
+                {trackedGroupTypes.length > 0 && (
+                  <>
+                    <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1 mt-2" style={{ color: 'var(--muted-foreground)' }}>Group Types</p>
+                    {trackedGroupTypes.map(gt => {
+                      const hidden = hiddenGroupTypes.has(gt.id)
+                      return (
+                        <label key={gt.id} className="flex items-center gap-2 px-1 py-1 cursor-pointer hover:bg-gray-50 rounded">
+                          <input type="checkbox" checked={!hidden}
+                            onChange={() => {
+                              setHiddenGroupTypes(prev => {
+                                const next = new Set(prev)
+                                if (hidden) next.delete(gt.id); else next.add(gt.id)
+                                return next
+                              })
+                            }}
+                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{gt.name}</span>
+                        </label>
+                      )
+                    })}
+                  </>
+                )}
+
+                {trackedServiceTypes.length > 0 && (
+                  <>
+                    <p className="text-[10px] sans font-semibold uppercase tracking-wide mb-1 mt-3" style={{ color: 'var(--muted-foreground)' }}>Service Types</p>
+                    {trackedServiceTypes.map(st => {
+                      const hidden = hiddenServiceTypes.has(st.id)
+                      return (
+                        <label key={st.id} className="flex items-center gap-2 px-1 py-1 cursor-pointer hover:bg-gray-50 rounded">
+                          <input type="checkbox" checked={!hidden}
+                            onChange={() => {
+                              setHiddenServiceTypes(prev => {
+                                const next = new Set(prev)
+                                if (hidden) next.delete(st.id); else next.add(st.id)
+                                return next
+                              })
+                            }}
+                            className="rounded" style={{ accentColor: 'var(--primary)' }} />
+                          <span className="text-xs sans" style={{ color: 'var(--foreground)' }}>{st.name}</span>
+                        </label>
+                      )
+                    })}
+                  </>
+                )}
+
+                {trackedGroupTypes.length === 0 && trackedServiceTypes.length === 0 && (
+                  <p className="text-xs sans py-2 text-center" style={{ color: 'var(--muted-foreground)' }}>No types configured</p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       {/* Tree canvas */}
-      <div className="flex-1 relative overflow-hidden" style={{ background: 'var(--muted)', touchAction: 'none' }}>
+      <div ref={containerRef} className="flex-1 relative overflow-hidden" style={{ background: 'var(--muted)', touchAction: 'none' }}>
         <svg ref={svgRef}
           className="w-full h-full cursor-grab active:cursor-grabbing select-none"
           onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}>
@@ -513,9 +717,16 @@ export default function ShepherdTree() {
           <rect width="100%" height="100%" fill="url(#grid)" />
 
           <g transform={`translate(${(svgRef.current?.clientWidth ?? 800) / 2 + transform.x * transform.scale}, ${transform.y}) scale(${transform.scale})`}>
-            {/* Edges */}
+            {/* Edges — use co-leader midpoint as origin when applicable */}
             {edges.map(({ from, to }) => {
-              const fx = from.x, fy = from.y + NODE_H, tx = to.x, ty = to.y
+              let fx = from.x, fy = from.y + NODE_H
+              // If parent is a primary co-leader, draw edge from midpoint instead
+              if (primaryCoLeaderIds.has(from.id) && coLeaderMidpoints.has(from.id)) {
+                const mid = coLeaderMidpoints.get(from.id)!
+                fx = mid.mx
+                fy = mid.my
+              }
+              const tx = to.x, ty = to.y
               const my = (fy + ty) / 2
               return (
                 <path key={`${from.id}-${to.id}`}
@@ -533,14 +744,15 @@ export default function ShepherdTree() {
               const y = fromNode.y + NODE_H / 2
               const x1 = Math.min(fromNode.x, toNode.x) + NODE_W / 2
               const x2 = Math.max(fromNode.x, toNode.x) - NODE_W / 2
+              const midX = (fromNode.x + toNode.x) / 2
+              const midY = fromNode.y + NODE_H
               return (
                 <g key={`co-${link.from}-${link.to}`}>
+                  {/* Horizontal bar between cards */}
                   <line x1={x1} y1={y} x2={x2} y2={y}
                     stroke="#4a7c59" strokeWidth="2" strokeDasharray="6 3" />
-                  {/* Diamond midpoint indicator */}
-                  <polygon
-                    points={`${(x1 + x2) / 2},${y - 5} ${(x1 + x2) / 2 + 5},${y} ${(x1 + x2) / 2},${y + 5} ${(x1 + x2) / 2 - 5},${y}`}
-                    fill="#4a7c59" opacity="0.6" />
+                  {/* Junction dot at bottom center — edge origin for children */}
+                  <circle cx={midX} cy={midY} r={5} fill="#4a7c59" opacity="0.7" />
                 </g>
               )
             })}
@@ -558,9 +770,6 @@ export default function ShepherdTree() {
                   transform={`translate(${node.x - NODE_W / 2}, ${node.y})`}
                   style={{ cursor: 'pointer' }}
                   onClick={() => setSelected(isSelected ? null : node)}>
-                  {viewMode === '3d' && (
-                    <rect x={4} y={4} width={NODE_W} height={NODE_H} rx={10} fill={color} opacity={0.15} />
-                  )}
                   <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
                     fill={node.isCurrentUser ? color : 'white'}
                     stroke={highlightedNodeId === node.id ? '#f59e0b' : isSelected ? color : node.isCurrentUser ? color : 'var(--border)'}
@@ -593,7 +802,7 @@ export default function ShepherdTree() {
                   <text x={52} y={isShepherd ? NODE_H / 2 - 9 : NODE_H / 2 - 4}
                     fontSize={12} fontWeight="600" fontFamily="Georgia, serif"
                     fill={node.isCurrentUser ? 'white' : 'var(--foreground)'}>
-                    {node.name.slice(0, 22)}{node.name.length > 22 ? '…' : ''}
+                    {node.name.slice(0, 22)}{node.name.length > 22 ? '...' : ''}
                   </text>
 
                   {isShepherd ? (
@@ -618,6 +827,23 @@ export default function ShepherdTree() {
             })}
           </g>
         </svg>
+
+        {/* ── Zoom controls (bottom center) ── */}
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-white rounded-xl shadow-lg border px-2 py-1.5"
+          style={{ borderColor: 'var(--border)' }}>
+          <button onClick={zoomOut} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-sm font-bold"
+            style={{ color: 'var(--muted-foreground)' }}>-</button>
+          <span className="w-12 text-center text-[11px] sans font-medium" style={{ color: 'var(--muted-foreground)' }}>
+            {Math.round(transform.scale * 100)}%
+          </span>
+          <button onClick={zoomIn} className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-sm font-bold"
+            style={{ color: 'var(--muted-foreground)' }}>+</button>
+          <div className="w-px h-5 mx-1" style={{ background: 'var(--border)' }} />
+          <button onClick={fitAll} className="px-2 py-1 text-[11px] sans font-medium rounded-lg hover:bg-gray-100"
+            style={{ color: 'var(--muted-foreground)' }}>
+            Fit All
+          </button>
+        </div>
 
         {/* ── Detail panel (right side) ── */}
         {selected && (() => {
@@ -644,7 +870,6 @@ export default function ShepherdTree() {
                   className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              {/* Role badge */}
               <div className="flex items-center gap-2 mb-3">
                 <span className="inline-block text-xs sans px-2.5 py-1 rounded-full font-medium"
                   style={{ background: detailColor + '15', color: detailColor }}>
@@ -656,7 +881,6 @@ export default function ShepherdTree() {
                 )}
               </div>
 
-              {/* Stats (only for shepherds) */}
               {isShepherd && (
                 <div className="grid grid-cols-2 gap-3 mb-3">
                   <div className="rounded-xl p-3 text-center" style={{ background: 'var(--muted)' }}>
@@ -670,7 +894,6 @@ export default function ShepherdTree() {
                 </div>
               )}
 
-              {/* Actions — BOTH are always available for any person */}
               <div className="flex flex-col gap-2">
                 <button
                   onClick={() => setModal({ type: 'add_to_flock', personId: realId(selected), personName: selected.name })}
@@ -705,8 +928,7 @@ export default function ShepherdTree() {
         })()}
 
         {/* ══════════════════════════════════════════════════════
-            MODAL: Add to Flock (add sheep below a person)
-            Tabs: Person | Group Type | Service Type
+            MODAL: Add to Flock
            ══════════════════════════════════════════════════════ */}
         {modal?.type === 'add_to_flock' && (
           <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
@@ -718,7 +940,6 @@ export default function ShepherdTree() {
                 <button onClick={closeModal} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              {/* Tabs */}
               <div className="flex rounded-lg overflow-hidden border mb-3" style={{ borderColor: 'var(--border)' }}>
                 {([
                   { key: 'person' as const, label: 'Person' },
@@ -733,7 +954,6 @@ export default function ShepherdTree() {
                 ))}
               </div>
 
-              {/* Person tab */}
               {assignTab === 'person' && (
                 <>
                   <input type="text" placeholder="Search by name..." value={searchTerm}
@@ -766,7 +986,6 @@ export default function ShepherdTree() {
                 </>
               )}
 
-              {/* Group Type tab */}
               {assignTab === 'group_type' && (
                 <div className="max-h-64 overflow-y-auto space-y-1">
                   <p className="text-xs sans mb-2" style={{ color: 'var(--muted-foreground)' }}>
@@ -782,13 +1001,12 @@ export default function ShepherdTree() {
                         <div className="text-sm sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{gt.name}</div>
                         <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>{gt.is_tracked ? 'Tracked' : 'Not tracked'}</div>
                       </div>
-                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning…</span>}
+                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning...</span>}
                     </button>
                   ))}
                 </div>
               )}
 
-              {/* Service Type tab */}
               {assignTab === 'service_type' && (
                 <div className="max-h-64 overflow-y-auto space-y-1">
                   <p className="text-xs sans mb-2" style={{ color: 'var(--muted-foreground)' }}>
@@ -804,7 +1022,7 @@ export default function ShepherdTree() {
                         <div className="text-sm sans font-medium truncate" style={{ color: 'var(--foreground)' }}>{st.name}</div>
                         <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Service Type</div>
                       </div>
-                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning…</span>}
+                      {bulkAssigning && <span className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Assigning...</span>}
                     </button>
                   ))}
                 </div>
@@ -814,7 +1032,7 @@ export default function ShepherdTree() {
         )}
 
         {/* ══════════════════════════════════════════════════════
-            MODAL: Assign Shepherd Above (place a shepherd over this person)
+            MODAL: Assign Shepherd Above
            ══════════════════════════════════════════════════════ */}
         {modal?.type === 'assign_shepherd' && (
           <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
@@ -860,7 +1078,6 @@ export default function ShepherdTree() {
 
         {/* ══════════════════════════════════════════════════════
             MODAL: Add Person to Tree
-            Placement: Root | Under Shepherd | Over Group Type | Over Service Type
            ══════════════════════════════════════════════════════ */}
         {modal?.type === 'add_person' && (
           <div className="absolute inset-0 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.3)' }}>
@@ -870,7 +1087,6 @@ export default function ShepherdTree() {
                 <button onClick={closeModal} className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
               </div>
 
-              {/* Step 1: Search */}
               <p className="text-xs sans mb-3" style={{ color: 'var(--muted-foreground)' }}>
                 Search for anyone, then choose how to place them in the tree.
               </p>
@@ -879,7 +1095,6 @@ export default function ShepherdTree() {
                 className="w-full px-3 py-2 rounded-lg border text-sm sans mb-3"
                 style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }} autoFocus />
 
-              {/* Placement selector */}
               <div className="flex rounded-lg overflow-hidden border mb-3" style={{ borderColor: 'var(--border)' }}>
                 {([
                   { key: 'root' as const, label: 'As Root' },
@@ -895,7 +1110,6 @@ export default function ShepherdTree() {
                 ))}
               </div>
 
-              {/* Results list */}
               <div className="max-h-64 overflow-y-auto space-y-1">
                 {addResults.map(p => {
                   const alreadyInTree = allNodes.some(n => (n.personId || n.id) === p.id)
@@ -911,7 +1125,6 @@ export default function ShepherdTree() {
                         {alreadyInTree && <div className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Already in tree</div>}
                       </div>
 
-                      {/* Placement action */}
                       <div className="shrink-0">
                         {addPlacement === 'root' && (
                           <button onClick={() => addAsRoot(p.id)}
@@ -925,7 +1138,7 @@ export default function ShepherdTree() {
                           <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
                             style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
                             defaultValue="" onChange={e => { if (e.target.value) addUnderShepherd(p.id, e.target.value) }}>
-                            <option value="" disabled>Select shepherd…</option>
+                            <option value="" disabled>Select shepherd...</option>
                             {shepherdOptions.map(n => (
                               <option key={realId(n)} value={realId(n)}>{n.name}</option>
                             ))}
@@ -936,7 +1149,7 @@ export default function ShepherdTree() {
                           <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
                             style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
                             defaultValue="" onChange={e => { if (e.target.value) bulkAssignShepherd(p.id, 'group_type_id', e.target.value, groupTypes.find(g => g.id === e.target.value)?.name || '') }}>
-                            <option value="" disabled>Select group type…</option>
+                            <option value="" disabled>Select group type...</option>
                             {groupTypes.map(gt => (
                               <option key={gt.id} value={gt.id}>{gt.name}</option>
                             ))}
@@ -947,7 +1160,7 @@ export default function ShepherdTree() {
                           <select className="text-xs sans px-2 py-1.5 rounded border w-[200px]"
                             style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
                             defaultValue="" onChange={e => { if (e.target.value) bulkAssignShepherd(p.id, 'service_type_id', e.target.value, serviceTypes.find(s => s.id === e.target.value)?.name || '') }}>
-                            <option value="" disabled>Select service type…</option>
+                            <option value="" disabled>Select service type...</option>
                             {serviceTypes.map(st => (
                               <option key={st.id} value={st.id}>{st.name}</option>
                             ))}

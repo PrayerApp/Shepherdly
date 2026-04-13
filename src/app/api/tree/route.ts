@@ -166,6 +166,7 @@ export async function GET() {
   const mkNode = (
     personId: string, contextId: string, role: 'shepherd' | 'member',
     supervisorId: string | null, contextLabel: string, flockCount: number,
+    filterMeta?: { groupTypeId?: string; serviceTypeId?: string },
   ) => {
     const person = personMap.get(personId)!
     return {
@@ -180,6 +181,8 @@ export async function GET() {
       isCurrentUser: false,
       contextLabel,
       warning: null,
+      groupTypeId: filterMeta?.groupTypeId || null,
+      serviceTypeId: filterMeta?.serviceTypeId || null,
     }
   }
 
@@ -262,9 +265,11 @@ export async function GET() {
       // Ensure the type-shepherd node exists
       if (!nodes.find(n => n.id === leaderSupervisorId)) {
         const gtName = groupTypeName || 'Groups'
-        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${gtName}`, 0))
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${gtName}`, 0, { groupTypeId: gtId! }))
       }
     }
+
+    const gMeta = { groupTypeId: gtId || undefined }
 
     // Co-leader logic: ALL members go under the FIRST leader.
     // Additional co-leaders are siblings at the same level, linked via coLeaderLinks.
@@ -279,7 +284,7 @@ export async function GET() {
       for (const leader of leaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
-          nonLeaders.length,  // full count — co-leaders share the flock
+          nonLeaders.length, gMeta,
         ))
       }
 
@@ -293,17 +298,17 @@ export async function GET() {
 
       // ALL members go under the first leader
       for (const m of nonLeaders) {
-        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0, gMeta))
       }
     } else if (leaderSupervisorId) {
       // No leaders at all, put members directly under type-shepherd
       for (const m of nonLeaders) {
-        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0, gMeta))
       }
     } else {
       // No leaders at all — members appear as roots
       for (const m of validMembers) {
-        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0, gMeta))
       }
     }
   }
@@ -347,9 +352,11 @@ export async function GET() {
 
       if (!nodes.find(n => n.id === leaderSupervisorId)) {
         const stName = serviceTypeName || 'Teams'
-        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${stName}`, 0))
+        nodes.push(mkNode(firstShepherd, shepherdContextId, 'shepherd', null, `Over ${stName}`, 0, { serviceTypeId: stId! }))
       }
     }
+
+    const sMeta = { serviceTypeId: stId || undefined }
 
     if (leaders.length > 0) {
       const primaryLeader = leaders[0]
@@ -358,7 +365,7 @@ export async function GET() {
       for (const leader of leaders) {
         nodes.push(mkNode(
           leader.personId, contextId, 'shepherd', leaderSupervisorId, contextLabel,
-          nonLeaders.length,
+          nonLeaders.length, sMeta,
         ))
       }
 
@@ -370,15 +377,15 @@ export async function GET() {
       }
 
       for (const m of nonLeaders) {
-        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', primaryNodeId, contextLabel, 0, sMeta))
       }
     } else if (leaderSupervisorId) {
       for (const m of nonLeaders) {
-        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', leaderSupervisorId, contextLabel, 0, sMeta))
       }
     } else {
       for (const m of validMembers) {
-        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0))
+        nodes.push(mkNode(m.personId, contextId, 'member', null, contextLabel, 0, sMeta))
       }
     }
   }
