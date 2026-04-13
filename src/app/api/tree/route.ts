@@ -174,7 +174,15 @@ export async function GET() {
 
   // ── Step 1: Build manual hierarchy nodes ─────────────────────
   // These are Elders, Staff, and optionally Volunteer coaches
-  for (const a of assignments || []) {
+
+  // Index assignments by layer for placeholder logic
+  const assignmentsByLayer = new Map<string, AssignmentRow[]>()
+  for (const a of (assignments || []) as AssignmentRow[]) {
+    if (!assignmentsByLayer.has(a.layer_id)) assignmentsByLayer.set(a.layer_id, [])
+    assignmentsByLayer.get(a.layer_id)!.push(a)
+  }
+
+  for (const a of (assignments || []) as AssignmentRow[]) {
     const person = personMap.get(a.person_id)
     if (!person) continue
     const layer = layerMap.get(a.layer_id)
@@ -201,7 +209,7 @@ export async function GET() {
     // Find supervisor's node ID
     let supervisorId: string | null = null
     if (a.supervisor_person_id) {
-      const supAssignment = (assignments || []).find(x => x.person_id === a.supervisor_person_id)
+      const supAssignment = ((assignments || []) as AssignmentRow[]).find(x => x.person_id === a.supervisor_person_id)
       if (supAssignment) {
         supervisorId = `${a.supervisor_person_id}::layer-${supAssignment.layer_id}`
       }
@@ -225,7 +233,62 @@ export async function GET() {
       sortOrder: a.sort_order || 0,
       groupTypeId: null,
       serviceTypeId: null,
+      isPlaceholder: false,
     })
+  }
+
+  // ── Add placeholder "click to add" nodes for each layer ──────
+  // Placeholders sit at the right level in the hierarchy so users
+  // can see the layer structure even when empty.
+  const sortedLayers = [...(layers || [])].sort((a, b) => a.rank - b.rank)
+  for (const layer of sortedLayers) {
+    const layerAssignments = assignmentsByLayer.get(layer.id) || []
+    const isStaffOrElder = ['elder', 'staff'].includes(layer.category)
+
+    // Find the "last" real node on the layer above to use as supervisor
+    // Layers are ordered by rank, so previous layer in sortedLayers
+    const layerIdx = sortedLayers.indexOf(layer)
+    let placeholderSupervisorId: string | null = null
+    if (layerIdx > 0) {
+      // Find nodes on the previous layer
+      const prevLayer = sortedLayers[layerIdx - 1]
+      const prevAssignments = assignmentsByLayer.get(prevLayer.id) || []
+      if (prevAssignments.length > 0) {
+        // Attach under the first person of the previous layer
+        const first = prevAssignments[0]
+        placeholderSupervisorId = `${first.person_id}::layer-${first.layer_id}`
+      } else {
+        // Previous layer is also empty — attach under its placeholder
+        placeholderSupervisorId = `placeholder-${prevLayer.id}`
+      }
+    }
+
+    nodes.push({
+      id: `placeholder-${layer.id}`,
+      personId: undefined,
+      name: `+ Add ${layer.name}`,
+      role: 'shepherd' as const,
+      supervisorId: placeholderSupervisorId,
+      flockCount: 0,
+      lastCheckin: null,
+      isCurrentUser: false,
+      isStaff: isStaffOrElder,
+      isLeadPastor: false,
+      contextLabel: layer.name,
+      warning: null,
+      layerId: layer.id,
+      layerCategory: layer.category,
+      sortOrder: 99999, // sort last within the layer
+      groupTypeId: null,
+      serviceTypeId: null,
+      isPlaceholder: true,
+    })
+
+    // Real nodes that have no supervisor should attach to the placeholder
+    // of the layer above (if it exists), but only if they don't already have one
+    // Actually, real nodes on this layer with no supervisor: if the layer
+    // above has nodes, connect to the first; otherwise connect to its placeholder.
+    // This is already handled by the assignment's supervisor_person_id.
   }
 
   // ── Step 2: Index PCO memberships ────────────────────────────

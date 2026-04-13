@@ -19,6 +19,7 @@ interface TreeNode {
   serviceTypeId?: string | null
   layerId?: string | null
   layerCategory?: string | null
+  isPlaceholder?: boolean
 }
 
 interface LayoutNode extends TreeNode {
@@ -276,7 +277,7 @@ export default function ShepherdTree() {
   useEffect(() => {
     if (treeSearch.length < 2) { setTreeSearchResults([]); return }
     const q = treeSearch.toLowerCase()
-    const matches = nodes.filter(n => n.name.toLowerCase().includes(q))
+    const matches = nodes.filter(n => !n.isPlaceholder && n.name.toLowerCase().includes(q))
     const seen = new Set<string>()
     const deduped: LayoutNode[] = []
     for (const m of matches) {
@@ -760,6 +761,42 @@ export default function ShepherdTree() {
 
             {/* Nodes */}
             {nodes.map(node => {
+              // ── Placeholder node ──
+              if (node.isPlaceholder) {
+                const phColor = node.layerCategory === 'elder' ? '#7c3aed' : node.layerCategory === 'staff' ? '#3b6ea5' : '#4a7c59'
+                return (
+                  <g key={node.id} className="tree-node"
+                    transform={`translate(${node.x - NODE_W / 2}, ${node.y})`}
+                    style={{ cursor: isAdmin ? 'pointer' : 'default' }}
+                    onClick={() => {
+                      if (!isAdmin) return
+                      setAssignModal({
+                        personId: '', personName: '',
+                        layerId: node.layerId || '',
+                        supervisorPersonId: '',
+                        oversightEntries: [],
+                        isLeadPastor: false,
+                        isEdit: false,
+                      })
+                      setAssignSearch('')
+                      setAssignResults([])
+                    }}>
+                    <rect x={0} y={0} width={NODE_W} height={NODE_H} rx={10}
+                      fill="white" stroke={phColor} strokeWidth="1.5"
+                      strokeDasharray="6 4" opacity="0.6" />
+                    <text x={NODE_W / 2} y={NODE_H / 2 - 6} textAnchor="middle"
+                      fontSize={16} fontWeight="300" fontFamily="system-ui" fill={phColor} opacity="0.7">
+                      +
+                    </text>
+                    <text x={NODE_W / 2} y={NODE_H / 2 + 12} textAnchor="middle"
+                      fontSize={10} fontFamily="system-ui" fill={phColor} opacity="0.6">
+                      Add {node.contextLabel}
+                    </text>
+                  </g>
+                )
+              }
+
+              // ── Regular node ──
               const isShepherd = node.role === 'shepherd'
               const isManual = !!node.layerId
               const color = node.isLeadPastor ? '#7c3aed' : isManual ? '#3b6ea5' : isShepherd ? '#4a7c59' : '#6b7280'
