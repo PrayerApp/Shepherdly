@@ -2,6 +2,113 @@ import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { NextResponse } from 'next/server'
 
+/**
+ * Rebuild tree_assignments from PCO list→layer links.
+ * - Fetches all list-layer links and their people
+ * - Assigns each person to the HIGHEST-priority layer (lowest rank) they appear on
+ * - Preserves supervisor_person_id and oversight for people who already had assignments
+ * - People on a higher layer are excluded from lower layers (dedup)
+ */
+async function syncListAssignments(admin: any, churchId: string) {
+  // 1. Get all list-layer links, ordered by layer rank (highest priority first)
+  const { data: links } = await admin
+    .from('pco_list_layer_links')
+    .select('list_id, layer_id')
+    .eq('church_id', churchId)
+
+  if (!links || links.length === 0) return
+
+  // 2. Get layer ranks for ordering
+  const { data: layers } = await admin
+    .from('tree_layers')
+    .select('id, rank')
+    .eq('church_id', churchId)
+  const layerRank = new Map((layers || []).map((l: any) => [l.id, l.rank]))
+
+  // Sort links by layer rank (lowest rank = highest priority)
+  links.sort((a: any, b: any) => ((layerRank.get(a.layer_id) as number) ?? 999) - ((layerRank.get(b.layer_id) as number) ?? 999))
+
+  // 3. Get all list people
+  const { data: listPeople } = await admin
+    .from('pco_list_people')
+    .select('list_id, person_id')
+    .eq('church_id', churchId)
+
+  if (!listPeople || listPeople.length === 0) return
+
+  // Index: list_id → person_ids
+  const peopleByList = new Map<string, string[]>()
+  for (const lp of listPeople) {
+    if (!peopleByList.has(lp.list_id)) peopleByList.set(lp.list_id, [])
+    peopleByList.get(lp.list_id)!.push(lp.person_id)
+  }
+
+  // 4. Get existing assignments to preserve supervisor/sort_order
+  const { data: existingAssignments } = await admin
+    .from('tree_assignments')
+    .select('person_id, supervisor_person_id, sort_order')
+    .eq('church_id', churchId)
+
+  const existingMap = new Map<string, { supervisor: string | null; sortOrder: number }>(
+    (existingAssignments || []).map((a: any) => [a.person_id, { supervisor: a.supervisor_person_id, sortOrder: a.sort_order }])
+  )
+
+  // 5. Build new assignments: each person goes to their highest-priority layer only
+  const assigned = new Set<string>()
+  const newAssignments: { person_id: string; layer_id: string; supervisor_person_id: string | null; sort_order: number; church_id: string }[] = []
+
+  for (const link of links) {
+    const people = peopleByList.get(link.list_id) || []
+    for (const personId of people) {
+      if (assigned.has(personId)) continue // already assigned to a higher-priority layer
+      assigned.add(personId)
+      const existing = existingMap.get(personId)
+      newAssignments.push({
+        person_id: personId,
+        layer_id: link.layer_id,
+        supervisor_person_id: existing?.supervisor || null,
+        sort_order: existing?.sortOrder || 0,
+        church_id: churchId,
+      })
+    }
+  }
+
+  // 6. Replace all assignments: delete old, insert new
+  await admin.from('tree_assignments').delete().eq('church_id', churchId)
+  if (newAssignments.length > 0) {
+    // Batch insert in chunks
+    for (let i = 0; i < newAssignments.length; i += 500) {
+      const chunk = newAssignments.slice(i, i + 500)
+      await admin.from('tree_assignments').upsert(chunk, { onConflict: 'person_id,church_id' })
+    }
+  }
+
+  // 7. Mark people on elder/staff layers as is_leader + is_staff
+  const { data: layersWithCat } = await admin
+    .from('tree_layers')
+    .select('id, category')
+    .eq('church_id', churchId)
+  const elderStaffLayerIds = new Set(
+    (layersWithCat || []).filter((l: any) => ['elder', 'staff'].includes(l.category)).map((l: any) => l.id)
+  )
+
+  // Reset all people flags first, then set for assigned ones
+  const allPersonIds = newAssignments.map(a => a.person_id)
+  if (allPersonIds.length > 0) {
+    for (let i = 0; i < allPersonIds.length; i += 500) {
+      const chunk = allPersonIds.slice(i, i + 500)
+      await admin.from('people').update({ is_leader: true }).in('id', chunk)
+    }
+    const staffIds = newAssignments.filter(a => elderStaffLayerIds.has(a.layer_id)).map(a => a.person_id)
+    if (staffIds.length > 0) {
+      for (let i = 0; i < staffIds.length; i += 500) {
+        const chunk = staffIds.slice(i, i + 500)
+        await admin.from('people').update({ is_staff: true }).in('id', chunk)
+      }
+    }
+  }
+}
+
 export async function GET() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -777,6 +884,8 @@ export async function POST(request: Request) {
     const { error } = await admin.from('pco_list_layer_links')
       .upsert({ list_id, layer_id, church_id: churchId }, { onConflict: 'list_id,church_id' })
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    // Auto-rebuild assignments from lists
+    await syncListAssignments(admin, churchId!)
     return NextResponse.json({ success: true })
   }
 
@@ -785,6 +894,14 @@ export async function POST(request: Request) {
     const { list_id } = body
     if (!list_id) return NextResponse.json({ error: 'list_id required' }, { status: 400 })
     await admin.from('pco_list_layer_links').delete().eq('list_id', list_id).eq('church_id', churchId!)
+    // Auto-rebuild assignments from lists
+    await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Rebuild assignments from PCO lists ──────────────────────
+  if (body.action === 'sync_list_assignments') {
+    await syncListAssignments(admin, churchId!)
     return NextResponse.json({ success: true })
   }
 
