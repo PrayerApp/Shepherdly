@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 
 // ── Types ──────────────────────────────────────────────────────
 interface LayerItem {
@@ -8,6 +8,17 @@ interface LayerItem {
   name: string
   color: { bg: string; label: string }
   isDefault?: boolean
+}
+
+interface PcoList {
+  id: string
+  name: string
+  totalPeople: number
+}
+
+interface PersonCard {
+  id: string
+  name: string
 }
 
 // ── Color palette — each layer gets its own unique color ───────
@@ -46,6 +57,25 @@ export default function ShepherdTreeV2() {
   // Drag state for modal list
   const dragIdx = useRef<number | null>(null)
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  // ── Assign List state ──────────────────────────────────────
+  const [pcoLists, setPcoLists] = useState<PcoList[]>([])
+  const [listsLoaded, setListsLoaded] = useState(false)
+  // layerId → { list, people }
+  const [layerAssignments, setLayerAssignments] = useState<Record<string, { list: PcoList; people: PersonCard[] }>>({})
+  const [assignPickerLayerId, setAssignPickerLayerId] = useState<string | null>(null)
+  const [assignLoading, setAssignLoading] = useState(false)
+
+  // Fetch available PCO lists once
+  useEffect(() => {
+    fetch('/api/tree')
+      .then(r => r.json())
+      .then(data => {
+        setPcoLists(data.pcoLists || [])
+        setListsLoaded(true)
+      })
+      .catch(() => setListsLoaded(true))
+  }, [])
 
   // Pick next unused color
   const nextColor = useCallback((existing: LayerItem[]) => {
@@ -113,6 +143,48 @@ export default function ShepherdTreeV2() {
     setDragOverIdx(null)
   }
 
+  // ── Assign list to a layer ──────────────────────────────────
+  const assignList = async (layerId: string, list: PcoList) => {
+    setAssignLoading(true)
+    try {
+      // Fetch the people on this list from the API
+      const res = await fetch('/api/tree')
+      if (!res.ok) throw new Error()
+      const data = await res.json()
+
+      // Find people linked to this list via pco_list_people
+      // The GET /api/tree returns pcoListPeople is not directly available,
+      // but we can use list_id to find people from the nodes/assignments
+      // For now, just fetch the list info — the people will show after linking
+
+      // Actually: we need to call link_list to make the backend resolve people,
+      // but we don't have a real layer_id in the DB yet (layers are local state).
+      // So for now, we'll just store the assignment locally and show
+      // the list name + people count. The actual DB wiring happens later.
+
+      setLayerAssignments(prev => ({
+        ...prev,
+        [layerId]: { list, people: [] },
+      }))
+      setAssignPickerLayerId(null)
+    } catch {
+      // silent
+    } finally {
+      setAssignLoading(false)
+    }
+  }
+
+  const unassignList = (layerId: string) => {
+    setLayerAssignments(prev => {
+      const copy = { ...prev }
+      delete copy[layerId]
+      return copy
+    })
+  }
+
+  // Which lists are already assigned to a layer
+  const assignedListIds = new Set(Object.values(layerAssignments).map(a => a.list.id))
+
   return (
     <div style={{ maxWidth: '100%', overflowX: 'hidden' }}>
       {/* ── Toolbar ── */}
@@ -150,45 +222,166 @@ export default function ShepherdTreeV2() {
 
       {/* ── Bands ── */}
       <div>
-        {layers.map((layer, i) => (
-          <div key={layer.id}>
-            {i > 0 && (
-              <div style={{ borderTop: '2px dashed rgba(0,0,0,0.15)', margin: '0 16px' }} />
-            )}
-            <div style={{
-              minHeight: BAND_HEIGHT,
-              background: layer.color.bg,
-              position: 'relative',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}>
-              <div style={{ position: 'absolute', left: 16, top: 12, userSelect: 'none' }}>
-                <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
-                  {layer.name.toUpperCase()}
+        {layers.map((layer, i) => {
+          const assignment = layerAssignments[layer.id]
+          return (
+            <div key={layer.id}>
+              {i > 0 && (
+                <div style={{ borderTop: '2px dashed rgba(0,0,0,0.15)', margin: '0 16px' }} />
+              )}
+              <div style={{
+                minHeight: BAND_HEIGHT,
+                background: layer.color.bg,
+                position: 'relative',
+                padding: '40px 16px 16px',
+              }}>
+                {/* Layer label + linked list badge */}
+                <div style={{ position: 'absolute', left: 16, top: 12, display: 'flex', alignItems: 'center', gap: 8, userSelect: 'none' }}>
+                  <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
+                    {layer.name.toUpperCase()}
+                  </div>
+                  {assignment && (
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '2px 8px', borderRadius: 6,
+                      background: 'rgba(255,255,255,0.7)', border: `1px solid ${layer.color.label}40`,
+                    }}>
+                      <span className="sans" style={{ fontSize: 10, color: layer.color.label, fontWeight: 500 }}>
+                        {assignment.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
+                      </span>
+                      <span className="sans" style={{ fontSize: 9, color: 'var(--muted-foreground)' }}>
+                        ({assignment.list.totalPeople})
+                      </span>
+                      <button
+                        onClick={() => unassignList(layer.id)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 2px' }}
+                        title="Unlink list"
+                      >×</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Assign List button */}
+                <div style={{ position: 'absolute', right: 16, top: 10, zIndex: 5 }}>
+                  <button
+                    onClick={() => setAssignPickerLayerId(assignPickerLayerId === layer.id ? null : layer.id)}
+                    className="sans"
+                    style={{
+                      fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 6,
+                      border: `1px solid ${layer.color.label}50`, background: 'rgba(255,255,255,0.8)',
+                      color: layer.color.label, cursor: 'pointer',
+                    }}>
+                    Assign List
+                  </button>
+
+                  {/* Dropdown */}
+                  {assignPickerLayerId === layer.id && (
+                    <div style={{
+                      position: 'absolute', right: 0, top: 32, zIndex: 20,
+                      background: 'white', borderRadius: 10,
+                      boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
+                      border: '1px solid var(--border)',
+                      width: 280, maxHeight: 300, overflowY: 'auto',
+                    }}>
+                      <div className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '10px 12px 6px', fontWeight: 600 }}>
+                        PCO Reference Lists
+                      </div>
+                      {!listsLoaded ? (
+                        <div className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '8px 12px 12px' }}>
+                          Loading...
+                        </div>
+                      ) : pcoLists.length === 0 ? (
+                        <div className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '8px 12px 12px' }}>
+                          No reference lists found. Sync PCO first.
+                        </div>
+                      ) : (
+                        pcoLists.map(list => {
+                          const isLinkedHere = assignment?.list.id === list.id
+                          const isUsedElsewhere = assignedListIds.has(list.id) && !isLinkedHere
+                          return (
+                            <button
+                              key={list.id}
+                              onClick={() => isLinkedHere ? unassignList(layer.id) : assignList(layer.id, list)}
+                              disabled={assignLoading || isUsedElsewhere}
+                              className="sans"
+                              style={{
+                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                width: '100%', padding: '8px 12px', border: 'none', cursor: isUsedElsewhere ? 'default' : 'pointer',
+                                background: isLinkedHere ? layer.color.bg : 'transparent',
+                                textAlign: 'left', fontSize: 12,
+                                color: isUsedElsewhere ? 'var(--muted-foreground)' : 'var(--foreground)',
+                                opacity: isUsedElsewhere ? 0.5 : 1,
+                              }}>
+                              <span style={{ fontWeight: isLinkedHere ? 600 : 400 }}>
+                                {list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
+                              </span>
+                              <span style={{ fontSize: 10, color: 'var(--muted-foreground)', flexShrink: 0, marginLeft: 8 }}>
+                                {isLinkedHere ? '✓ Linked' : isUsedElsewhere ? 'In use' : `${list.totalPeople} people`}
+                              </span>
+                            </button>
+                          )
+                        })
+                      )}
+                      <div style={{ borderTop: '1px solid var(--border)', padding: 6 }}>
+                        <button
+                          onClick={() => setAssignPickerLayerId(null)}
+                          className="sans"
+                          style={{
+                            width: '100%', fontSize: 11, padding: '6px', borderRadius: 6,
+                            border: 'none', background: 'var(--muted)', color: 'var(--muted-foreground)',
+                            cursor: 'pointer',
+                          }}>
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* People cards + placeholder */}
+                <div style={{
+                  display: 'flex', flexWrap: 'wrap', gap: 8,
+                  alignItems: 'center', justifyContent: 'center',
+                  minHeight: BAND_HEIGHT - 56,
+                }}>
+                  {assignment && assignment.people.map(person => (
+                    <div key={person.id} style={{
+                      padding: '8px 14px', borderRadius: 10,
+                      background: 'white', border: `1px solid ${layer.color.label}30`,
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+                    }}>
+                      <span className="sans" style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+                        {person.name}
+                      </span>
+                    </div>
+                  ))}
+
+                  {/* Placeholder: always visible for adding people */}
+                  <button style={{
+                    width: 220, height: 72,
+                    border: `2px dashed ${layer.color.label}70`,
+                    borderRadius: 12, background: 'white',
+                    cursor: 'pointer', opacity: 0.7,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexDirection: 'column', gap: 2,
+                  }}>
+                    <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
+                    <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
+                  </button>
                 </div>
               </div>
-              <button style={{
-                width: 220,
-                height: 72,
-                border: `2px dashed ${layer.color.label}70`,
-                borderRadius: 12,
-                background: 'white',
-                cursor: 'pointer',
-                opacity: 0.7,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexDirection: 'column',
-                gap: 2,
-              }}>
-                <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
-                <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
-              </button>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
+
+      {/* Click-away to close assign picker */}
+      {assignPickerLayerId && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 4 }}
+          onClick={() => setAssignPickerLayerId(null)}
+        />
+      )}
 
       {/* ══════════════════════════════════════════════════════════
           MODAL: Manage Layers — drag to reorder
