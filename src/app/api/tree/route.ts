@@ -141,6 +141,7 @@ export async function GET() {
     { data: departments },
     { data: departmentMembers },
     { data: shepherdingRelationships },
+    { data: layerExclusions },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -174,6 +175,8 @@ export async function GET() {
       .eq('church_id', churchId!),
     admin.from('shepherding_relationships').select('shepherd_id, person_id, is_active')
       .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
+    admin.from('tree_layer_exclusions').select('person_id, layer_id')
+      .eq('church_id', churchId!),
   ])
 
   // ── Phase 2: Collect needed person IDs ───────────────────────
@@ -905,6 +908,9 @@ export async function GET() {
     assignments: assignmentMap,
     oversightMap: oversightMapOut,
     personStats,
+    layerExclusions: (layerExclusions || []).map((e: { person_id: string; layer_id: string }) => ({
+      personId: e.person_id, layerId: e.layer_id,
+    })),
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
@@ -1154,6 +1160,25 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Exclude a person from a layer (V2 soft-remove) ──────────
+  if (body.action === 'exclude_person') {
+    const { person_id, layer_id } = body
+    if (!person_id || !layer_id) return NextResponse.json({ error: 'person_id and layer_id required' }, { status: 400 })
+    const { error } = await admin.from('tree_layer_exclusions')
+      .upsert({ person_id, layer_id, church_id: churchId }, { onConflict: 'person_id,layer_id' })
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Re-include a person into a layer ────────────────────────
+  if (body.action === 'include_person') {
+    const { person_id, layer_id } = body
+    if (!person_id || !layer_id) return NextResponse.json({ error: 'person_id and layer_id required' }, { status: 400 })
+    await admin.from('tree_layer_exclusions')
+      .delete().eq('person_id', person_id).eq('layer_id', layer_id).eq('church_id', churchId!)
     return NextResponse.json({ success: true })
   }
 

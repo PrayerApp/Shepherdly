@@ -48,6 +48,11 @@ interface ListLayerLink {
   layerId: string
 }
 
+interface LayerExclusion {
+  personId: string
+  layerId: string
+}
+
 // ── Color palette — each layer gets its own unique color ───────
 const COLOR_PALETTE = [
   { bg: 'rgba(200, 175, 60, 0.30)',  label: '#7a6a10' },   // gold
@@ -96,6 +101,10 @@ export default function ShepherdTreeV2() {
   const [listLayerLinks, setListLayerLinks] = useState<ListLayerLink[]>([])
   const [listsLoaded, setListsLoaded] = useState(false)
   const [personStats, setPersonStats] = useState<Record<string, PersonStat>>({})
+  const [exclusions, setExclusions] = useState<LayerExclusion[]>([])
+  // When a card is long-pressed, we enter "delete mode" for that (personId,layerId).
+  const [deleteMode, setDeleteMode] = useState<{ personId: string; layerId: string } | null>(null)
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Assign List modal
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
@@ -113,6 +122,7 @@ export default function ShepherdTreeV2() {
       setListPeople(data.pcoListPeople || [])
       setListLayerLinks(data.listLayerLinks || [])
       setPersonStats(data.personStats || {})
+      setExclusions(data.layerExclusions || [])
       setListsLoaded(true)
 
       // Layers from DB
@@ -162,9 +172,51 @@ export default function ShepherdTreeV2() {
   const getPeopleForLayer = (layerId: string): PersonCard[] => {
     const link = listLayerLinks.find(ll => ll.layerId === layerId)
     if (!link) return []
+    const excluded = new Set(
+      exclusions.filter(e => e.layerId === layerId).map(e => e.personId)
+    )
     return listPeople
       .filter(lp => lp.listId === link.listId)
+      .filter(lp => !excluded.has(lp.personId))
       .map(lp => ({ id: lp.personId, name: lp.personName }))
+      .sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      )
+  }
+
+  // ── Long-press + remove a person from a layer ────────────────
+  const startLongPress = (personId: string, layerId: string) => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current)
+    longPressTimer.current = setTimeout(() => {
+      setDeleteMode({ personId, layerId })
+    }, 500)
+  }
+  const cancelLongPress = () => {
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
+  }
+  useEffect(() => {
+    if (!deleteMode) return
+    const close = () => setDeleteMode(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [deleteMode])
+
+  const removePersonFromLayer = async (personId: string, layerId: string) => {
+    // Optimistic: hide immediately
+    setExclusions(prev => [...prev, { personId, layerId }])
+    setDeleteMode(null)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'exclude_person', person_id: personId, layer_id: layerId }),
+      })
+      if (!res.ok) throw new Error()
+    } catch (err) {
+      console.error('Exclude person error:', err)
+      // Roll back on failure
+      setExclusions(prev => prev.filter(e => !(e.personId === personId && e.layerId === layerId)))
+    }
   }
 
   const getLinkedList = (layerId: string): PcoList | null => {
@@ -390,18 +442,53 @@ export default function ShepherdTreeV2() {
                       <div
                         key={person.id}
                         title={`${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
+                        onMouseDown={() => startLongPress(person.id, layer.id)}
+                        onMouseUp={cancelLongPress}
+                        onMouseLeave={cancelLongPress}
+                        onTouchStart={() => startLongPress(person.id, layer.id)}
+                        onTouchEnd={cancelLongPress}
+                        onTouchCancel={cancelLongPress}
+                        onContextMenu={e => { e.preventDefault(); setDeleteMode({ personId: person.id, layerId: layer.id }) }}
                         style={{
+                          position: 'relative',
                           width: 210, height: 96,
                           padding: '10px 12px',
                           borderRadius: 12,
                           background: 'white',
-                          border: `1px solid ${layer.color.label}22`,
-                          boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+                          border: deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
+                            ? `1px solid #c0392b`
+                            : `1px solid ${layer.color.label}22`,
+                          boxShadow: deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
+                            ? '0 2px 10px rgba(192,57,43,0.2)'
+                            : '0 1px 4px rgba(0,0,0,0.06)',
                           display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
                           boxSizing: 'border-box',
                           flexShrink: 0,
+                          userSelect: 'none',
+                          WebkitUserSelect: 'none',
+                          transition: 'box-shadow 0.15s, border-color 0.15s',
                         }}
                       >
+                        {/* Remove X (shown after long-press) */}
+                        {deleteMode?.personId === person.id && deleteMode?.layerId === layer.id && (
+                          <button
+                            onClick={e => { e.stopPropagation(); removePersonFromLayer(person.id, layer.id) }}
+                            className="sans"
+                            title={`Remove ${person.name} from ${layer.name}`}
+                            style={{
+                              position: 'absolute', top: -8, right: -8,
+                              width: 22, height: 22, borderRadius: 11,
+                              background: '#c0392b', color: 'white',
+                              border: '2px solid white',
+                              fontSize: 13, fontWeight: 700, lineHeight: 1,
+                              cursor: 'pointer',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                              padding: 0,
+                              zIndex: 2,
+                            }}
+                          >×</button>
+                        )}
                         {/* Name */}
                         <div
                           className="sans"
