@@ -439,25 +439,27 @@ export async function GET() {
   })
 
   // Layer-level placeholders: only for layers with NO assigned people
+  // Only create placeholders that have a valid parent in the tree
   for (const layer of sortedLayers) {
     const hasAssignments = (assignmentsByLayer.get(layer.id) || []).length > 0
     if (hasAssignments) continue // people exist on this layer, no placeholder needed
 
-    let layerPlaceholderSupervisor: string | null = null
-    if (layer.category === 'staff') {
-      layerPlaceholderSupervisor = leadPastorNodeId || `placeholder-${sortedLayers.find(l => l.category === 'elder')?.id}`
-    } else if (layer.category === 'volunteer') {
-      if (firstStaffAssignment) {
-        layerPlaceholderSupervisor = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
-      } else {
-        layerPlaceholderSupervisor = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
+    if (layer.category === 'elder') {
+      // Elder placeholder: root level (always valid)
+      nodes.push(mkPlaceholder(
+        `placeholder-${layer.id}`, layer.name, layer.id, layer.category, null,
+      ))
+    } else if (layer.category === 'staff' && layer.id === firstStaffLayer?.id) {
+      // Top staff layer placeholder: under Lead Pastor (only if LP exists)
+      if (leadPastorNodeId) {
+        nodes.push(mkPlaceholder(
+          `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
+          leadPastorNodeId,
+        ))
       }
     }
-
-    nodes.push(mkPlaceholder(
-      `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
-      layerPlaceholderSupervisor,
-    ))
+    // Secondary staff and volunteer layer-level placeholders: NOT created
+    // They appear via per-person placeholders under their respective parents
   }
 
   // Per-person placeholders:
@@ -486,15 +488,15 @@ export async function GET() {
         ))
       }
     } else if (isStaff) {
-      // Staff → placeholder for first volunteer layer
+      // Staff → placeholder for next layer below (could be secondary staff or volunteer)
       const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
-      const volLayer = sortedLayers.find(l => l.category === 'volunteer')
-      if (volLayer) {
+      const nextLayer = sortedLayers.find(l => l.rank > layer.rank)
+      if (nextLayer) {
         nodes.push(mkPlaceholder(
           `placeholder-under-${a.person_id}`,
-          volLayer.name,
-          volLayer.id,
-          volLayer.category,
+          nextLayer.name,
+          nextLayer.id,
+          nextLayer.category,
           parentNodeId,
           a.person_id,
         ))
@@ -754,13 +756,35 @@ export async function GET() {
   }
 
   // ── Unassigned data for bottom panel ─────────────────────────
-  // Staff people (is_staff=true in PCO) who are NOT on any tree layer
-  // These are staff members who haven't been placed on the Shepherd Team or any other layer
+  // Staff for bottom panel: people from REF lists linked to staff layers
+  // who are NOT already on the tree, PLUS any is_staff people not on a layer
+  const staffLayerIds = new Set(sortedLayers.filter(l => l.category === 'staff').map(l => l.id))
+  const staffListIds = new Set(
+    (pcoListLayerLinks || []).filter(ll => staffLayerIds.has(ll.layer_id)).map(ll => ll.list_id)
+  )
+  // People on staff-linked REF lists
+  const staffListPeopleIds = new Set<string>()
+  for (const lp of pcoListPeople || []) {
+    if (staffListIds.has(lp.list_id)) staffListPeopleIds.add(lp.person_id)
+  }
   const unconnectedStaff: { id: string; name: string; layerName: string }[] = []
+  const seenStaffIds = new Set<string>()
+  // From REF lists linked to staff layers
+  for (const pid of staffListPeopleIds) {
+    if (assignedPersonIds.has(pid)) continue
+    const person = personMap.get(pid)
+    if (!person || person.is_lead_pastor) continue
+    if (seenStaffIds.has(pid)) continue
+    seenStaffIds.add(pid)
+    unconnectedStaff.push({ id: pid, name: person.name || 'Unknown', layerName: 'Staff' })
+  }
+  // Also include is_staff people not on any layer (catch-all)
   for (const p of people) {
     if (!p.is_staff) continue
     if (p.is_lead_pastor) continue
-    if (assignedPersonIds.has(p.id)) continue // already on a tree layer
+    if (assignedPersonIds.has(p.id)) continue
+    if (seenStaffIds.has(p.id)) continue
+    seenStaffIds.add(p.id)
     unconnectedStaff.push({ id: p.id, name: p.name || 'Unknown', layerName: 'Staff' })
   }
   // Group types with no overseer
