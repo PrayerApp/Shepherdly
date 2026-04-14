@@ -80,6 +80,18 @@ function colorForIndex(i: number) {
   return COLOR_PALETTE[i % COLOR_PALETTE.length]
 }
 
+// Extract last name for sorting. Ignores common suffixes (Jr., Sr., II, III, IV, V).
+function lastName(full: string): string {
+  const parts = (full || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return ''
+  const suffixes = /^(jr\.?|sr\.?|ii|iii|iv|v)$/i
+  let i = parts.length - 1
+  while (i > 0 && suffixes.test(parts[i])) i--
+  return parts[i]
+}
+
+const SELECT_OUTLINE = '#e6b800' // warm yellow
+
 // ── Component ──────────────────────────────────────────────────
 export default function ShepherdTreeV2() {
   const [layers, setLayers] = useState<LayerItem[]>([])
@@ -105,6 +117,13 @@ export default function ShepherdTreeV2() {
   // When a card is long-pressed, we enter "delete mode" for that (personId,layerId).
   const [deleteMode, setDeleteMode] = useState<{ personId: string; layerId: string } | null>(null)
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const longPressFired = useRef(false)
+
+  // ── Selection (click = select, shift-click = multiselect) ───
+  // Key = "personId::layerId" so the same person on two layers is independent.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const lastSelectedRef = useRef<{ layerId: string; index: number } | null>(null)
+  const selKey = (personId: string, layerId: string) => `${personId}::${layerId}`
   // Assign List modal
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
@@ -179,27 +198,84 @@ export default function ShepherdTreeV2() {
       .filter(lp => lp.listId === link.listId)
       .filter(lp => !excluded.has(lp.personId))
       .map(lp => ({ id: lp.personId, name: lp.personName }))
-      .sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
-      )
+      .sort((a, b) => {
+        const la = lastName(a.name), lb = lastName(b.name)
+        const cmp = la.localeCompare(lb, undefined, { sensitivity: 'base' })
+        if (cmp !== 0) return cmp
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+      })
   }
 
   // ── Long-press + remove a person from a layer ────────────────
   const startLongPress = (personId: string, layerId: string) => {
     if (longPressTimer.current) clearTimeout(longPressTimer.current)
+    longPressFired.current = false
     longPressTimer.current = setTimeout(() => {
+      longPressFired.current = true
       setDeleteMode({ personId, layerId })
     }, 500)
   }
   const cancelLongPress = () => {
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
   }
+
+  // ── Card click → selection ──────────────────────────────────
+  const handleCardClick = (e: React.MouseEvent, personId: string, layerId: string, people: PersonCard[]) => {
+    // Ignore if this press became a long-press
+    if (longPressFired.current) { longPressFired.current = false; return }
+    const key = selKey(personId, layerId)
+    const index = people.findIndex(p => p.id === personId)
+
+    if (e.shiftKey && lastSelectedRef.current && lastSelectedRef.current.layerId === layerId) {
+      // Range select within the same layer
+      const [lo, hi] = [lastSelectedRef.current.index, index].sort((a, b) => a - b)
+      const next = new Set(selected)
+      for (let i = lo; i <= hi; i++) next.add(selKey(people[i].id, layerId))
+      setSelected(next)
+    } else if (e.metaKey || e.ctrlKey) {
+      // Toggle additive
+      const next = new Set(selected)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      setSelected(next)
+      lastSelectedRef.current = { layerId, index }
+    } else {
+      // Plain click: toggle this one, clear others
+      const wasOnlyMe = selected.size === 1 && selected.has(key)
+      const next = new Set<string>()
+      if (!wasOnlyMe) next.add(key)
+      setSelected(next)
+      lastSelectedRef.current = { layerId, index }
+    }
+  }
+
+  const selectAllInLayer = (layerId: string, people: PersonCard[]) => {
+    const next = new Set(selected)
+    const allSelected = people.every(p => next.has(selKey(p.id, layerId)))
+    if (allSelected) {
+      for (const p of people) next.delete(selKey(p.id, layerId))
+    } else {
+      for (const p of people) next.add(selKey(p.id, layerId))
+    }
+    setSelected(next)
+    if (people.length > 0) lastSelectedRef.current = { layerId, index: 0 }
+  }
+
+  const clearSelection = () => setSelected(new Set())
   useEffect(() => {
     if (!deleteMode) return
     const close = () => setDeleteMode(null)
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [deleteMode])
+
+  // Escape clears selection
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selected.size > 0) clearSelection()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [selected])
 
   const removePersonFromLayer = async (personId: string, layerId: string) => {
     // Optimistic: hide immediately
@@ -396,21 +472,23 @@ export default function ShepherdTreeV2() {
               {i > 0 && (
                 <div style={{ borderTop: '2px dashed rgba(0,0,0,0.15)', margin: '0 16px' }} />
               )}
-              <div style={{
-                minHeight: BAND_HEIGHT,
-                background: layer.color.bg,
-                position: 'relative',
-                padding: '40px 16px 16px',
-              }}>
+              <div
+                onClick={e => { if (e.target === e.currentTarget) clearSelection() }}
+                style={{
+                  minHeight: BAND_HEIGHT,
+                  background: layer.color.bg,
+                  position: 'relative',
+                  padding: '40px 16px 16px',
+                }}>
                 {/* Layer label */}
-                <div style={{ position: 'absolute', left: 16, top: 12, userSelect: 'none' }}>
+                <div style={{ position: 'absolute', left: 16, top: 12, right: 16, userSelect: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
                     {layer.name.toUpperCase()}
                     {linkedList && (
                       <span style={{ fontWeight: 500, letterSpacing: 0, marginLeft: 8, fontSize: 10, opacity: 0.7 }}>
                         — {linkedList.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
                         <button
-                          onClick={() => unassignList(linkedList.id)}
+                          onClick={e => { e.stopPropagation(); unassignList(linkedList.id) }}
                           disabled={assignBusy}
                           style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 4px', verticalAlign: 'middle' }}
                           title="Unlink list"
@@ -418,6 +496,26 @@ export default function ShepherdTreeV2() {
                       </span>
                     )}
                   </div>
+                  {people.length > 0 && (() => {
+                    const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
+                    const allSelected = selCount === people.length
+                    return (
+                      <button
+                        onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
+                        className="sans"
+                        title={allSelected ? 'Deselect all' : 'Select all in this layer'}
+                        style={{
+                          fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+                          padding: '4px 8px', borderRadius: 6,
+                          border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
+                          background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                          color: selCount > 0 ? '#7a5a00' : layer.color.label,
+                          cursor: 'pointer', whiteSpace: 'nowrap',
+                        }}>
+                        {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                      </button>
+                    )
+                  })()}
                 </div>
 
                 {/* People cards + placeholder — horizontal scroll */}
@@ -438,16 +536,22 @@ export default function ShepherdTreeV2() {
                     const segs: [keyof typeof STAT_STYLES, number][] = [
                       ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
                     ]
+                    const isSelected = selected.has(selKey(person.id, layer.id))
+                    const isDeleting = deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
                     return (
                       <div
                         key={person.id}
                         title={`${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
-                        onMouseDown={() => startLongPress(person.id, layer.id)}
+                        onMouseDown={e => { if (e.button === 0) startLongPress(person.id, layer.id) }}
                         onMouseUp={cancelLongPress}
                         onMouseLeave={cancelLongPress}
                         onTouchStart={() => startLongPress(person.id, layer.id)}
                         onTouchEnd={cancelLongPress}
                         onTouchCancel={cancelLongPress}
+                        onClick={e => {
+                          e.stopPropagation()
+                          handleCardClick(e, person.id, layer.id, people)
+                        }}
                         onContextMenu={e => { e.preventDefault(); setDeleteMode({ personId: person.id, layerId: layer.id }) }}
                         style={{
                           position: 'relative',
@@ -455,18 +559,27 @@ export default function ShepherdTreeV2() {
                           padding: '10px 12px',
                           borderRadius: 12,
                           background: 'white',
-                          border: deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
+                          border: isDeleting
                             ? `1px solid #c0392b`
-                            : `1px solid ${layer.color.label}22`,
-                          boxShadow: deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
+                            : isSelected
+                              ? `2px solid ${SELECT_OUTLINE}`
+                              : `1px solid ${layer.color.label}22`,
+                          outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
+                          outlineOffset: isSelected ? 1 : undefined,
+                          boxShadow: isDeleting
                             ? '0 2px 10px rgba(192,57,43,0.2)'
-                            : '0 1px 4px rgba(0,0,0,0.06)',
+                            : isSelected
+                              ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                              : '0 1px 4px rgba(0,0,0,0.06)',
                           display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
                           boxSizing: 'border-box',
                           flexShrink: 0,
                           userSelect: 'none',
                           WebkitUserSelect: 'none',
+                          cursor: 'pointer',
                           transition: 'box-shadow 0.15s, border-color 0.15s',
+                          // Compensate for 2px vs 1px border so size stays 210x96 in layout
+                          margin: isSelected ? -1 : 0,
                         }}
                       >
                         {/* Remove X (shown after long-press) */}
