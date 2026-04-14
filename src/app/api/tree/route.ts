@@ -140,6 +140,7 @@ export async function GET() {
     { data: pcoListLayerLinks },
     { data: departments },
     { data: departmentMembers },
+    { data: shepherdingRelationships },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -171,6 +172,8 @@ export async function GET() {
       .eq('church_id', churchId!).order('name'),
     admin.from('department_members').select('department_id, person_id')
       .eq('church_id', churchId!),
+    admin.from('shepherding_relationships').select('shepherd_id, person_id, is_active')
+      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
   ])
 
   // ── Phase 2: Collect needed person IDs ───────────────────────
@@ -182,15 +185,19 @@ export async function GET() {
   for (const gm of groupMemberships || []) neededPersonIds.add(gm.person_id)
   for (const tm of teamMemberships || []) neededPersonIds.add(tm.person_id)
   for (const lp of pcoListPeople || []) neededPersonIds.add(lp.person_id)
+  for (const r of shepherdingRelationships || []) {
+    if (r.shepherd_id) neededPersonIds.add(r.shepherd_id)
+    if (r.person_id) neededPersonIds.add(r.person_id)
+  }
   if (currentUser?.person_id) neededPersonIds.add(currentUser.person_id)
 
   // Batch fetch people
   const personIds = [...neededPersonIds]
-  const people: { id: string; name: string; pco_id: string | null; status: string; membership_type: string; is_staff: boolean; is_lead_pastor: boolean }[] = []
+  const people: { id: string; name: string; pco_id: string | null; status: string; membership_type: string; is_staff: boolean; is_lead_pastor: boolean; is_leader: boolean }[] = []
   for (let i = 0; i < personIds.length; i += 500) {
     const batch = personIds.slice(i, i + 500)
     const { data } = await admin.from('people')
-      .select('id, name, pco_id, status, membership_type, is_staff, is_lead_pastor')
+      .select('id, name, pco_id, status, membership_type, is_staff, is_lead_pastor, is_leader')
       .in('id', batch)
     if (data) people.push(...data)
   }
@@ -795,12 +802,109 @@ export async function GET() {
     }
   }
 
+  // ── Per-person shepherding stats (for V2 person cards) ───────
+  // For each person who might be a shepherd, bucket the unique people
+  // they shepherd into: S (staff), L (non-staff leaders),
+  // P (congregation reached via a group/team they lead),
+  // F (floaters — direct shepherding_relationships only, not via a group/team they lead).
+  // Priority when a shepherdee qualifies for multiple buckets: S > L > P > F.
+  const personStats: Record<string, { s: number; l: number; p: number; f: number; total: number }> = {}
+
+  // Build: shepherd_person_id -> Set of shepherded person_ids (from each source)
+  const supervisees = new Map<string, Set<string>>()
+  for (const a of (assignments || []) as { person_id: string; supervisor_person_id: string | null }[]) {
+    if (!a.supervisor_person_id) continue
+    if (!supervisees.has(a.supervisor_person_id)) supervisees.set(a.supervisor_person_id, new Set())
+    supervisees.get(a.supervisor_person_id)!.add(a.person_id)
+  }
+
+  const shepherdees = new Map<string, Set<string>>()
+  for (const r of (shepherdingRelationships || []) as { shepherd_id: string; person_id: string }[]) {
+    if (!r.shepherd_id || !r.person_id) continue
+    if (!shepherdees.has(r.shepherd_id)) shepherdees.set(r.shepherd_id, new Set())
+    shepherdees.get(r.shepherd_id)!.add(r.person_id)
+  }
+
+  // Leaders of each group/team → members of those groups/teams
+  // leaderFlockViaGroupsTeams: personId -> Set<member person_id>
+  const leaderFlockViaGroupsTeams = new Map<string, Set<string>>()
+  const addToFlock = (leaderId: string, memberId: string) => {
+    if (leaderId === memberId) return
+    if (!leaderFlockViaGroupsTeams.has(leaderId)) leaderFlockViaGroupsTeams.set(leaderId, new Set())
+    leaderFlockViaGroupsTeams.get(leaderId)!.add(memberId)
+  }
+
+  // Index group memberships by group
+  const groupMembersAll = new Map<string, { personId: string; role: string }[]>()
+  for (const gm of groupMemberships || []) {
+    if (!gm.person_id) continue
+    if (!groupMembersAll.has(gm.group_id)) groupMembersAll.set(gm.group_id, [])
+    groupMembersAll.get(gm.group_id)!.push({ personId: gm.person_id, role: gm.role || 'member' })
+  }
+  for (const [groupId, members] of groupMembersAll) {
+    const leaders = members.filter(m => /leader|co.?leader/i.test(m.role)).map(m => m.personId)
+    if (leaders.length === 0) continue
+    for (const leaderId of leaders) {
+      for (const m of members) {
+        if (leaders.includes(m.personId)) continue // don't count co-leaders as flock
+        addToFlock(leaderId, m.personId)
+      }
+    }
+  }
+
+  const teamMembersAll = new Map<string, { personId: string; role: string }[]>()
+  for (const tm of teamMemberships || []) {
+    if (!tm.person_id) continue
+    if (!teamMembersAll.has(tm.team_id)) teamMembersAll.set(tm.team_id, [])
+    teamMembersAll.get(tm.team_id)!.push({ personId: tm.person_id, role: tm.role || 'member' })
+  }
+  for (const [teamId, members] of teamMembersAll) {
+    const leaders = members.filter(m => /leader|co.?leader/i.test(m.role)).map(m => m.personId)
+    if (leaders.length === 0) continue
+    for (const leaderId of leaders) {
+      for (const m of members) {
+        if (leaders.includes(m.personId)) continue
+        addToFlock(leaderId, m.personId)
+      }
+    }
+  }
+
+  // Gather all candidate shepherd person_ids (anyone who might have stats)
+  const candidateShepherds = new Set<string>([
+    ...supervisees.keys(),
+    ...shepherdees.keys(),
+    ...leaderFlockViaGroupsTeams.keys(),
+  ])
+
+  for (const shepherdId of candidateShepherds) {
+    const viaGroupsTeams = leaderFlockViaGroupsTeams.get(shepherdId) || new Set<string>()
+    const viaDirect = shepherdees.get(shepherdId) || new Set<string>()
+    const viaSupervisor = supervisees.get(shepherdId) || new Set<string>()
+
+    const all = new Set<string>([...viaGroupsTeams, ...viaDirect, ...viaSupervisor])
+    all.delete(shepherdId)
+
+    let s = 0, l = 0, p = 0, f = 0
+    for (const pid of all) {
+      const person = personMap.get(pid)
+      const isStaff = !!person?.is_staff
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const isLeader = !!(person as any)?.is_leader
+      if (isStaff) s++
+      else if (isLeader) l++
+      else if (viaGroupsTeams.has(pid)) p++
+      else f++
+    }
+    personStats[shepherdId] = { s, l, p, f, total: s + l + p + f }
+  }
+
   return NextResponse.json({
     nodes,
     coLeaderLinks,
     layers: layers || [],
     assignments: assignmentMap,
     oversightMap: oversightMapOut,
+    personStats,
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),

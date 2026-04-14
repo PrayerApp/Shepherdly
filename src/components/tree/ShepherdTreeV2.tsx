@@ -27,6 +27,22 @@ interface PersonCard {
   name: string
 }
 
+interface PersonStat {
+  s: number // staff shepherded
+  l: number // non-staff leaders shepherded
+  p: number // congregation via groups/teams
+  f: number // floaters (direct shepherding only)
+  total: number
+}
+
+// Category colors for stat pills
+const STAT_STYLES = {
+  s: { bg: 'rgba(140, 90, 180, 0.14)', fg: '#5a2e87' },  // staff — purple
+  l: { bg: 'rgba(80, 130, 190, 0.16)', fg: '#2b5a8a' },  // leaders — blue
+  p: { bg: 'rgba(60, 160, 90, 0.16)',  fg: '#2a6a3a' },  // groups/teams — green
+  f: { bg: 'rgba(200, 140, 60, 0.18)', fg: '#8a5a1a' },  // floaters — amber
+}
+
 interface ListLayerLink {
   listId: string
   layerId: string
@@ -79,6 +95,7 @@ export default function ShepherdTreeV2() {
   const [listPeople, setListPeople] = useState<ListPerson[]>([])
   const [listLayerLinks, setListLayerLinks] = useState<ListLayerLink[]>([])
   const [listsLoaded, setListsLoaded] = useState(false)
+  const [personStats, setPersonStats] = useState<Record<string, PersonStat>>({})
   // Assign List modal
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
@@ -95,6 +112,7 @@ export default function ShepherdTreeV2() {
       setPcoLists(data.pcoLists || [])
       setListPeople(data.pcoListPeople || [])
       setListLayerLinks(data.listLayerLinks || [])
+      setPersonStats(data.personStats || {})
       setListsLoaded(true)
 
       // Layers from DB
@@ -357,31 +375,108 @@ export default function ShepherdTreeV2() {
                   minHeight: BAND_HEIGHT - 56,
                   ...(people.length === 0 ? { justifyContent: 'center' } : {}),
                 }}>
-                  {people.map(person => (
-                    <div key={person.id} style={{
-                      padding: '10px 16px', borderRadius: 10,
-                      background: 'white', border: `1px solid ${layer.color.label}25`,
-                      boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-                    }}>
-                      <span className="sans" style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
-                        {person.name}
-                      </span>
-                    </div>
-                  ))}
+                  {people.map(person => {
+                    const stat = personStats[person.id] || { s: 0, l: 0, p: 0, f: 0, total: 0 }
+                    const total = stat.total
+                    // Segmented bar proportions
+                    const segs: [keyof typeof STAT_STYLES, number][] = [
+                      ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
+                    ]
+                    return (
+                      <div
+                        key={person.id}
+                        title={`${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
+                        style={{
+                          width: 210, height: 96,
+                          padding: '10px 12px',
+                          borderRadius: 12,
+                          background: 'white',
+                          border: `1px solid ${layer.color.label}22`,
+                          boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+                          display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+                          boxSizing: 'border-box',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {/* Name */}
+                        <div
+                          className="sans"
+                          style={{
+                            fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
+                            lineHeight: 1.2, whiteSpace: 'nowrap',
+                            overflow: 'hidden', textOverflow: 'ellipsis',
+                          }}
+                        >
+                          {person.name}
+                        </div>
 
-                  {/* Placeholder: always visible */}
+                        {/* Count + segmented bar */}
+                        <div>
+                          <div className="sans" style={{
+                            fontSize: 10, fontWeight: 500, color: 'var(--muted-foreground)',
+                            letterSpacing: 0.3, marginBottom: 4,
+                          }}>
+                            shepherds <span style={{ fontWeight: 700, color: layer.color.label, fontSize: 11 }}>{total}</span>
+                          </div>
+                          <div style={{
+                            display: 'flex', height: 4, borderRadius: 2,
+                            background: 'rgba(0,0,0,0.05)', overflow: 'hidden', marginBottom: 5,
+                          }}>
+                            {total > 0 && segs.map(([k, v]) => (
+                              v > 0 ? (
+                                <div
+                                  key={k}
+                                  style={{
+                                    flex: v,
+                                    background: STAT_STYLES[k].fg,
+                                    opacity: 0.85,
+                                  }}
+                                />
+                              ) : null
+                            ))}
+                          </div>
+                          {/* Stat pills */}
+                          <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between' }}>
+                            {(['s','l','p','f'] as const).map(k => {
+                              const v = stat[k]
+                              const style = STAT_STYLES[k]
+                              const faded = v === 0
+                              return (
+                                <span
+                                  key={k}
+                                  className="sans"
+                                  style={{
+                                    flex: 1, textAlign: 'center',
+                                    fontSize: 10, fontWeight: 600,
+                                    padding: '2px 0', borderRadius: 4,
+                                    background: faded ? 'rgba(0,0,0,0.03)' : style.bg,
+                                    color: faded ? 'var(--muted-foreground)' : style.fg,
+                                    letterSpacing: 0.2,
+                                  }}
+                                >
+                                  {v}{k.toUpperCase()}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+
+                  {/* Placeholder: always visible, matches card size for uniform look */}
                   <button style={{
-                    width: people.length > 0 ? 'auto' : 220,
-                    height: people.length > 0 ? 'auto' : 72,
-                    padding: people.length > 0 ? '10px 16px' : undefined,
+                    width: 210, height: 96,
+                    padding: 0,
                     border: `2px dashed ${layer.color.label}70`,
                     borderRadius: 12, background: 'white',
                     cursor: 'pointer', opacity: 0.7,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexDirection: people.length > 0 ? 'row' : 'column',
-                    gap: people.length > 0 ? 6 : 2,
+                    flexDirection: 'column', gap: 2,
+                    flexShrink: 0,
+                    boxSizing: 'border-box',
                   }}>
-                    <span style={{ fontSize: people.length > 0 ? 14 : 18, fontWeight: 300, color: layer.color.label }}>+</span>
+                    <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
                     <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
                   </button>
                 </div>
