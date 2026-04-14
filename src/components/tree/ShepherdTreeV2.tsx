@@ -1,16 +1,8 @@
 'use client'
 
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useState } from 'react'
 
-// ── Types ──────────────────────────────────────────────────────
-interface Layer {
-  id: string
-  name: string
-  category: 'elder' | 'staff' | 'volunteer'
-  rank: number
-}
-
-// ── Band config ────────────────────────────────────────────────
+// ── Band config — exactly 4 fixed bands ────────────────────────
 const BANDS = [
   { key: 'elder',     name: 'Elder',        bg: 'rgba(234, 222, 140, 0.25)', label: '#8a7a20' },
   { key: 'staff',     name: 'Staff',        bg: 'rgba(147, 180, 220, 0.25)', label: '#3b6ea5' },
@@ -20,329 +12,239 @@ const BANDS = [
 
 const BAND_HEIGHT = 200
 
-// ── Component ──────────────────────────────────────────────────
-export default function ShepherdTreeV2() {
-  const [layers, setLayers] = useState<Layer[]>([])
-  const [currentUserRole, setCurrentUserRole] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+// ── Locally-managed layers (not from API — fresh start) ────────
+interface LocalLayer {
+  id: string
+  name: string
+  category: 'elder' | 'staff' | 'volunteer'
+}
 
-  // Layer management
+export default function ShepherdTreeV2() {
+  const [localLayers, setLocalLayers] = useState<LocalLayer[]>([])
   const [layerModalOpen, setLayerModalOpen] = useState(false)
   const [newLayerName, setNewLayerName] = useState('')
   const [newLayerCategory, setNewLayerCategory] = useState<'staff' | 'volunteer'>('staff')
-  const [saving, setSaving] = useState(false)
 
-  const isAdmin = ['super_admin', 'staff'].includes(currentUserRole || '')
+  // Group local layers by category
+  const layersByCategory = (cat: string) => localLayers.filter(l => l.category === cat)
 
-  // ── Fetch ────────────────────────────────────────────────────
-  const fetchData = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await fetch('/api/tree')
-      const data = await res.json()
-      if (data.error) { setError(data.error); return }
-      setLayers(data.layers || [])
-      setCurrentUserRole(data.currentUserRole || null)
-    } catch {
-      setError('Failed to load')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => { fetchData() }, [fetchData])
-
-  const sortedLayers = useMemo(() => [...layers].sort((a, b) => a.rank - b.rank), [layers])
-
-  // Group layers by category
-  const layersByCategory = useMemo(() => {
-    const map: Record<string, Layer[]> = { elder: [], staff: [], volunteer: [] }
-    for (const l of sortedLayers) {
-      if (map[l.category]) map[l.category].push(l)
-    }
-    return map
-  }, [sortedLayers])
-
-  // ── Layer actions ────────────────────────────────────────────
-  const addLayer = async () => {
+  const addLayer = () => {
     if (!newLayerName.trim()) return
-    setSaving(true)
-    try {
-      const res = await fetch('/api/tree', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'add_layer', category: newLayerCategory, name: newLayerName.trim() }),
-      })
-      const data = await res.json()
-      if (data.error) { alert('Error: ' + data.error); return }
-      setNewLayerName('')
-      await fetchData()
-    } finally { setSaving(false) }
+    setLocalLayers(prev => [...prev, {
+      id: crypto.randomUUID(),
+      name: newLayerName.trim(),
+      category: newLayerCategory,
+    }])
+    setNewLayerName('')
   }
 
-  const removeLayer = async (layerId: string) => {
-    if (!confirm('Remove this layer?')) return
-    await fetch('/api/tree', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'remove_layer', layer_id: layerId }),
+  const removeLayer = (id: string) => {
+    setLocalLayers(prev => prev.filter(l => l.id !== id))
+  }
+
+  const moveLayer = (id: string, direction: 'up' | 'down') => {
+    setLocalLayers(prev => {
+      const idx = prev.findIndex(l => l.id === id)
+      if (idx < 0) return prev
+      const layer = prev[idx]
+      // Find neighbors within same category
+      const sameCat = prev.filter(l => l.category === layer.category)
+      const catIdx = sameCat.findIndex(l => l.id === id)
+      const targetCatIdx = direction === 'up' ? catIdx - 1 : catIdx + 1
+      if (targetCatIdx < 0 || targetCatIdx >= sameCat.length) return prev
+      const neighbor = sameCat[targetCatIdx]
+      // Swap in the full array
+      const copy = [...prev]
+      const aIdx = copy.findIndex(l => l.id === layer.id)
+      const bIdx = copy.findIndex(l => l.id === neighbor.id)
+      copy[aIdx] = neighbor
+      copy[bIdx] = layer
+      return copy
     })
-    await fetchData()
   }
-
-  const moveLayer = async (layerId: string, direction: 'up' | 'down') => {
-    const idx = sortedLayers.findIndex(l => l.id === layerId)
-    if (idx < 0) return
-    const targetIdx = direction === 'up' ? idx - 1 : idx + 1
-    if (targetIdx < 0 || targetIdx >= sortedLayers.length) return
-
-    const layer = sortedLayers[idx]
-    const neighbor = sortedLayers[targetIdx]
-
-    // Only allow reordering within same category
-    if (layer.category !== neighbor.category) return
-
-    setSaving(true)
-    try {
-      // Swap ranks via batch reorder endpoint
-      await fetch('/api/tree', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'reorder_layers',
-          order: [
-            { layer_id: layer.id, rank: neighbor.rank },
-            { layer_id: neighbor.id, rank: layer.rank },
-          ],
-        }),
-      })
-      await fetchData()
-    } finally { setSaving(false) }
-  }
-
-  // ── Render ───────────────────────────────────────────────────
-  if (loading) return (
-    <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--muted-foreground)' }}>
-      <div className="text-center">
-        <div className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin mx-auto mb-3"
-          style={{ borderColor: 'var(--border)', borderTopColor: 'var(--accent)' }} />
-        <p className="sans text-sm">Loading...</p>
-      </div>
-    </div>
-  )
-
-  if (error) return (
-    <div className="flex-1 flex items-center justify-center">
-      <p className="text-sm sans" style={{ color: '#9b3a3a' }}>{error}</p>
-    </div>
-  )
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Toolbar */}
-      <div className="shrink-0 border-b px-4 py-2.5 flex items-center justify-between" style={{ borderColor: 'var(--border)', background: 'white' }}>
-        <h2 className="font-serif text-base" style={{ color: 'var(--primary)' }}>Shepherd Tree</h2>
-        {isAdmin && (
-          <button onClick={() => setLayerModalOpen(true)}
-            className="text-xs sans px-3 py-1.5 rounded-lg font-medium border hover:bg-gray-50 transition-colors"
-            style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
-            Manage Layers
-          </button>
-        )}
+    <div style={{ minHeight: '100vh' }}>
+      {/* ── Toolbar ── */}
+      <div style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 10,
+        borderBottom: '1px solid var(--border)',
+        padding: '10px 16px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        background: 'white',
+      }}>
+        <h2 className="font-serif" style={{ fontSize: 16, color: 'var(--primary)', margin: 0 }}>Shepherd Tree</h2>
+        <button
+          onClick={() => setLayerModalOpen(true)}
+          className="sans"
+          style={{
+            fontSize: 12,
+            fontWeight: 500,
+            padding: '6px 12px',
+            borderRadius: 8,
+            border: '1px solid var(--border)',
+            background: 'white',
+            color: 'var(--foreground)',
+            cursor: 'pointer',
+          }}>
+          Manage Layers
+        </button>
       </div>
 
-      {/* Scrollable band area */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ background: 'var(--muted)' }}>
-        {BANDS.map((band, i) => {
-          const categoryLayers = layersByCategory[band.key] || []
+      {/* ── Bands ── */}
+      <div style={{ background: 'var(--muted)' }}>
+        {BANDS.map((band, i) => (
+          <div key={band.key}>
+            {/* Dashed separator */}
+            {i > 0 && (
+              <div style={{ borderTop: '2px dashed rgba(0,0,0,0.12)', margin: '0 16px' }} />
+            )}
 
-          return (
-            <div key={band.key}>
-              {/* Dashed separator between bands */}
-              {i > 0 && (
-                <div style={{
-                  borderTop: '2px dashed rgba(0,0,0,0.12)',
-                  marginLeft: 16,
-                  marginRight: 16,
-                }} />
-              )}
-
-              {/* Band */}
-              <div style={{ minHeight: BAND_HEIGHT, background: band.bg, position: 'relative' }}>
-                {/* Band label */}
-                <div className="absolute left-4 top-3 select-none">
-                  <div className="text-[11px] font-bold sans tracking-widest"
-                    style={{ color: band.label, opacity: 0.6 }}>
-                    {band.name.toUpperCase()}
-                  </div>
-                  {/* Show sub-layers if any */}
-                  {categoryLayers.length > 0 && (
-                    <div className="mt-1 flex flex-col gap-0.5">
-                      {categoryLayers.map(l => (
-                        <span key={l.id} className="text-[9px] sans" style={{ color: band.label, opacity: 0.45 }}>
-                          {l.name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Placeholder */}
-                <div className="flex items-center justify-center" style={{ minHeight: BAND_HEIGHT }}>
-                  <button
-                    className="flex items-center justify-center border-2 border-dashed rounded-xl transition-colors hover:shadow-md"
-                    style={{
-                      width: 220,
-                      height: 72,
-                      borderColor: band.label + '50',
-                      background: 'white',
-                      cursor: band.key === 'people' ? 'default' : 'pointer',
-                      opacity: 0.65,
-                    }}>
-                    <div className="text-center">
-                      <div className="text-lg font-light" style={{ color: band.label, opacity: 0.7 }}>+</div>
-                      <div className="text-[10px] sans font-medium" style={{ color: band.label, opacity: 0.6 }}>
-                        {band.name}
-                      </div>
-                    </div>
-                  </button>
+            {/* Band */}
+            <div style={{ minHeight: BAND_HEIGHT, background: band.bg, position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {/* Band label */}
+              <div style={{ position: 'absolute', left: 16, top: 12, userSelect: 'none' }}>
+                <div className="sans" style={{ fontSize: 11, fontWeight: 700, letterSpacing: 2, color: band.label, opacity: 0.6 }}>
+                  {band.name.toUpperCase()}
                 </div>
               </div>
+
+              {/* Placeholder */}
+              <button
+                style={{
+                  width: 220,
+                  height: 72,
+                  border: `2px dashed ${band.label}50`,
+                  borderRadius: 12,
+                  background: 'white',
+                  cursor: band.key === 'people' ? 'default' : 'pointer',
+                  opacity: 0.65,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexDirection: 'column',
+                  gap: 2,
+                }}>
+                <span style={{ fontSize: 18, fontWeight: 300, color: band.label, opacity: 0.7 }}>+</span>
+                <span className="sans" style={{ fontSize: 10, fontWeight: 500, color: band.label, opacity: 0.6 }}>{band.name}</span>
+              </button>
             </div>
-          )
-        })}
+          </div>
+        ))}
       </div>
 
       {/* ══════════════════════════════════════════════════════════
           MODAL: Manage Layers
          ══════════════════════════════════════════════════════════ */}
       {layerModalOpen && (
-        <div className="fixed inset-0 flex items-center justify-center z-50" style={{ background: 'rgba(0,0,0,0.3)' }}>
-          <div className="bg-white rounded-2xl shadow-xl border"
-            style={{ borderColor: 'var(--border)', width: 'min(90vw, 520px)', maxHeight: 'min(80vh, 600px)', display: 'flex', flexDirection: 'column' }}>
-
+        <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, background: 'rgba(0,0,0,0.3)' }}>
+          <div style={{
+            background: 'white',
+            borderRadius: 16,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)',
+            border: '1px solid var(--border)',
+            width: 'min(90vw, 520px)',
+            maxHeight: 'min(80vh, 600px)',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
             {/* Header */}
-            <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
-              <h3 className="font-serif text-sm" style={{ color: 'var(--primary)' }}>Manage Layers</h3>
-              <button onClick={() => setLayerModalOpen(false)}
-                className="text-lg leading-none" style={{ color: 'var(--muted-foreground)' }}>×</button>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <h3 className="font-serif" style={{ fontSize: 14, color: 'var(--primary)', margin: 0 }}>Manage Layers</h3>
+              <button onClick={() => setLayerModalOpen(false)} style={{ fontSize: 18, lineHeight: 1, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
             </div>
 
             {/* Body */}
-            <div className="overflow-y-auto px-5 py-4 flex-1 space-y-5">
-
-              {/* Elder layers */}
-              <div>
-                <div className="text-[10px] sans font-bold tracking-widest mb-2" style={{ color: '#8a7a20' }}>ELDER</div>
-                {layersByCategory.elder.length === 0 && (
-                  <p className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>Default elder layer (auto-created)</p>
-                )}
-                {layersByCategory.elder.map(l => (
-                  <div key={l.id} className="flex items-center gap-2 py-1.5">
-                    <span className="text-sm sans flex-1" style={{ color: 'var(--foreground)' }}>{l.name}</span>
-                    <span className="text-[9px] sans px-1.5 py-0.5 rounded" style={{ background: 'rgba(234,222,140,0.3)', color: '#8a7a20' }}>
-                      rank {l.rank}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
+            <div style={{ overflowY: 'auto', padding: '16px 20px', flex: 1 }}>
               {/* Staff layers */}
-              <div>
-                <div className="text-[10px] sans font-bold tracking-widest mb-2" style={{ color: '#3b6ea5' }}>STAFF LAYERS</div>
-                {layersByCategory.staff.length === 0 && (
-                  <p className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>No staff layers yet</p>
+              <div style={{ marginBottom: 20 }}>
+                <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: '#3b6ea5', marginBottom: 8 }}>STAFF LAYERS</div>
+                {layersByCategory('staff').length === 0 && (
+                  <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>No staff layers yet. Add one below.</p>
                 )}
-                {layersByCategory.staff.map((l, idx) => (
-                  <div key={l.id} className="flex items-center gap-2 py-1.5 group">
-                    <span className="text-sm sans flex-1" style={{ color: 'var(--foreground)' }}>{l.name}</span>
-                    <span className="text-[9px] sans px-1.5 py-0.5 rounded" style={{ background: 'rgba(147,180,220,0.3)', color: '#3b6ea5' }}>
-                      rank {l.rank}
-                    </span>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={() => moveLayer(l.id, 'up')}
-                        disabled={idx === 0 || saving}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-gray-100 disabled:opacity-20"
-                        style={{ color: 'var(--muted-foreground)' }}>↑</button>
-                      <button onClick={() => moveLayer(l.id, 'down')}
-                        disabled={idx === layersByCategory.staff.length - 1 || saving}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-gray-100 disabled:opacity-20"
-                        style={{ color: 'var(--muted-foreground)' }}>↓</button>
-                      <button onClick={() => removeLayer(l.id)}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-red-50"
-                        style={{ color: '#9b3a3a' }}>×</button>
-                    </div>
+                {layersByCategory('staff').map((l, idx) => (
+                  <div key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+                    <span className="sans" style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{l.name}</span>
+                    <button onClick={() => moveLayer(l.id, 'up')} disabled={idx === 0}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--muted-foreground)', opacity: idx === 0 ? 0.2 : 1 }}>↑</button>
+                    <button onClick={() => moveLayer(l.id, 'down')} disabled={idx === layersByCategory('staff').length - 1}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--muted-foreground)', opacity: idx === layersByCategory('staff').length - 1 ? 0.2 : 1 }}>↓</button>
+                    <button onClick={() => removeLayer(l.id)}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: '#9b3a3a' }}>×</button>
                   </div>
                 ))}
               </div>
 
               {/* Volunteer layers */}
-              <div>
-                <div className="text-[10px] sans font-bold tracking-widest mb-2" style={{ color: '#3a7a4a' }}>VOLUNTEER LAYERS</div>
-                {layersByCategory.volunteer.length === 0 && (
-                  <p className="text-xs sans" style={{ color: 'var(--muted-foreground)' }}>No volunteer layers yet</p>
+              <div style={{ marginBottom: 20 }}>
+                <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: '#3a7a4a', marginBottom: 8 }}>VOLUNTEER LAYERS</div>
+                {layersByCategory('volunteer').length === 0 && (
+                  <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>No volunteer layers yet. Add one below.</p>
                 )}
-                {layersByCategory.volunteer.map((l, idx) => (
-                  <div key={l.id} className="flex items-center gap-2 py-1.5 group">
-                    <span className="text-sm sans flex-1" style={{ color: 'var(--foreground)' }}>{l.name}</span>
-                    <span className="text-[9px] sans px-1.5 py-0.5 rounded" style={{ background: 'rgba(140,210,160,0.3)', color: '#3a7a4a' }}>
-                      rank {l.rank}
-                    </span>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={() => moveLayer(l.id, 'up')}
-                        disabled={idx === 0 || saving}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-gray-100 disabled:opacity-20"
-                        style={{ color: 'var(--muted-foreground)' }}>↑</button>
-                      <button onClick={() => moveLayer(l.id, 'down')}
-                        disabled={idx === layersByCategory.volunteer.length - 1 || saving}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-gray-100 disabled:opacity-20"
-                        style={{ color: 'var(--muted-foreground)' }}>↓</button>
-                      <button onClick={() => removeLayer(l.id)}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[10px] hover:bg-red-50"
-                        style={{ color: '#9b3a3a' }}>×</button>
-                    </div>
+                {layersByCategory('volunteer').map((l, idx) => (
+                  <div key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0' }}>
+                    <span className="sans" style={{ fontSize: 13, color: 'var(--foreground)', flex: 1 }}>{l.name}</span>
+                    <button onClick={() => moveLayer(l.id, 'up')} disabled={idx === 0}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--muted-foreground)', opacity: idx === 0 ? 0.2 : 1 }}>↑</button>
+                    <button onClick={() => moveLayer(l.id, 'down')} disabled={idx === layersByCategory('volunteer').length - 1}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: 'var(--muted-foreground)', opacity: idx === layersByCategory('volunteer').length - 1 ? 0.2 : 1 }}>↓</button>
+                    <button onClick={() => removeLayer(l.id)}
+                      style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: '#9b3a3a' }}>×</button>
                   </div>
                 ))}
               </div>
 
               {/* Add new layer */}
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
-                <div className="text-[10px] sans font-bold tracking-widest mb-2" style={{ color: 'var(--muted-foreground)' }}>ADD LAYER</div>
-                <div className="flex items-center gap-2">
+                <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: 'var(--muted-foreground)', marginBottom: 8 }}>ADD LAYER</div>
+                <div style={{ display: 'flex', gap: 8 }}>
                   <input
                     type="text"
                     placeholder="Layer name..."
                     value={newLayerName}
                     onChange={e => setNewLayerName(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && addLayer()}
-                    className="flex-1 px-3 py-2 rounded-lg border text-sm sans"
-                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}
+                    className="sans"
+                    style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, color: 'var(--foreground)' }}
                   />
                   <select
                     value={newLayerCategory}
                     onChange={e => setNewLayerCategory(e.target.value as 'staff' | 'volunteer')}
-                    className="px-2 py-2 rounded-lg border text-xs sans"
-                    style={{ borderColor: 'var(--border)', color: 'var(--foreground)' }}>
+                    className="sans"
+                    style={{ padding: '8px 8px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12, color: 'var(--foreground)' }}>
                     <option value="staff">Staff</option>
                     <option value="volunteer">Volunteer</option>
                   </select>
                   <button
                     onClick={addLayer}
-                    disabled={saving || !newLayerName.trim()}
-                    className="px-3 py-2 rounded-lg text-xs sans font-medium disabled:opacity-40"
-                    style={{ background: 'var(--primary)', color: 'white' }}>
-                    {saving ? '...' : 'Add'}
+                    disabled={!newLayerName.trim()}
+                    className="sans"
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: 8,
+                      border: 'none',
+                      background: 'var(--primary)',
+                      color: 'white',
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: newLayerName.trim() ? 'pointer' : 'default',
+                      opacity: newLayerName.trim() ? 1 : 0.4,
+                    }}>
+                    Add
                   </button>
                 </div>
               </div>
             </div>
 
             {/* Footer */}
-            <div className="px-5 py-3 shrink-0 flex justify-end" style={{ borderTop: '1px solid var(--border)', background: 'var(--muted)' }}>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', borderRadius: '0 0 16px 16px' }}>
               <button onClick={() => setLayerModalOpen(false)}
-                className="text-xs sans font-medium px-3 py-1.5 rounded-lg border"
-                style={{ borderColor: 'var(--border)', color: 'var(--muted-foreground)' }}>
+                className="sans"
+                style={{ fontSize: 12, fontWeight: 500, padding: '6px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
                 Done
               </button>
             </div>
