@@ -16,6 +16,12 @@ interface PcoList {
   totalPeople: number
 }
 
+interface ListPerson {
+  listId: string
+  personId: string
+  personName: string
+}
+
 interface PersonCard {
   id: string
   name: string
@@ -49,7 +55,7 @@ const DEFAULT_LAYERS: LayerItem[] = [
 export default function ShepherdTreeV2() {
   const [layers, setLayers] = useState<LayerItem[]>(DEFAULT_LAYERS)
 
-  // Modal
+  // Manage Layers modal
   const [modalOpen, setModalOpen] = useState(false)
   const [draftLayers, setDraftLayers] = useState<LayerItem[]>([])
   const [newName, setNewName] = useState('')
@@ -60,18 +66,21 @@ export default function ShepherdTreeV2() {
 
   // ── Assign List state ──────────────────────────────────────
   const [pcoLists, setPcoLists] = useState<PcoList[]>([])
+  const [listPeople, setListPeople] = useState<ListPerson[]>([])
   const [listsLoaded, setListsLoaded] = useState(false)
-  // layerId → { list, people }
+  // layerId → { list, people[] }
   const [layerAssignments, setLayerAssignments] = useState<Record<string, { list: PcoList; people: PersonCard[] }>>({})
-  const [assignPickerLayerId, setAssignPickerLayerId] = useState<string | null>(null)
-  const [assignLoading, setAssignLoading] = useState(false)
+  // Assign List modal
+  const [assignModalOpen, setAssignModalOpen] = useState(false)
+  const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
 
-  // Fetch available PCO lists once
+  // Fetch available PCO lists + their people once
   useEffect(() => {
     fetch('/api/tree')
       .then(r => r.json())
       .then(data => {
         setPcoLists(data.pcoLists || [])
+        setListPeople(data.pcoListPeople || [])
         setListsLoaded(true)
       })
       .catch(() => setListsLoaded(true))
@@ -83,7 +92,7 @@ export default function ShepherdTreeV2() {
     return COLOR_PALETTE.find(c => !usedLabels.has(c.label)) || COLOR_PALETTE[existing.length % COLOR_PALETTE.length]
   }, [])
 
-  // ── Modal actions ────────────────────────────────────────────
+  // ── Manage Layers modal actions ──────────────────────────────
   const openModal = () => {
     setDraftLayers([...layers])
     setNewName('')
@@ -112,22 +121,11 @@ export default function ShepherdTreeV2() {
   }
 
   // ── Drag handlers ────────────────────────────────────────────
-  const onDragStart = (idx: number) => {
-    dragIdx.current = idx
-  }
-
-  const onDragOver = (e: React.DragEvent, idx: number) => {
-    e.preventDefault()
-    setDragOverIdx(idx)
-  }
-
+  const onDragStart = (idx: number) => { dragIdx.current = idx }
+  const onDragOver = (e: React.DragEvent, idx: number) => { e.preventDefault(); setDragOverIdx(idx) }
   const onDrop = (idx: number) => {
     const from = dragIdx.current
-    if (from === null || from === idx) {
-      dragIdx.current = null
-      setDragOverIdx(null)
-      return
-    }
+    if (from === null || from === idx) { dragIdx.current = null; setDragOverIdx(null); return }
     setDraftLayers(prev => {
       const copy = [...prev]
       const [item] = copy.splice(from, 1)
@@ -137,41 +135,21 @@ export default function ShepherdTreeV2() {
     dragIdx.current = null
     setDragOverIdx(null)
   }
-
-  const onDragEnd = () => {
-    dragIdx.current = null
-    setDragOverIdx(null)
-  }
+  const onDragEnd = () => { dragIdx.current = null; setDragOverIdx(null) }
 
   // ── Assign list to a layer ──────────────────────────────────
-  const assignList = async (layerId: string, list: PcoList) => {
-    setAssignLoading(true)
-    try {
-      // Fetch the people on this list from the API
-      const res = await fetch('/api/tree')
-      if (!res.ok) throw new Error()
-      const data = await res.json()
+  const assignList = (layerId: string, list: PcoList) => {
+    // Get the people on this list from the cached data
+    const people = listPeople
+      .filter(lp => lp.listId === list.id)
+      .map(lp => ({ id: lp.personId, name: lp.personName }))
 
-      // Find people linked to this list via pco_list_people
-      // The GET /api/tree returns pcoListPeople is not directly available,
-      // but we can use list_id to find people from the nodes/assignments
-      // For now, just fetch the list info — the people will show after linking
-
-      // Actually: we need to call link_list to make the backend resolve people,
-      // but we don't have a real layer_id in the DB yet (layers are local state).
-      // So for now, we'll just store the assignment locally and show
-      // the list name + people count. The actual DB wiring happens later.
-
-      setLayerAssignments(prev => ({
-        ...prev,
-        [layerId]: { list, people: [] },
-      }))
-      setAssignPickerLayerId(null)
-    } catch {
-      // silent
-    } finally {
-      setAssignLoading(false)
-    }
+    setLayerAssignments(prev => ({
+      ...prev,
+      [layerId]: { list, people },
+    }))
+    setAssignModalOpen(false)
+    setAssignSelectedLayerId(null)
   }
 
   const unassignList = (layerId: string) => {
@@ -201,29 +179,36 @@ export default function ShepherdTreeV2() {
         boxSizing: 'border-box',
       }}>
         <h2 className="font-serif" style={{ fontSize: 16, color: 'var(--primary)', margin: 0 }}>Shepherd Tree</h2>
-        <button
-          onClick={openModal}
-          className="sans"
-          style={{
-            fontSize: 12,
-            fontWeight: 500,
-            padding: '6px 12px',
-            borderRadius: 8,
-            border: '1px solid var(--border)',
-            background: 'white',
-            color: 'var(--foreground)',
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-            flexShrink: 0,
-          }}>
-          Manage Layers
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => { setAssignSelectedLayerId(null); setAssignModalOpen(true) }}
+            className="sans"
+            style={{
+              fontSize: 12, fontWeight: 500, padding: '6px 12px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)',
+              cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+            Assign List
+          </button>
+          <button
+            onClick={openModal}
+            className="sans"
+            style={{
+              fontSize: 12, fontWeight: 500, padding: '6px 12px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)',
+              cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+            Manage Layers
+          </button>
+        </div>
       </div>
 
       {/* ── Bands ── */}
       <div>
         {layers.map((layer, i) => {
           const assignment = layerAssignments[layer.id]
+          const people = assignment?.people || []
+
           return (
             <div key={layer.id}>
               {i > 0 && (
@@ -235,120 +220,35 @@ export default function ShepherdTreeV2() {
                 position: 'relative',
                 padding: '40px 16px 16px',
               }}>
-                {/* Layer label + linked list badge */}
-                <div style={{ position: 'absolute', left: 16, top: 12, display: 'flex', alignItems: 'center', gap: 8, userSelect: 'none' }}>
+                {/* Layer label */}
+                <div style={{ position: 'absolute', left: 16, top: 12, userSelect: 'none' }}>
                   <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
                     {layer.name.toUpperCase()}
-                  </div>
-                  {assignment && (
-                    <div style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      padding: '2px 8px', borderRadius: 6,
-                      background: 'rgba(255,255,255,0.7)', border: `1px solid ${layer.color.label}40`,
-                    }}>
-                      <span className="sans" style={{ fontSize: 10, color: layer.color.label, fontWeight: 500 }}>
-                        {assignment.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
-                      </span>
-                      <span className="sans" style={{ fontSize: 9, color: 'var(--muted-foreground)' }}>
-                        ({assignment.list.totalPeople})
-                      </span>
-                      <button
-                        onClick={() => unassignList(layer.id)}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 2px' }}
-                        title="Unlink list"
-                      >×</button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Assign List button */}
-                <div style={{ position: 'absolute', right: 16, top: 10, zIndex: 5 }}>
-                  <button
-                    onClick={() => setAssignPickerLayerId(assignPickerLayerId === layer.id ? null : layer.id)}
-                    className="sans"
-                    style={{
-                      fontSize: 11, fontWeight: 500, padding: '4px 10px', borderRadius: 6,
-                      border: `1px solid ${layer.color.label}50`, background: 'rgba(255,255,255,0.8)',
-                      color: layer.color.label, cursor: 'pointer',
-                    }}>
-                    Assign List
-                  </button>
-
-                  {/* Dropdown */}
-                  {assignPickerLayerId === layer.id && (
-                    <div style={{
-                      position: 'absolute', right: 0, top: 32, zIndex: 20,
-                      background: 'white', borderRadius: 10,
-                      boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-                      border: '1px solid var(--border)',
-                      width: 280, maxHeight: 300, overflowY: 'auto',
-                    }}>
-                      <div className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '10px 12px 6px', fontWeight: 600 }}>
-                        PCO Reference Lists
-                      </div>
-                      {!listsLoaded ? (
-                        <div className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '8px 12px 12px' }}>
-                          Loading...
-                        </div>
-                      ) : pcoLists.length === 0 ? (
-                        <div className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '8px 12px 12px' }}>
-                          No reference lists found. Sync PCO first.
-                        </div>
-                      ) : (
-                        pcoLists.map(list => {
-                          const isLinkedHere = assignment?.list.id === list.id
-                          const isUsedElsewhere = assignedListIds.has(list.id) && !isLinkedHere
-                          return (
-                            <button
-                              key={list.id}
-                              onClick={() => isLinkedHere ? unassignList(layer.id) : assignList(layer.id, list)}
-                              disabled={assignLoading || isUsedElsewhere}
-                              className="sans"
-                              style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                width: '100%', padding: '8px 12px', border: 'none', cursor: isUsedElsewhere ? 'default' : 'pointer',
-                                background: isLinkedHere ? layer.color.bg : 'transparent',
-                                textAlign: 'left', fontSize: 12,
-                                color: isUsedElsewhere ? 'var(--muted-foreground)' : 'var(--foreground)',
-                                opacity: isUsedElsewhere ? 0.5 : 1,
-                              }}>
-                              <span style={{ fontWeight: isLinkedHere ? 600 : 400 }}>
-                                {list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
-                              </span>
-                              <span style={{ fontSize: 10, color: 'var(--muted-foreground)', flexShrink: 0, marginLeft: 8 }}>
-                                {isLinkedHere ? '✓ Linked' : isUsedElsewhere ? 'In use' : `${list.totalPeople} people`}
-                              </span>
-                            </button>
-                          )
-                        })
-                      )}
-                      <div style={{ borderTop: '1px solid var(--border)', padding: 6 }}>
+                    {assignment && (
+                      <span style={{ fontWeight: 500, letterSpacing: 0, marginLeft: 8, fontSize: 10, opacity: 0.7 }}>
+                        — {assignment.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
                         <button
-                          onClick={() => setAssignPickerLayerId(null)}
-                          className="sans"
-                          style={{
-                            width: '100%', fontSize: 11, padding: '6px', borderRadius: 6,
-                            border: 'none', background: 'var(--muted)', color: 'var(--muted-foreground)',
-                            cursor: 'pointer',
-                          }}>
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                          onClick={() => unassignList(layer.id)}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 4px', verticalAlign: 'middle' }}
+                          title="Unlink list"
+                        >×</button>
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* People cards + placeholder */}
                 <div style={{
                   display: 'flex', flexWrap: 'wrap', gap: 8,
-                  alignItems: 'center', justifyContent: 'center',
+                  alignItems: 'center',
                   minHeight: BAND_HEIGHT - 56,
+                  ...(people.length === 0 ? { justifyContent: 'center' } : {}),
                 }}>
-                  {assignment && assignment.people.map(person => (
+                  {people.map(person => (
                     <div key={person.id} style={{
-                      padding: '8px 14px', borderRadius: 10,
-                      background: 'white', border: `1px solid ${layer.color.label}30`,
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+                      padding: '10px 16px', borderRadius: 10,
+                      background: 'white', border: `1px solid ${layer.color.label}25`,
+                      boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
                     }}>
                       <span className="sans" style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
                         {person.name}
@@ -356,16 +256,19 @@ export default function ShepherdTreeV2() {
                     </div>
                   ))}
 
-                  {/* Placeholder: always visible for adding people */}
+                  {/* Placeholder: always visible */}
                   <button style={{
-                    width: 220, height: 72,
+                    width: people.length > 0 ? 'auto' : 220,
+                    height: people.length > 0 ? 'auto' : 72,
+                    padding: people.length > 0 ? '10px 16px' : undefined,
                     border: `2px dashed ${layer.color.label}70`,
                     borderRadius: 12, background: 'white',
                     cursor: 'pointer', opacity: 0.7,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexDirection: 'column', gap: 2,
+                    flexDirection: people.length > 0 ? 'row' : 'column',
+                    gap: people.length > 0 ? 6 : 2,
                   }}>
-                    <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
+                    <span style={{ fontSize: people.length > 0 ? 14 : 18, fontWeight: 300, color: layer.color.label }}>+</span>
                     <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
                   </button>
                 </div>
@@ -375,17 +278,143 @@ export default function ShepherdTreeV2() {
         })}
       </div>
 
-      {/* Click-away to close assign picker */}
-      {assignPickerLayerId && (
+      {/* ═══════════════════════════════════════════════════════════
+          MODAL: Assign List — pick a layer, then a list
+         ═══════════════════════════════════════════════════════════ */}
+      {assignModalOpen && (
         <div
-          style={{ position: 'fixed', inset: 0, zIndex: 4 }}
-          onClick={() => setAssignPickerLayerId(null)}
-        />
+          style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, background: 'rgba(0,0,0,0.3)' }}
+          onClick={e => { if (e.target === e.currentTarget) { setAssignModalOpen(false); setAssignSelectedLayerId(null) } }}
+        >
+          <div style={{
+            background: 'white', borderRadius: 16,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)', border: '1px solid var(--border)',
+            width: 'min(90vw, 440px)', maxHeight: 'min(85vh, 600px)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            {/* Header */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <h3 className="font-serif" style={{ fontSize: 14, color: 'var(--primary)', margin: 0 }}>
+                {assignSelectedLayerId ? 'Choose a Reference List' : 'Assign List to Layer'}
+              </h3>
+              <button onClick={() => { setAssignModalOpen(false); setAssignSelectedLayerId(null) }}
+                style={{ fontSize: 18, lineHeight: 1, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+            </div>
+
+            <div style={{ overflowY: 'auto', padding: '12px 20px', flex: 1 }}>
+              {!assignSelectedLayerId ? (
+                /* Step 1: Pick a layer */
+                <>
+                  <p className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', margin: '0 0 12px' }}>
+                    Select a layer to assign a PCO Reference List to.
+                  </p>
+                  {layers.map(layer => {
+                    const existing = layerAssignments[layer.id]
+                    return (
+                      <button
+                        key={layer.id}
+                        onClick={() => setAssignSelectedLayerId(layer.id)}
+                        className="sans"
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                          padding: '10px 12px', margin: '0 0 4px', borderRadius: 8,
+                          background: layer.color.bg, border: '1px solid transparent',
+                          cursor: 'pointer', textAlign: 'left',
+                        }}>
+                        <div style={{ width: 10, height: 10, borderRadius: 3, background: layer.color.label, flexShrink: 0 }} />
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
+                          {layer.name}
+                        </span>
+                        {existing ? (
+                          <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>
+                            {existing.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')} ({existing.people.length})
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 10, color: layer.color.label }}>No list</span>
+                        )}
+                      </button>
+                    )
+                  })}
+                </>
+              ) : (
+                /* Step 2: Pick a list */
+                <>
+                  <button
+                    onClick={() => setAssignSelectedLayerId(null)}
+                    className="sans"
+                    style={{
+                      fontSize: 11, color: 'var(--muted-foreground)', background: 'none',
+                      border: 'none', cursor: 'pointer', padding: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4,
+                    }}>
+                    ← Back to layers
+                  </button>
+                  <div className="sans" style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)', margin: '0 0 10px' }}>
+                    Assigning to: {layers.find(l => l.id === assignSelectedLayerId)?.name}
+                  </div>
+                  {!listsLoaded ? (
+                    <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>Loading lists...</p>
+                  ) : pcoLists.length === 0 ? (
+                    <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
+                      No reference lists found. Sync PCO first.
+                    </p>
+                  ) : (
+                    pcoLists.map(list => {
+                      const isLinkedHere = layerAssignments[assignSelectedLayerId]?.list.id === list.id
+                      const isUsedElsewhere = assignedListIds.has(list.id) && !isLinkedHere
+                      const peopleCount = listPeople.filter(lp => lp.listId === list.id).length
+                      return (
+                        <button
+                          key={list.id}
+                          onClick={() => {
+                            if (isLinkedHere) {
+                              unassignList(assignSelectedLayerId)
+                              setAssignModalOpen(false)
+                              setAssignSelectedLayerId(null)
+                            } else {
+                              assignList(assignSelectedLayerId, list)
+                            }
+                          }}
+                          disabled={isUsedElsewhere}
+                          className="sans"
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            width: '100%', padding: '10px 12px', margin: '0 0 4px', borderRadius: 8,
+                            border: isLinkedHere ? '2px solid var(--primary)' : '1px solid var(--border)',
+                            cursor: isUsedElsewhere ? 'default' : 'pointer',
+                            background: isLinkedHere ? 'rgba(45, 96, 71, 0.06)' : 'white',
+                            textAlign: 'left', fontSize: 12,
+                            color: isUsedElsewhere ? 'var(--muted-foreground)' : 'var(--foreground)',
+                            opacity: isUsedElsewhere ? 0.5 : 1,
+                          }}>
+                          <span style={{ fontWeight: isLinkedHere ? 600 : 400 }}>
+                            {list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
+                          </span>
+                          <span style={{ fontSize: 10, color: 'var(--muted-foreground)', flexShrink: 0, marginLeft: 8 }}>
+                            {isLinkedHere ? '✓ Linked' : isUsedElsewhere ? 'In use' : `${peopleCount} people`}
+                          </span>
+                        </button>
+                      )
+                    })
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', borderRadius: '0 0 16px 16px' }}>
+              <button onClick={() => { setAssignModalOpen(false); setAssignSelectedLayerId(null) }}
+                className="sans"
+                style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* ══════════════════════════════════════════════════════════
+      {/* ═══════════════════════════════════════════════════════════
           MODAL: Manage Layers — drag to reorder
-         ══════════════════════════════════════════════════════════ */}
+         ═══════════════════════════════════════════════════════════ */}
       {modalOpen && (
         <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, background: 'rgba(0,0,0,0.3)' }}>
           <div style={{

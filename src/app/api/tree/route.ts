@@ -181,6 +181,7 @@ export async function GET() {
   }
   for (const gm of groupMemberships || []) neededPersonIds.add(gm.person_id)
   for (const tm of teamMemberships || []) neededPersonIds.add(tm.person_id)
+  for (const lp of pcoListPeople || []) neededPersonIds.add(lp.person_id)
   if (currentUser?.person_id) neededPersonIds.add(currentUser.person_id)
 
   // Batch fetch people
@@ -202,6 +203,7 @@ export async function GET() {
       groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
       serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
       pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
+      pcoListPeople: [],
       listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
       departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
       departmentMembers: departmentMembers || [],
@@ -803,6 +805,11 @@ export async function GET() {
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
     pcoLists: (pcoLists || []).map(l => ({ id: l.id, name: l.name, totalPeople: l.total_people })),
+    pcoListPeople: (pcoListPeople || []).map(lp => ({
+      listId: lp.list_id,
+      personId: lp.person_id,
+      personName: personMap.get(lp.person_id)?.name || 'Unknown',
+    })),
     listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
     departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
     departmentMembers: departmentMembers || [],
