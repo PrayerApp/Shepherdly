@@ -1116,6 +1116,63 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true })
   }
 
+  // ── Bulk save layers (v2 layer management) ──────────────────
+  if (body.action === 'save_layers_v2') {
+    const { layers: layerList } = body
+    if (!Array.isArray(layerList)) return NextResponse.json({ error: 'layers array required' }, { status: 400 })
+
+    // Get existing layers
+    const { data: existing } = await admin.from('tree_layers')
+      .select('id').eq('church_id', churchId!)
+    const existingIds = new Set((existing || []).map((l: any) => l.id))
+
+    // Determine which to keep, add, remove
+    const incomingIds = new Set(layerList.filter((l: any) => l.id).map((l: any) => l.id))
+    const toRemove = [...existingIds].filter(id => !incomingIds.has(id))
+
+    // Remove deleted layers (move their assignments to the first remaining layer)
+    if (toRemove.length > 0) {
+      const firstKeepId = layerList.find((l: any) => l.id)?.id
+      if (firstKeepId) {
+        for (const removeId of toRemove) {
+          await admin.from('tree_assignments')
+            .update({ layer_id: firstKeepId })
+            .eq('layer_id', removeId).eq('church_id', churchId!)
+        }
+      }
+      for (const removeId of toRemove) {
+        await admin.from('pco_list_layer_links').delete().eq('layer_id', removeId).eq('church_id', churchId!)
+      }
+      await admin.from('tree_layers').delete().in('id', toRemove)
+    }
+
+    // Upsert layers with rank = index * 10
+    const categoryMap: Record<string, string> = {
+      'Elder': 'elder', 'Staff': 'staff', 'Volunteer': 'volunteer', 'Congregation': 'people',
+    }
+    const resultLayers: { id: string; name: string; rank: number }[] = []
+    for (let i = 0; i < layerList.length; i++) {
+      const l = layerList[i]
+      const rank = i * 10
+      const category = categoryMap[l.name] || l.category || 'custom'
+      if (l.id && existingIds.has(l.id)) {
+        await admin.from('tree_layers')
+          .update({ name: l.name, rank, category })
+          .eq('id', l.id)
+        resultLayers.push({ id: l.id, name: l.name, rank })
+      } else {
+        const { data: newLayer } = await admin.from('tree_layers')
+          .insert({ name: l.name, rank, category, church_id: churchId })
+          .select('id, name, rank')
+          .single()
+        if (newLayer) resultLayers.push(newLayer)
+      }
+    }
+
+    await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true, layers: resultLayers })
+  }
+
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
 }
 

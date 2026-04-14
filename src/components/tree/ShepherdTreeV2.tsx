@@ -7,7 +7,7 @@ interface LayerItem {
   id: string
   name: string
   color: { bg: string; label: string }
-  isDefault?: boolean
+  category?: string
 }
 
 interface PcoList {
@@ -27,6 +27,11 @@ interface PersonCard {
   name: string
 }
 
+interface ListLayerLink {
+  listId: string
+  layerId: string
+}
+
 // ── Color palette — each layer gets its own unique color ───────
 const COLOR_PALETTE = [
   { bg: 'rgba(200, 175, 60, 0.30)',  label: '#7a6a10' },   // gold
@@ -43,22 +48,27 @@ const COLOR_PALETTE = [
 
 const BAND_HEIGHT = 200
 
-// ── Defaults ───────────────────────────────────────────────────
-const DEFAULT_LAYERS: LayerItem[] = [
-  { id: 'default-elder',     name: 'Elder',        color: COLOR_PALETTE[0], isDefault: true },
-  { id: 'default-staff',     name: 'Staff',        color: COLOR_PALETTE[1], isDefault: true },
-  { id: 'default-volunteer', name: 'Volunteer',    color: COLOR_PALETTE[2], isDefault: true },
-  { id: 'default-people',    name: 'Congregation', color: COLOR_PALETTE[3], isDefault: true },
+const DEFAULT_LAYER_NAMES = [
+  { name: 'Elder',        category: 'elder' },
+  { name: 'Staff',        category: 'staff' },
+  { name: 'Volunteer',    category: 'volunteer' },
+  { name: 'Congregation', category: 'people' },
 ]
+
+function colorForIndex(i: number) {
+  return COLOR_PALETTE[i % COLOR_PALETTE.length]
+}
 
 // ── Component ──────────────────────────────────────────────────
 export default function ShepherdTreeV2() {
-  const [layers, setLayers] = useState<LayerItem[]>(DEFAULT_LAYERS)
+  const [layers, setLayers] = useState<LayerItem[]>([])
+  const [loading, setLoading] = useState(true)
 
   // Manage Layers modal
   const [modalOpen, setModalOpen] = useState(false)
   const [draftLayers, setDraftLayers] = useState<LayerItem[]>([])
   const [newName, setNewName] = useState('')
+  const [saving, setSaving] = useState(false)
 
   // Drag state for modal list
   const dragIdx = useRef<number | null>(null)
@@ -67,24 +77,83 @@ export default function ShepherdTreeV2() {
   // ── Assign List state ──────────────────────────────────────
   const [pcoLists, setPcoLists] = useState<PcoList[]>([])
   const [listPeople, setListPeople] = useState<ListPerson[]>([])
+  const [listLayerLinks, setListLayerLinks] = useState<ListLayerLink[]>([])
   const [listsLoaded, setListsLoaded] = useState(false)
-  // layerId → { list, people[] }
-  const [layerAssignments, setLayerAssignments] = useState<Record<string, { list: PcoList; people: PersonCard[] }>>({})
   // Assign List modal
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
+  const [assignBusy, setAssignBusy] = useState(false)
 
-  // Fetch available PCO lists + their people once
-  useEffect(() => {
-    fetch('/api/tree')
-      .then(r => r.json())
-      .then(data => {
-        setPcoLists(data.pcoLists || [])
-        setListPeople(data.pcoListPeople || [])
-        setListsLoaded(true)
-      })
-      .catch(() => setListsLoaded(true))
+  // ── Fetch all data from API ─────────────────────────────────
+  const fetchData = useCallback(async (isInit = false) => {
+    try {
+      const res = await fetch('/api/tree')
+      if (!res.ok) throw new Error()
+      const data = await res.json()
+
+      // PCO data
+      setPcoLists(data.pcoLists || [])
+      setListPeople(data.pcoListPeople || [])
+      setListLayerLinks(data.listLayerLinks || [])
+      setListsLoaded(true)
+
+      // Layers from DB
+      const dbLayers: LayerItem[] = (data.layers || []).map((l: any, i: number) => ({
+        id: l.id,
+        name: l.name,
+        color: colorForIndex(i),
+        category: l.category,
+      }))
+
+      if (dbLayers.length > 0) {
+        setLayers(dbLayers)
+      } else if (isInit) {
+        // First time: save defaults to DB
+        const res2 = await fetch('/api/tree', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'save_layers_v2',
+            layers: DEFAULT_LAYER_NAMES.map(d => ({ name: d.name, category: d.category })),
+          }),
+        })
+        if (res2.ok) {
+          const d2 = await res2.json()
+          if (d2.layers) {
+            setLayers(d2.layers.map((l: any, i: number) => ({
+              id: l.id, name: l.name, color: colorForIndex(i), category: l.category,
+            })))
+          }
+        }
+      }
+    } catch {
+      // If fetch fails, show defaults locally
+      if (isInit) {
+        setLayers(DEFAULT_LAYER_NAMES.map((d, i) => ({
+          id: `local-${i}`, name: d.name, color: colorForIndex(i), category: d.category,
+        })))
+      }
+    } finally {
+      setLoading(false)
+    }
   }, [])
+
+  useEffect(() => { fetchData(true) }, [fetchData])
+
+  // ── Derived: people per layer from list-layer links ─────────
+  const getPeopleForLayer = (layerId: string): PersonCard[] => {
+    const link = listLayerLinks.find(ll => ll.layerId === layerId)
+    if (!link) return []
+    return listPeople
+      .filter(lp => lp.listId === link.listId)
+      .map(lp => ({ id: lp.personId, name: lp.personName }))
+  }
+
+  const getLinkedList = (layerId: string): PcoList | null => {
+    const link = listLayerLinks.find(ll => ll.layerId === layerId)
+    if (!link) return null
+    return pcoLists.find(l => l.id === link.listId) || null
+  }
 
   // Pick next unused color
   const nextColor = useCallback((existing: LayerItem[]) => {
@@ -100,24 +169,45 @@ export default function ShepherdTreeV2() {
     setModalOpen(true)
   }
 
-  const saveModal = () => {
-    setLayers(draftLayers)
-    setModalOpen(false)
+  const saveModal = async () => {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_layers_v2',
+          layers: draftLayers.map(l => ({
+            id: l.id.startsWith('local-') ? undefined : l.id,
+            name: l.name,
+            category: l.category || 'custom',
+          })),
+        }),
+      })
+      if (!res.ok) throw new Error()
+      setModalOpen(false)
+      await fetchData()
+    } catch (err) {
+      console.error('Save layers error:', err)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const addDraftLayer = () => {
     if (!newName.trim()) return
     const color = nextColor(draftLayers)
     setDraftLayers(prev => [...prev, {
-      id: crypto.randomUUID(),
+      id: crypto.randomUUID(), // temporary, will be replaced by DB id on save
       name: newName.trim(),
       color,
+      category: 'custom',
     }])
     setNewName('')
   }
 
-  const removeDraftLayer = (id: string) => {
-    setDraftLayers(prev => prev.filter(l => l.id !== id))
+  const removeDraftLayer = (idx: number) => {
+    setDraftLayers(prev => prev.filter((_, i) => i !== idx))
   }
 
   // ── Drag handlers ────────────────────────────────────────────
@@ -137,31 +227,53 @@ export default function ShepherdTreeV2() {
   }
   const onDragEnd = () => { dragIdx.current = null; setDragOverIdx(null) }
 
-  // ── Assign list to a layer ──────────────────────────────────
-  const assignList = (layerId: string, list: PcoList) => {
-    // Get the people on this list from the cached data
-    const people = listPeople
-      .filter(lp => lp.listId === list.id)
-      .map(lp => ({ id: lp.personId, name: lp.personName }))
-
-    setLayerAssignments(prev => ({
-      ...prev,
-      [layerId]: { list, people },
-    }))
-    setAssignModalOpen(false)
-    setAssignSelectedLayerId(null)
+  // ── Assign / unassign list (persisted to DB) ────────────────
+  const assignList = async (layerId: string, list: PcoList) => {
+    setAssignBusy(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'link_list', list_id: list.id, layer_id: layerId }),
+      })
+      if (!res.ok) throw new Error()
+      setAssignModalOpen(false)
+      setAssignSelectedLayerId(null)
+      await fetchData()
+    } catch (err) {
+      console.error('Link list error:', err)
+    } finally {
+      setAssignBusy(false)
+    }
   }
 
-  const unassignList = (layerId: string) => {
-    setLayerAssignments(prev => {
-      const copy = { ...prev }
-      delete copy[layerId]
-      return copy
-    })
+  const unassignList = async (listId: string) => {
+    setAssignBusy(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'unlink_list', list_id: listId }),
+      })
+      if (!res.ok) throw new Error()
+      await fetchData()
+    } catch (err) {
+      console.error('Unlink list error:', err)
+    } finally {
+      setAssignBusy(false)
+    }
   }
 
-  // Which lists are already assigned to a layer
-  const assignedListIds = new Set(Object.values(layerAssignments).map(a => a.list.id))
+  // Which lists are already linked
+  const linkedListIds = new Set(listLayerLinks.map(ll => ll.listId))
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300 }}>
+        <span className="sans" style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>Loading...</span>
+      </div>
+    )
+  }
 
   return (
     <div style={{ maxWidth: '100%', overflowX: 'hidden' }}>
@@ -206,8 +318,8 @@ export default function ShepherdTreeV2() {
       {/* ── Bands ── */}
       <div>
         {layers.map((layer, i) => {
-          const assignment = layerAssignments[layer.id]
-          const people = assignment?.people || []
+          const people = getPeopleForLayer(layer.id)
+          const linkedList = getLinkedList(layer.id)
 
           return (
             <div key={layer.id}>
@@ -224,11 +336,12 @@ export default function ShepherdTreeV2() {
                 <div style={{ position: 'absolute', left: 16, top: 12, userSelect: 'none' }}>
                   <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
                     {layer.name.toUpperCase()}
-                    {assignment && (
+                    {linkedList && (
                       <span style={{ fontWeight: 500, letterSpacing: 0, marginLeft: 8, fontSize: 10, opacity: 0.7 }}>
-                        — {assignment.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
+                        — {linkedList.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
                         <button
-                          onClick={() => unassignList(layer.id)}
+                          onClick={() => unassignList(linkedList.id)}
+                          disabled={assignBusy}
                           style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 4px', verticalAlign: 'middle' }}
                           title="Unlink list"
                         >×</button>
@@ -309,7 +422,8 @@ export default function ShepherdTreeV2() {
                     Select a layer to assign a PCO Reference List to.
                   </p>
                   {layers.map(layer => {
-                    const existing = layerAssignments[layer.id]
+                    const linked = getLinkedList(layer.id)
+                    const people = getPeopleForLayer(layer.id)
                     return (
                       <button
                         key={layer.id}
@@ -325,9 +439,9 @@ export default function ShepherdTreeV2() {
                         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
                           {layer.name}
                         </span>
-                        {existing ? (
+                        {linked ? (
                           <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>
-                            {existing.list.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')} ({existing.people.length})
+                            {linked.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')} ({people.length})
                           </span>
                         ) : (
                           <span style={{ fontSize: 10, color: layer.color.label }}>No list</span>
@@ -359,22 +473,22 @@ export default function ShepherdTreeV2() {
                     </p>
                   ) : (
                     pcoLists.map(list => {
-                      const isLinkedHere = layerAssignments[assignSelectedLayerId]?.list.id === list.id
-                      const isUsedElsewhere = assignedListIds.has(list.id) && !isLinkedHere
+                      const isLinkedHere = listLayerLinks.some(ll => ll.layerId === assignSelectedLayerId && ll.listId === list.id)
+                      const isUsedElsewhere = linkedListIds.has(list.id) && !isLinkedHere
                       const peopleCount = listPeople.filter(lp => lp.listId === list.id).length
                       return (
                         <button
                           key={list.id}
                           onClick={() => {
                             if (isLinkedHere) {
-                              unassignList(assignSelectedLayerId)
+                              unassignList(list.id)
                               setAssignModalOpen(false)
                               setAssignSelectedLayerId(null)
                             } else {
                               assignList(assignSelectedLayerId, list)
                             }
                           }}
-                          disabled={isUsedElsewhere}
+                          disabled={isUsedElsewhere || assignBusy}
                           className="sans"
                           style={{
                             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -439,49 +553,50 @@ export default function ShepherdTreeV2() {
                 Drag to reorder. New layers get their own color.
               </p>
 
-              {draftLayers.map((layer, idx) => (
-                <div
-                  key={layer.id}
-                  draggable
-                  onDragStart={() => onDragStart(idx)}
-                  onDragOver={e => onDragOver(e, idx)}
-                  onDrop={() => onDrop(idx)}
-                  onDragEnd={onDragEnd}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                    padding: '10px 12px',
-                    margin: '0 0 4px',
-                    borderRadius: 8,
-                    background: layer.color.bg,
-                    border: dragOverIdx === idx ? `2px dashed ${layer.color.label}` : '2px solid transparent',
-                    cursor: 'grab',
-                    userSelect: 'none',
-                    transition: 'border-color 0.15s',
-                  }}>
-                  {/* Drag handle */}
-                  <div style={{ color: layer.color.label, opacity: 0.5, fontSize: 14, flexShrink: 0, lineHeight: 1 }}>⠿</div>
+              {draftLayers.map((layer, idx) => {
+                // A layer is "new" if its id doesn't match any DB layer
+                const isFromDb = layers.some(l => l.id === layer.id)
+                return (
+                  <div
+                    key={`${layer.id}-${idx}`}
+                    draggable
+                    onDragStart={() => onDragStart(idx)}
+                    onDragOver={e => onDragOver(e, idx)}
+                    onDrop={() => onDrop(idx)}
+                    onDragEnd={onDragEnd}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '10px 12px',
+                      margin: '0 0 4px',
+                      borderRadius: 8,
+                      background: layer.color.bg,
+                      border: dragOverIdx === idx ? `2px dashed ${layer.color.label}` : '2px solid transparent',
+                      cursor: 'grab',
+                      userSelect: 'none',
+                      transition: 'border-color 0.15s',
+                    }}>
+                    {/* Drag handle */}
+                    <div style={{ color: layer.color.label, opacity: 0.5, fontSize: 14, flexShrink: 0, lineHeight: 1 }}>⠿</div>
 
-                  {/* Color swatch */}
-                  <div style={{ width: 10, height: 10, borderRadius: 3, background: layer.color.label, flexShrink: 0 }} />
+                    {/* Color swatch */}
+                    <div style={{ width: 10, height: 10, borderRadius: 3, background: layer.color.label, flexShrink: 0 }} />
 
-                  {/* Name */}
-                  <span className="sans" style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
-                    {layer.name}
-                  </span>
+                    {/* Name */}
+                    <span className="sans" style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
+                      {layer.name}
+                    </span>
 
-                  {/* Delete (not for defaults) */}
-                  {layer.isDefault ? (
-                    <span className="sans" style={{ fontSize: 9, color: 'var(--muted-foreground)', flexShrink: 0 }}>default</span>
-                  ) : (
-                    <button onClick={e => { e.stopPropagation(); removeDraftLayer(layer.id) }}
-                      style={{ width: 24, height: 24, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: '#8a3a3a', opacity: 0.7, flexShrink: 0 }}>
+                    {/* Delete */}
+                    <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}
+                      style={{ width: 24, height: 24, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: '#8a3a3a', opacity: 0.7, flexShrink: 0 }}
+                      title={isFromDb ? 'Remove layer' : 'Remove'}>
                       ×
                     </button>
-                  )}
-                </div>
-              ))}
+                  </div>
+                )
+              })}
 
               {/* Add new layer */}
               <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
@@ -524,10 +639,10 @@ export default function ShepherdTreeV2() {
                 style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
                 Cancel
               </button>
-              <button onClick={saveModal}
+              <button onClick={saveModal} disabled={saving}
                 className="sans"
-                style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: 'none', background: 'var(--primary)', color: 'white', cursor: 'pointer' }}>
-                Save
+                style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: 'none', background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>
+                {saving ? 'Saving...' : 'Save'}
               </button>
             </div>
           </div>

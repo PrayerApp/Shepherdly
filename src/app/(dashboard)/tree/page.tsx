@@ -1,9 +1,5 @@
-import ShepherdTree from '@/components/tree/ShepherdTree'
+import ShepherdTreeV2 from '@/components/tree/ShepherdTreeV2'
 
 export default function TreePage() {
-  return (
-    <div className="h-screen flex flex-col overflow-hidden">
-      <ShepherdTree />
-    </div>
-  )
+  return <ShepherdTreeV2 />
 }
