@@ -368,11 +368,15 @@ export default function ShepherdTreeV2() {
                   </div>
                 </div>
 
-                {/* People cards + placeholder */}
+                {/* People cards + placeholder — horizontal scroll */}
                 <div style={{
-                  display: 'flex', flexWrap: 'wrap', gap: 8,
+                  display: 'flex', flexWrap: 'nowrap', gap: 8,
                   alignItems: 'center',
                   minHeight: BAND_HEIGHT - 56,
+                  overflowX: 'auto', overflowY: 'hidden',
+                  paddingBottom: 6,
+                  scrollbarWidth: 'thin',
+                  WebkitOverflowScrolling: 'touch',
                   ...(people.length === 0 ? { justifyContent: 'center' } : {}),
                 }}>
                   {people.map(person => {
@@ -416,7 +420,7 @@ export default function ShepherdTreeV2() {
                             fontSize: 10, fontWeight: 500, color: 'var(--muted-foreground)',
                             letterSpacing: 0.3, marginBottom: 4,
                           }}>
-                            shepherds <span style={{ fontWeight: 700, color: layer.color.label, fontSize: 11 }}>{total}</span>
+                            shepherding <span style={{ fontWeight: 700, color: layer.color.label, fontSize: 11 }}>{total}</span>
                           </div>
                           <div style={{
                             display: 'flex', height: 4, borderRadius: 2,
