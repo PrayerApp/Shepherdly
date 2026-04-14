@@ -23,6 +23,7 @@ const ROLE_COLORS: Record<string, string> = {
 const NAV_ITEMS = [
   { href: '/dashboard', label: 'Dashboard', icon: GridIcon },
   { href: '/tree', label: 'Shepherd Tree', icon: TreeIcon },
+  { href: '/tree2', label: 'Tree v2', icon: TreeIcon },
   { href: '/people', label: 'My Flock', icon: PeopleIcon },
   { href: '/unassigned', label: 'Unassigned', icon: UnassignedIcon },
   { href: '/checkins', label: 'Check-ins', icon: CheckIcon },
