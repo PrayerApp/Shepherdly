@@ -67,7 +67,7 @@ const COLOR_PALETTE = [
   { bg: 'rgba(80, 120, 160, 0.30)',  label: '#3a5a7a' },   // slate
 ]
 
-const BAND_HEIGHT = 200
+const BAND_HEIGHT = 150
 
 const DEFAULT_LAYER_NAMES = [
   { name: 'Elder',        category: 'elder' },
@@ -115,12 +115,13 @@ export default function ShepherdTreeV2() {
   const [personStats, setPersonStats] = useState<Record<string, PersonStat>>({})
   const [exclusions, setExclusions] = useState<LayerExclusion[]>([])
   // When a card is long-pressed, we enter "delete mode" for that (personId,layerId).
-  const [deleteMode, setDeleteMode] = useState<{ personId: string; layerId: string } | null>(null)
-  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const longPressFired = useRef(false)
+  // ── Edit mode: toggled from the toolbar ─────────────────────
+  // In edit mode, excluded people re-appear as ghost cards and can be
+  // restored. Clicking a card selects it (shift/cmd for multi-select).
+  // Outside edit mode, cards are read-only.
+  const [editMode, setEditMode] = useState(false)
 
-  // ── Selection (click = select, shift-click = multiselect) ───
-  // Key = "personId::layerId" so the same person on two layers is independent.
+  // ── Selection (key = "personId::layerId") ───────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const lastSelectedRef = useRef<{ layerId: string; index: number } | null>(null)
   const selKey = (personId: string, layerId: string) => `${personId}::${layerId}`
@@ -188,7 +189,9 @@ export default function ShepherdTreeV2() {
   useEffect(() => { fetchData(true) }, [fetchData])
 
   // ── Derived: people per layer from list-layer links ─────────
-  const getPeopleForLayer = (layerId: string): PersonCard[] => {
+  // In edit mode we return excluded people too (flagged so the card can
+  // render them as "ghosts"). Outside edit mode they're hidden entirely.
+  const getPeopleForLayer = (layerId: string): (PersonCard & { isExcluded: boolean })[] => {
     const link = listLayerLinks.find(ll => ll.layerId === layerId)
     if (!link) return []
     const excluded = new Set(
@@ -196,8 +199,8 @@ export default function ShepherdTreeV2() {
     )
     return listPeople
       .filter(lp => lp.listId === link.listId)
-      .filter(lp => !excluded.has(lp.personId))
-      .map(lp => ({ id: lp.personId, name: lp.personName }))
+      .filter(lp => editMode || !excluded.has(lp.personId))
+      .map(lp => ({ id: lp.personId, name: lp.personName, isExcluded: excluded.has(lp.personId) }))
       .sort((a, b) => {
         const la = lastName(a.name), lb = lastName(b.name)
         const cmp = la.localeCompare(lb, undefined, { sensitivity: 'base' })
@@ -206,23 +209,9 @@ export default function ShepherdTreeV2() {
       })
   }
 
-  // ── Long-press + remove a person from a layer ────────────────
-  const startLongPress = (personId: string, layerId: string) => {
-    if (longPressTimer.current) clearTimeout(longPressTimer.current)
-    longPressFired.current = false
-    longPressTimer.current = setTimeout(() => {
-      longPressFired.current = true
-      setDeleteMode({ personId, layerId })
-    }, 500)
-  }
-  const cancelLongPress = () => {
-    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null }
-  }
-
-  // ── Card click → selection ──────────────────────────────────
-  const handleCardClick = (e: React.MouseEvent, personId: string, layerId: string, people: PersonCard[]) => {
-    // Ignore if this press became a long-press
-    if (longPressFired.current) { longPressFired.current = false; return }
+  // ── Card click → selection (edit mode only) ────────────────
+  const handleCardClick = (e: React.MouseEvent, personId: string, layerId: string, people: (PersonCard & { isExcluded: boolean })[]) => {
+    if (!editMode) return
     const key = selKey(personId, layerId)
     const index = people.findIndex(p => p.id === personId)
 
@@ -248,7 +237,7 @@ export default function ShepherdTreeV2() {
     }
   }
 
-  const selectAllInLayer = (layerId: string, people: PersonCard[]) => {
+  const selectAllInLayer = (layerId: string, people: (PersonCard & { isExcluded: boolean })[]) => {
     const next = new Set(selected)
     const allSelected = people.every(p => next.has(selKey(p.id, layerId)))
     if (allSelected) {
@@ -261,39 +250,67 @@ export default function ShepherdTreeV2() {
   }
 
   const clearSelection = () => setSelected(new Set())
-  useEffect(() => {
-    if (!deleteMode) return
-    const close = () => setDeleteMode(null)
-    document.addEventListener('click', close)
-    return () => document.removeEventListener('click', close)
-  }, [deleteMode])
 
-  // Escape clears selection
+  // ── Bulk actions on the selected set ─────────────────────────
+  // Walk the selection, group by layer, and post the right action per person.
+  const applyToSelection = async (mode: 'remove' | 'restore') => {
+    if (selected.size === 0) return
+    const items: { personId: string; layerId: string }[] = []
+    for (const k of selected) {
+      const [personId, layerId] = k.split('::')
+      items.push({ personId, layerId })
+    }
+
+    // Optimistic update
+    setExclusions(prev => {
+      const next = [...prev]
+      for (const { personId, layerId } of items) {
+        const idx = next.findIndex(e => e.personId === personId && e.layerId === layerId)
+        if (mode === 'remove' && idx === -1) next.push({ personId, layerId })
+        if (mode === 'restore' && idx !== -1) next.splice(idx, 1)
+      }
+      return next
+    })
+    clearSelection()
+
+    try {
+      await Promise.all(items.map(({ personId, layerId }) =>
+        fetch('/api/tree', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: mode === 'remove' ? 'exclude_person' : 'include_person',
+            person_id: personId,
+            layer_id: layerId,
+          }),
+        }).then(r => { if (!r.ok) throw new Error() })
+      ))
+    } catch (err) {
+      console.error('Bulk', mode, 'error:', err)
+      // Re-sync from server on failure
+      fetchData()
+    }
+  }
+
+  // Selection summary (how many are excluded vs active) for the action bar
+  const selectionSummary = (() => {
+    const exclSet = new Set(exclusions.map(e => `${e.personId}::${e.layerId}`))
+    let excludedCount = 0, activeCount = 0
+    for (const k of selected) {
+      if (exclSet.has(k)) excludedCount++; else activeCount++
+    }
+    return { excludedCount, activeCount, total: selected.size }
+  })()
+  // Escape exits edit mode / clears selection
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && selected.size > 0) clearSelection()
+      if (e.key !== 'Escape') return
+      if (selected.size > 0) clearSelection()
+      else if (editMode) setEditMode(false)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [selected])
-
-  const removePersonFromLayer = async (personId: string, layerId: string) => {
-    // Optimistic: hide immediately
-    setExclusions(prev => [...prev, { personId, layerId }])
-    setDeleteMode(null)
-    try {
-      const res = await fetch('/api/tree', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'exclude_person', person_id: personId, layer_id: layerId }),
-      })
-      if (!res.ok) throw new Error()
-    } catch (err) {
-      console.error('Exclude person error:', err)
-      // Roll back on failure
-      setExclusions(prev => prev.filter(e => !(e.personId === personId && e.layerId === layerId)))
-    }
-  }
+  }, [selected, editMode])
 
   const getLinkedList = (layerId: string): PcoList | null => {
     const link = listLayerLinks.find(ll => ll.layerId === layerId)
@@ -458,11 +475,28 @@ export default function ShepherdTreeV2() {
             }}>
             Manage Layers
           </button>
+          <button
+            onClick={() => { setEditMode(m => !m); if (editMode) clearSelection() }}
+            className="sans"
+            style={{
+              fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+              border: `1px solid ${editMode ? SELECT_OUTLINE : 'var(--border)'}`,
+              background: editMode ? `${SELECT_OUTLINE}22` : 'white',
+              color: editMode ? '#7a5a00' : 'var(--foreground)',
+              cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+            {editMode ? 'Done' : 'Edit'}
+          </button>
         </div>
       </div>
 
-      {/* ── Bands ── */}
-      <div>
+      {/* ── Bands: one shared horizontal scroller so columns align ── */}
+      <div style={{
+        overflowX: 'auto',
+        overflowY: 'hidden',
+        WebkitOverflowScrolling: 'touch',
+      }}>
+      <div style={{ minWidth: 'max-content' }}>
         {layers.map((layer, i) => {
           const people = getPeopleForLayer(layer.id)
           const linkedList = getLinkedList(layer.id)
@@ -496,7 +530,7 @@ export default function ShepherdTreeV2() {
                       </span>
                     )}
                   </div>
-                  {people.length > 0 && (() => {
+                  {editMode && people.length > 0 && (() => {
                     const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
                     const allSelected = selCount === people.length
                     return (
@@ -518,15 +552,12 @@ export default function ShepherdTreeV2() {
                   })()}
                 </div>
 
-                {/* People cards + placeholder — horizontal scroll */}
+                {/* People cards + placeholder — row lays out in full width; tree scrolls as a whole */}
                 <div style={{
                   display: 'flex', flexWrap: 'nowrap', gap: 8,
                   alignItems: 'center',
                   minHeight: BAND_HEIGHT - 56,
-                  overflowX: 'auto', overflowY: 'hidden',
-                  paddingBottom: 6,
-                  scrollbarWidth: 'thin',
-                  WebkitOverflowScrolling: 'touch',
+                  width: 'max-content',
                   ...(people.length === 0 ? { justifyContent: 'center' } : {}),
                 }}>
                   {people.map(person => {
@@ -537,70 +568,57 @@ export default function ShepherdTreeV2() {
                       ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
                     ]
                     const isSelected = selected.has(selKey(person.id, layer.id))
-                    const isDeleting = deleteMode?.personId === person.id && deleteMode?.layerId === layer.id
+                    const isExcluded = person.isExcluded
                     return (
                       <div
                         key={person.id}
-                        title={`${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
-                        onMouseDown={e => { if (e.button === 0) startLongPress(person.id, layer.id) }}
-                        onMouseUp={cancelLongPress}
-                        onMouseLeave={cancelLongPress}
-                        onTouchStart={() => startLongPress(person.id, layer.id)}
-                        onTouchEnd={cancelLongPress}
-                        onTouchCancel={cancelLongPress}
+                        title={isExcluded
+                          ? `${person.name} — hidden from ${layer.name}. Click to select, then "Restore" to bring back.`
+                          : `${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
                         onClick={e => {
                           e.stopPropagation()
                           handleCardClick(e, person.id, layer.id, people)
                         }}
-                        onContextMenu={e => { e.preventDefault(); setDeleteMode({ personId: person.id, layerId: layer.id }) }}
                         style={{
                           position: 'relative',
                           width: 210, height: 96,
                           padding: '10px 12px',
                           borderRadius: 12,
-                          background: 'white',
-                          border: isDeleting
-                            ? `1px solid #c0392b`
-                            : isSelected
-                              ? `2px solid ${SELECT_OUTLINE}`
+                          background: isExcluded ? 'rgba(255,255,255,0.55)' : 'white',
+                          border: isSelected
+                            ? `2px solid ${SELECT_OUTLINE}`
+                            : isExcluded
+                              ? `1px dashed ${layer.color.label}55`
                               : `1px solid ${layer.color.label}22`,
                           outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
                           outlineOffset: isSelected ? 1 : undefined,
-                          boxShadow: isDeleting
-                            ? '0 2px 10px rgba(192,57,43,0.2)'
-                            : isSelected
-                              ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                          boxShadow: isSelected
+                            ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                            : isExcluded
+                              ? 'none'
                               : '0 1px 4px rgba(0,0,0,0.06)',
+                          opacity: isExcluded ? 0.5 : 1,
                           display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
                           boxSizing: 'border-box',
                           flexShrink: 0,
                           userSelect: 'none',
                           WebkitUserSelect: 'none',
-                          cursor: 'pointer',
-                          transition: 'box-shadow 0.15s, border-color 0.15s',
-                          // Compensate for 2px vs 1px border so size stays 210x96 in layout
+                          cursor: editMode ? 'pointer' : 'default',
+                          transition: 'box-shadow 0.15s, border-color 0.15s, opacity 0.15s',
                           margin: isSelected ? -1 : 0,
                         }}
                       >
-                        {/* Remove X (shown after long-press) */}
-                        {deleteMode?.personId === person.id && deleteMode?.layerId === layer.id && (
-                          <button
-                            onClick={e => { e.stopPropagation(); removePersonFromLayer(person.id, layer.id) }}
+                        {isExcluded && (
+                          <div
                             className="sans"
-                            title={`Remove ${person.name} from ${layer.name}`}
                             style={{
-                              position: 'absolute', top: -8, right: -8,
-                              width: 22, height: 22, borderRadius: 11,
-                              background: '#c0392b', color: 'white',
-                              border: '2px solid white',
-                              fontSize: 13, fontWeight: 700, lineHeight: 1,
-                              cursor: 'pointer',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-                              padding: 0,
-                              zIndex: 2,
+                              position: 'absolute', top: 6, right: 8,
+                              fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                              color: '#c0392b', textTransform: 'uppercase',
                             }}
-                          >×</button>
+                          >
+                            hidden
+                          </div>
                         )}
                         {/* Name */}
                         <div
@@ -609,6 +627,8 @@ export default function ShepherdTreeV2() {
                             fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
                             lineHeight: 1.2, whiteSpace: 'nowrap',
                             overflow: 'hidden', textOverflow: 'ellipsis',
+                            textDecoration: isExcluded ? 'line-through' : 'none',
+                            paddingRight: isExcluded ? 46 : 0,
                           }}
                         >
                           {person.name}
@@ -689,6 +709,63 @@ export default function ShepherdTreeV2() {
           )
         })}
       </div>
+      </div>
+
+      {/* ── Floating action bar (edit mode, selection > 0) ── */}
+      {editMode && selected.size > 0 && (
+        <div
+          className="sans"
+          style={{
+            position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+            zIndex: 40,
+            background: 'white', borderRadius: 12,
+            border: `1px solid ${SELECT_OUTLINE}`,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+            padding: '8px 10px',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}
+        >
+          <span style={{ fontSize: 12, fontWeight: 600, color: '#7a5a00', padding: '0 6px' }}>
+            {selected.size} selected
+            {selectionSummary.excludedCount > 0 && (
+              <span style={{ fontWeight: 400, color: 'var(--muted-foreground)', marginLeft: 6 }}>
+                ({selectionSummary.activeCount} active, {selectionSummary.excludedCount} hidden)
+              </span>
+            )}
+          </span>
+          {selectionSummary.activeCount > 0 && (
+            <button
+              onClick={() => applyToSelection('remove')}
+              style={{
+                fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                border: '1px solid #c0392b44', background: 'white', color: '#c0392b',
+                cursor: 'pointer',
+              }}>
+              Remove {selectionSummary.activeCount > 1 ? `(${selectionSummary.activeCount})` : ''}
+            </button>
+          )}
+          {selectionSummary.excludedCount > 0 && (
+            <button
+              onClick={() => applyToSelection('restore')}
+              style={{
+                fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                border: '1px solid #2a6a3a44', background: 'white', color: '#2a6a3a',
+                cursor: 'pointer',
+              }}>
+              Restore {selectionSummary.excludedCount > 1 ? `(${selectionSummary.excludedCount})` : ''}
+            </button>
+          )}
+          <button
+            onClick={clearSelection}
+            style={{
+              fontSize: 12, fontWeight: 500, padding: '6px 10px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)',
+              cursor: 'pointer',
+            }}>
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* ═══════════════════════════════════════════════════════════
           MODAL: Assign List — pick a layer, then a list
