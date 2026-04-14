@@ -1090,6 +1090,60 @@ export default function ShepherdTree() {
     return result.sort((a, b) => a.name.localeCompare(b.name))
   }, [allNodes])
 
+  // ── Colored bands: group nodes by layer category, compute Y ranges ──
+  const BAND_COLORS: Record<string, string> = {
+    elder: 'rgba(234, 222, 140, 0.18)',    // yellow
+    staff: 'rgba(147, 180, 220, 0.18)',    // blue
+    volunteer: 'rgba(140, 210, 160, 0.18)', // green
+  }
+  const BAND_LABEL_COLORS: Record<string, string> = {
+    elder: '#8a7a20',
+    staff: '#3b6ea5',
+    volunteer: '#3a7a4a',
+  }
+  const layerBands = useMemo(() => {
+    if (nodes.length === 0) return []
+    // Map layerId → category from layers state
+    const layerCatMap = new Map(layers.map(l => [l.id, l.category]))
+    // Group nodes by Y position and determine the category at each Y
+    const yCategories = new Map<number, { category: string; layerName: string }>()
+    for (const n of nodes) {
+      if (n.isBridge) continue
+      const cat = n.layerCategory || (n.layerId ? layerCatMap.get(n.layerId) : null)
+      if (!cat) continue
+      const existing = yCategories.get(n.y)
+      if (!existing) {
+        yCategories.set(n.y, { category: cat, layerName: n.contextLabel?.split(' · ')[0] || cat })
+      }
+    }
+    if (yCategories.size === 0) return []
+    // Compute tree extent
+    const allX = nodes.map(n => n.x)
+    const minX = Math.min(...allX) - NODE_W
+    const maxX = Math.max(...allX) + NODE_W
+    const treeWidth = maxX - minX + NODE_W * 2
+    // Build bands: merge adjacent Y levels with same category
+    const yLevels = [...yCategories.entries()].sort((a, b) => a[0] - b[0])
+    const bands: { y: number; height: number; category: string; label: string; x: number; width: number }[] = []
+    const BAND_PAD = V_GAP / 2
+    for (let i = 0; i < yLevels.length; i++) {
+      const [y, { category, layerName }] = yLevels[i]
+      const top = y - BAND_PAD
+      // Find bottom: either halfway to next Y level, or NODE_H + padding
+      const nextY = i < yLevels.length - 1 ? yLevels[i + 1][0] : y + NODE_H + BAND_PAD * 2
+      const bottom = i < yLevels.length - 1
+        ? y + (nextY - y) / 2
+        : y + NODE_H + BAND_PAD
+      // Merge with previous band if same category
+      if (bands.length > 0 && bands[bands.length - 1].category === category) {
+        bands[bands.length - 1].height = bottom - bands[bands.length - 1].y
+      } else {
+        bands.push({ y: top, height: bottom - top, category, label: layerName, x: minX - NODE_W, width: treeWidth + NODE_W * 2 })
+      }
+    }
+    return bands
+  }, [nodes, layers])
+
   // ── Render states ────────────────────────────────────────────
 
   if (loading) return (
@@ -1225,6 +1279,19 @@ export default function ShepherdTree() {
           <rect width="100%" height="100%" fill="url(#grid)" />
 
           <g transform={`translate(${(svgRef.current?.clientWidth ?? 800) / 2 + transform.x * transform.scale}, ${transform.y}) scale(${transform.scale})`}>
+            {/* Layer bands */}
+            {layerBands.map((band, i) => (
+              <g key={`band-${i}`}>
+                <rect x={band.x} y={band.y} width={band.width} height={band.height}
+                  fill={BAND_COLORS[band.category] || 'rgba(200,200,200,0.1)'} rx={8} />
+                <text x={band.x + 12} y={band.y + 18}
+                  fontSize={11} fontWeight="600" fontFamily="system-ui" letterSpacing="0.5"
+                  fill={BAND_LABEL_COLORS[band.category] || '#888'} opacity="0.7">
+                  {band.label.toUpperCase()}
+                </text>
+              </g>
+            ))}
+
             {/* Edges */}
             {edges.map(({ from, to }) => {
               let fx = from.x, fy = from.y + NODE_H

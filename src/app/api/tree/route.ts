@@ -360,24 +360,15 @@ export async function GET() {
       }
     }
 
-    // Auto-assign: only the TOP staff layer (Shepherd Team) → under Lead Pastor
-    // Secondary staff layers: excluded from tree until manually assigned
-    if (!supervisorId && !person.is_lead_pastor && layer.category === 'staff') {
-      if (firstStaffLayer && layer.id === firstStaffLayer.id && leadPastorNodeId) {
+    // Auto-assign: only the TOP staff layer → under Lead Pastor
+    // All other unconnected staff/volunteers: excluded from tree (bottom panel only)
+    if (!supervisorId && !person.is_lead_pastor && layer.category !== 'elder') {
+      if (layer.category === 'staff' && firstStaffLayer && layer.id === firstStaffLayer.id && leadPastorNodeId) {
+        // Top staff layer → auto under Lead Pastor
         supervisorId = leadPastorNodeId
       } else {
-        // Secondary staff with no supervisor — bottom panel only
+        // Any other staff or volunteer without a supervisor → not in tree
         continue
-      }
-    }
-
-    // Volunteers without supervisor → pool under first staff (or staff placeholder)
-    if (!supervisorId && !person.is_lead_pastor && layer.category === 'volunteer') {
-      isUnconnected = true
-      if (firstStaffAssignment) {
-        supervisorId = `${firstStaffAssignment.person_id}::layer-${firstStaffAssignment.layer_id}`
-      } else {
-        supervisorId = firstStaffLayer ? `placeholder-${firstStaffLayer.id}` : null
       }
     }
 
@@ -405,21 +396,18 @@ export async function GET() {
 
   // ── Add placeholder nodes ─────────────────────────────────────
   //
-  // Rules:
-  //  1. Layer-level placeholders: one per layer (to show empty layers)
-  //     - Elder placeholder: root level
-  //     - Staff placeholder: under Lead Pastor (or elder placeholder if no LP)
-  //     - Volunteer placeholder: under first staff (or staff placeholder)
-  //  2. Per-person placeholders: Lead Pastor and every Staff member
-  //     ALWAYS get a "+" child node, even if they already have children.
-  //     This lets admins add reports under any staff/LP.
-  //  3. Non-LP elders do NOT get children in the manual hierarchy.
+  // Design (from user diagrams):
+  //  - Lead Pastor → ONE placeholder for top staff layer
+  //  - Each staff member → ONE placeholder for the next layer below
+  //  - Each volunteer (on layers with more layers below) → ONE placeholder
+  //  - Non-LP elders → NO placeholder
+  //  - If a layer is completely empty AND is elder or top staff → layer-level placeholder
   //
 
   const mkPlaceholder = (id: string, label: string, layerId: string, layerCategory: string, supervisorId: string | null, supervisorPersonId?: string) => ({
     id,
     personId: undefined,
-    name: `+ Add ${label}`,
+    name: `+ ${label}`,
     role: 'shepherd' as const,
     supervisorId,
     flockCount: 0,
@@ -438,71 +426,57 @@ export async function GET() {
     placeholderSupervisorPersonId: supervisorPersonId || null,
   })
 
-  // Layer-level placeholders: only for layers with NO assigned people
-  // Only create placeholders that have a valid parent in the tree
+  // Layer-level placeholders: only for empty elder or empty top-staff layer
   for (const layer of sortedLayers) {
     const hasAssignments = (assignmentsByLayer.get(layer.id) || []).length > 0
-    if (hasAssignments) continue // people exist on this layer, no placeholder needed
+    if (hasAssignments) continue
 
     if (layer.category === 'elder') {
-      // Elder placeholder: root level (always valid)
       nodes.push(mkPlaceholder(
         `placeholder-${layer.id}`, layer.name, layer.id, layer.category, null,
       ))
-    } else if (layer.category === 'staff' && layer.id === firstStaffLayer?.id) {
-      // Top staff layer placeholder: under Lead Pastor (only if LP exists)
-      if (leadPastorNodeId) {
-        nodes.push(mkPlaceholder(
-          `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
-          leadPastorNodeId,
-        ))
-      }
+    } else if (layer.category === 'staff' && layer.id === firstStaffLayer?.id && leadPastorNodeId) {
+      nodes.push(mkPlaceholder(
+        `placeholder-${layer.id}`, layer.name, layer.id, layer.category,
+        leadPastorNodeId,
+      ))
     }
-    // Secondary staff and volunteer layer-level placeholders: NOT created
-    // They appear via per-person placeholders under their respective parents
   }
 
-  // Per-person placeholders:
-  //  - Lead Pastor → placeholder for staff (Shepherd Team) layer
-  //  - Staff members → placeholder for first volunteer layer below them
-  //  - Non-LP elders → NO placeholder (they don't manage direct reports)
+  // Per-person placeholders: everyone with layers below gets ONE "+" child
   for (const a of (assignments || []) as AssignmentRow[]) {
     const layer = layerMap.get(a.layer_id)
     if (!layer) continue
     const person = personMap.get(a.person_id)
-    const isLP = !!person?.is_lead_pastor
-    const isStaff = layer.category === 'staff'
+    if (!person) continue
 
+    const isLP = !!person.is_lead_pastor
+    const isNonLPElder = layer.category === 'elder' && !isLP
+
+    // Non-LP elders don't get placeholders
+    if (isNonLPElder) continue
+
+    // Find the next layer below this person's layer rank
+    let targetLayer: typeof sortedLayers[0] | undefined
     if (isLP) {
-      // Lead Pastor → placeholder for Shepherd Team (staff layer)
-      const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
-      const staffLayer = sortedLayers.find(l => l.category === 'staff')
-      if (staffLayer) {
-        nodes.push(mkPlaceholder(
-          `placeholder-under-${a.person_id}`,
-          staffLayer.name,
-          staffLayer.id,
-          staffLayer.category,
-          parentNodeId,
-          a.person_id,
-        ))
-      }
-    } else if (isStaff) {
-      // Staff → placeholder for next layer below (could be secondary staff or volunteer)
-      const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
-      const nextLayer = sortedLayers.find(l => l.rank > layer.rank)
-      if (nextLayer) {
-        nodes.push(mkPlaceholder(
-          `placeholder-under-${a.person_id}`,
-          nextLayer.name,
-          nextLayer.id,
-          nextLayer.category,
-          parentNodeId,
-          a.person_id,
-        ))
-      }
+      // Lead Pastor → top staff layer
+      targetLayer = sortedLayers.find(l => l.category === 'staff')
+    } else {
+      // Staff or volunteer → next layer by rank
+      targetLayer = sortedLayers.find(l => l.rank > layer.rank)
     }
-    // Non-LP elders: no placeholder
+
+    if (!targetLayer) continue
+
+    const parentNodeId = `${a.person_id}::layer-${a.layer_id}`
+    nodes.push(mkPlaceholder(
+      `placeholder-under-${a.person_id}`,
+      targetLayer.name,
+      targetLayer.id,
+      targetLayer.category,
+      parentNodeId,
+      a.person_id,
+    ))
   }
 
   // ── Bridge nodes: align same-layer people to same visual depth ──
