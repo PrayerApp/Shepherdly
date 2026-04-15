@@ -101,16 +101,8 @@ const BUCKET_COLOR_PALETTE: { bg: string; fg: string }[] = [
   { bg: 'rgba(190, 100, 100, 0.18)', fg: '#8a3a3a' }, // rose
   { bg: 'rgba(60, 160, 160, 0.18)', fg: '#2a7a7a' },  // teal
 ]
-function bucketColors(b: MetricBucket, idx: number): { bg: string; fg: string } {
-  if (b.color) {
-    // Treat as the fg; derive a soft bg from 14% alpha
-    const hex = b.color.replace('#', '')
-    const n = parseInt(hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex, 16)
-    if (!Number.isNaN(n) && hex.length >= 3) {
-      const r = (n >> 16) & 255, g = (n >> 8) & 255, bb = n & 255
-      return { bg: `rgba(${r},${g},${bb},0.16)`, fg: b.color }
-    }
-  }
+function bucketColors(_b: MetricBucket, idx: number): { bg: string; fg: string } {
+  // Colors are auto-assigned by position to keep the palette consistent.
   return BUCKET_COLOR_PALETTE[idx % BUCKET_COLOR_PALETTE.length]
 }
 
@@ -144,7 +136,7 @@ const CARD_WIDTH = 210
 const CARD_HEIGHT = 96
 const CARD_GAP = 8
 const UNIT = CARD_WIDTH + CARD_GAP
-const BAND_PADDING_LEFT = 16
+const BAND_PADDING_LEFT = 44 // leaves room for the vertical layer label on the left
 const CARD_TOP_OFFSET = 40 // cards start below the layer label
 const LINE_COLOR = 'rgba(0,0,0,0.25)'
 const LINE_COLOR_HOVER = '#7a5a00'
@@ -239,13 +231,13 @@ export default function ShepherdTreeV2() {
 
   // Bucket editor modal
   const [bucketsOpen, setBucketsOpen] = useState(false)
-  type BucketDraft = { id?: string; label: string; fullName: string; color: string; layerIds: Set<string> }
+  type BucketDraft = { id?: string; label: string; fullName: string; layerIds: Set<string> }
   const [bucketDrafts, setBucketDrafts] = useState<BucketDraft[]>([])
   const [bucketsSaving, setBucketsSaving] = useState(false)
 
   const openBuckets = () => {
     setBucketDrafts(metricBuckets.map(b => ({
-      id: b.id, label: b.label, fullName: b.fullName, color: b.color || '',
+      id: b.id, label: b.label, fullName: b.fullName,
       layerIds: new Set(b.layerIds),
     })))
     setBucketsOpen(true)
@@ -269,7 +261,7 @@ export default function ShepherdTreeV2() {
           action: 'save_buckets',
           buckets: bucketDrafts.map((d, i) => ({
             label: d.label.trim(), fullName: d.fullName.trim(),
-            color: d.color || null, sortOrder: i, layerIds: [...d.layerIds],
+            color: null, sortOrder: i, layerIds: [...d.layerIds],
           })),
         }),
       })
@@ -1038,61 +1030,75 @@ export default function ShepherdTreeV2() {
             height: totalTreeHeight,
             minWidth: '100%',
           }}>
-          {/* Layer backgrounds + labels */}
+          {/* Layer backgrounds */}
+          {sortedLayers.map((layer, i) => (
+            <div
+              key={`band-${layer.id}`}
+              onClick={e => { if (e.target === e.currentTarget) clearSelection() }}
+              style={{
+                position: 'absolute',
+                top: bandTop(i), left: 0,
+                width: totalTreeWidth,
+                height: BAND_HEIGHT,
+                background: layer.color.bg,
+              }}
+            />
+          ))}
+
+          {/* Vertical layer labels, sticky to the viewport's left edge */}
           {sortedLayers.map((layer, i) => {
             const people = peopleByLayer.get(layer.id) || []
-            const linkedList = getLinkedList(layer.id)
             const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
             return (
               <div
-                key={`band-${layer.id}`}
-                onClick={e => { if (e.target === e.currentTarget) clearSelection() }}
+                key={`label-${layer.id}`}
                 style={{
-                  position: 'absolute',
-                  top: bandTop(i), left: 0,
-                  width: totalTreeWidth,
-                  height: BAND_HEIGHT,
-                  background: layer.color.bg,
-                  borderTop: i > 0 ? '2px dashed rgba(0,0,0,0.15)' : 'none',
+                  position: 'sticky', left: 0, top: 0,
+                  width: 0, // doesn't take layout width; children absolutely positioned
+                  height: 0,
+                  zIndex: 3,
                 }}
               >
-                {/* Layer label (sticky to the left edge of the viewport) */}
-                <div style={{
-                  position: 'sticky', left: 16, top: 0,
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '12px 0 0', gap: 8, zIndex: 1, userSelect: 'none',
-                }}>
-                  <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
-                    {layer.name.toUpperCase()}
-                    {linkedList && (
-                      <span style={{ fontWeight: 500, letterSpacing: 0, marginLeft: 8, fontSize: 10, opacity: 0.7 }}>
-                        — {linkedList.name.replace(/^REFERENCE\s*[-–—:]\s*/i, '')}
-                        <button
-                          onClick={e => { e.stopPropagation(); unassignList(linkedList.id) }}
-                          disabled={assignBusy}
-                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, color: '#8a3a3a', lineHeight: 1, padding: '0 0 0 4px', verticalAlign: 'middle' }}
-                          title="Unlink list"
-                        >×</button>
-                      </span>
-                    )}
-                  </div>
-                  {(editMode || connectMode) && people.length > 0 && (
-                    <button
-                      onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
-                      className="sans"
-                      style={{
-                        marginLeft: 12,
-                        fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
-                        padding: '4px 8px', borderRadius: 6,
-                        border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
-                        background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
-                        color: selCount > 0 ? '#7a5a00' : layer.color.label,
-                        cursor: 'pointer', whiteSpace: 'nowrap',
-                      }}>
-                      {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
-                    </button>
-                  )}
+                {/* Vertical name */}
+                <div
+                  className="sans"
+                  style={{
+                    position: 'absolute',
+                    left: 8,
+                    top: bandTop(i) + 12,
+                    height: BAND_HEIGHT - 24,
+                    width: 20,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    writingMode: 'vertical-rl',
+                    transform: 'rotate(180deg)',
+                    fontSize: 12, fontWeight: 800, letterSpacing: 2,
+                    color: layer.color.label,
+                    userSelect: 'none',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}
+                  title={layer.name}
+                >
+                  {layer.name.toUpperCase()}
                 </div>
+                {/* SELECT ALL (only in edit/connect modes) */}
+                {(editMode || connectMode) && people.length > 0 && (
+                  <button
+                    onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
+                    className="sans"
+                    style={{
+                      position: 'absolute',
+                      left: 34, top: bandTop(i) + 10,
+                      fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+                      padding: '3px 8px', borderRadius: 6,
+                      border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
+                      background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                      color: selCount > 0 ? '#7a5a00' : layer.color.label,
+                      cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}>
+                    {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                  </button>
+                )}
               </div>
             )
           })}
@@ -1870,7 +1876,8 @@ export default function ShepherdTreeV2() {
               )}
 
               {bucketDrafts.map((d, idx) => {
-                const col = bucketColors({ id: '', label: d.label, fullName: d.fullName, color: d.color || null, sortOrder: idx, layerIds: [] }, idx)
+                // Color is auto-assigned from the palette by position.
+                const col = bucketColors({ id: '', label: d.label, fullName: d.fullName, color: null, sortOrder: idx, layerIds: [] }, idx)
                 return (
                   <div key={idx} style={{
                     border: '1px solid var(--border)', borderRadius: 10, padding: 12,
@@ -1892,13 +1899,6 @@ export default function ShepherdTreeV2() {
                         placeholder="Staff"
                         className="sans"
                         style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 13 }}
-                      />
-                      <input
-                        type="color"
-                        value={d.color || '#5a2e87'}
-                        onChange={e => setBucketDrafts(v => { const nv = [...v]; nv[idx] = { ...nv[idx], color: e.target.value }; return nv })}
-                        title="Bucket color"
-                        style={{ width: 32, height: 32, padding: 0, border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer' }}
                       />
                       <button
                         onClick={() => setBucketDrafts(v => v.filter((_, i) => i !== idx))}
@@ -1948,7 +1948,7 @@ export default function ShepherdTreeV2() {
               })}
 
               <button
-                onClick={() => setBucketDrafts(v => [...v, { label: '', fullName: '', color: '', layerIds: new Set() }])}
+                onClick={() => setBucketDrafts(v => [...v, { label: '', fullName: '', layerIds: new Set() }])}
                 className="sans"
                 style={{
                   marginTop: 4, width: '100%',
