@@ -1017,6 +1017,7 @@ export async function GET() {
       }
       const rows: Row[] = []
       const seen = new Set<string>() // layerId::personId::role::contextKind::contextId
+      const leaderRe = /leader|co.?leader/i
       for (const m of (gtMappings || []) as { id: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null }[]) {
         const items = (gtMappingItems || []).filter((it: { mapping_id: string }) => it.mapping_id === m.id).map((it: { item_id: string }) => it.item_id)
         if (items.length === 0) continue
@@ -1024,16 +1025,29 @@ export async function GET() {
         if (m.kind === 'groups') {
           for (const gid of items) {
             const members = groupMembers.get(gid) || []
-            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role, contextKind: 'group', contextId: gid })
+            // Skip MEMBER entries for groups with no leader — those members
+            // would render as cards with no incoming edges, which is noise.
+            // Leaders themselves always pass through.
+            const hasLeader = members.some(x => leaderRe.test(x.role || ''))
+            for (const mm of members) {
+              const isLeader = leaderRe.test(mm.role || '')
+              if (!isLeader && !hasLeader) continue
+              pool.push({ personId: mm.personId, role: mm.role, contextKind: 'group', contextId: gid })
+            }
           }
         } else if (m.kind === 'teams') {
           for (const tid of items) {
             const members = teamMembers.get(tid) || []
-            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role, contextKind: 'team', contextId: tid })
+            const hasLeader = members.some(x => leaderRe.test(x.role || ''))
+            for (const mm of members) {
+              const isLeader = leaderRe.test(mm.role || '')
+              if (!isLeader && !hasLeader) continue
+              pool.push({ personId: mm.personId, role: mm.role, contextKind: 'team', contextId: tid })
+            }
           }
         }
         for (const mm of pool) {
-          const isLeader = /leader|co.?leader/i.test(mm.role || '')
+          const isLeader = leaderRe.test(mm.role || '')
           const layerId = isLeader ? m.leader_layer_id : m.member_layer_id
           if (!layerId) continue
           const role: 'leader' | 'member' = isLeader ? 'leader' : 'member'
