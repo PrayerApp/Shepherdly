@@ -152,6 +152,14 @@ export async function GET(request: NextRequest) {
       console.error('Cron: analytics refresh failed:', e)
     }
 
+    // Post-sync: regenerate auto-connect tree edges
+    try {
+      const { regenerateAutoConnectEdgesForChurch } = await import('@/lib/tree-auto-connect')
+      await regenerateAutoConnectEdgesForChurch(admin, churchId!)
+    } catch (e) {
+      console.error('Cron: auto-connect refresh failed:', e)
+    }
+
     // Mark success
     await admin.from('pco_sync_log').update({
       status: 'success',

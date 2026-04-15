@@ -451,6 +451,16 @@ export async function POST(request: NextRequest) {
         } catch (e) {
           console.error('Post-sync analytics refresh failed:', e)
         }
+
+        // Post-sync: regenerate auto-connect tree edges for every mapping
+        // in this church so leader/member connections stay in sync with
+        // the freshly synced PCO group/team memberships.
+        try {
+          const { regenerateAutoConnectEdgesForChurch } = await import('@/lib/tree-auto-connect')
+          await regenerateAutoConnectEdgesForChurch(admin, churchId!)
+        } catch (e) {
+          console.error('Post-sync auto-connect refresh failed:', e)
+        }
       }
       return NextResponse.json({ success: true })
     }

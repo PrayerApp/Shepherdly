@@ -283,8 +283,9 @@ export default function ShepherdTreeV2() {
         }),
       })
       if (!res.ok) throw new Error()
-      setBucketsOpen(false)
+      // Fetch first so reopening the modal never shows stale data.
       await fetchData()
+      setBucketsOpen(false)
     } catch (err) {
       console.error('Save buckets error:', err)
     } finally {
@@ -643,8 +644,9 @@ export default function ShepherdTreeV2() {
         }),
       })
       if (!res.ok) throw new Error()
-      setModalOpen(false)
+      // Refetch before closing so reopening the modal never shows stale data.
       await fetchData()
+      setModalOpen(false)
     } catch (err) {
       console.error('Save layers error:', err)
     } finally {
@@ -695,9 +697,9 @@ export default function ShepherdTreeV2() {
         body: JSON.stringify({ action: 'link_list', list_id: list.id, layer_id: layerId }),
       })
       if (!res.ok) throw new Error()
+      await fetchData()
       setAssignModalOpen(false)
       setAssignSelectedLayerId(null)
-      await fetchData()
     } catch (err) {
       console.error('Link list error:', err)
     } finally {
@@ -727,8 +729,8 @@ export default function ShepherdTreeV2() {
         }),
       })
       if (!res.ok) throw new Error()
-      setMappingDraft(null)
       await fetchData()
+      setMappingDraft(null)
     } catch (err) {
       console.error('Save mapping error:', err)
     } finally {
@@ -1288,6 +1290,25 @@ export default function ShepherdTreeV2() {
                   width: 0, height: 0, zIndex: 3,
                 }}
               >
+                {/* Solid backdrop for the whole label column so cards
+                    scrolling beneath the sticky label can't show through. */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: 0,
+                    top: bandTop(i),
+                    width: BAND_PADDING_LEFT,
+                    height: BAND_HEIGHT,
+                    // Stack the translucent layer tint over solid white to
+                    // produce an opaque version of the band color.
+                    backgroundColor: 'white',
+                    backgroundImage: `linear-gradient(${layer.color.bg}, ${layer.color.bg})`,
+                    // A soft right edge so the label column doesn't feel
+                    // pasted on top of the cards area.
+                    boxShadow: '2px 0 4px rgba(0,0,0,0.04)',
+                  }}
+                />
+
                 {/* Vertical label column (text only; SELECT ALL chip sits above it) */}
                 <div
                   className="sans"

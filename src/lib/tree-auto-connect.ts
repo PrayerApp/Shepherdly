@@ -1,0 +1,99 @@
+// Regenerate mapping-owned tree_connections for a church.
+//
+// For every group_team_layer_mappings row with auto_connect = true in the
+// given church, wipes its previously-owned tree_connections
+// (source_mapping_id = mapping.id) and re-creates one edge per
+// (leader, member) pair found in that mapping's selected groups/teams.
+//
+// Safe to call from any post-sync hook or from save_gt_mapping. Manual
+// connections (source_mapping_id IS NULL) are never touched.
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+export async function regenerateAutoConnectEdgesForChurch(
+  admin: any,
+  churchId: string,
+): Promise<{ mappings: number; edges: number }> {
+  const { data: mappings } = await admin
+    .from('group_team_layer_mappings')
+    .select('id, kind, leader_layer_id, member_layer_id, auto_connect')
+    .eq('church_id', churchId)
+    .eq('auto_connect', true)
+
+  if (!mappings || mappings.length === 0) return { mappings: 0, edges: 0 }
+
+  // Layer rank lookup (to guard against inverted pairs)
+  const { data: layers } = await admin
+    .from('tree_layers').select('id, rank').eq('church_id', churchId)
+  const rankMap = new Map<string, number>((layers || []).map((l: any) => [l.id as string, l.rank as number]))
+
+  let totalEdges = 0
+  for (const m of mappings) {
+    // Always wipe mapping-owned edges first so toggles/item changes
+    // picked up elsewhere stay in sync.
+    await admin.from('tree_connections').delete().eq('source_mapping_id', m.id)
+
+    if (!m.leader_layer_id || !m.member_layer_id) continue
+    const lRank = rankMap.get(m.leader_layer_id)
+    const mRank = rankMap.get(m.member_layer_id)
+    if (lRank === undefined || mRank === undefined || lRank >= mRank) continue
+
+    const { data: items } = await admin
+      .from('group_team_layer_mapping_items')
+      .select('item_id').eq('mapping_id', m.id).eq('church_id', churchId)
+    const itemIds: string[] = (items || []).map((i: any) => i.item_id as string)
+    if (itemIds.length === 0) continue
+
+    const table = m.kind === 'groups' ? 'group_memberships' : 'team_memberships'
+    const fk = m.kind === 'groups' ? 'group_id' : 'team_id'
+    const { data: memberships } = await admin.from(table)
+      .select(`person_id, ${fk}, role, is_active`)
+      .eq('church_id', churchId)
+      .eq('is_active', true)
+      .in(fk, itemIds)
+      .range(0, 49999)
+
+    const byItem = new Map<string, { person_id: string; role: string | null }[]>()
+    for (const row of (memberships || []) as any[]) {
+      const iid = row[fk] as string
+      if (!byItem.has(iid)) byItem.set(iid, [])
+      byItem.get(iid)!.push({ person_id: row.person_id, role: row.role })
+    }
+
+    const leaderRe = /leader|co.?leader/i
+    const edges: any[] = []
+    const seen = new Set<string>()
+    for (const [, rows] of byItem) {
+      const leaders = rows.filter(r => leaderRe.test(r.role || '')).map(r => r.person_id)
+      const members = rows.filter(r => !leaderRe.test(r.role || '')).map(r => r.person_id)
+      if (leaders.length === 0 || members.length === 0) continue
+      for (const lid of leaders) {
+        for (const mid of members) {
+          if (lid === mid) continue
+          const k = `${lid}|${mid}`
+          if (seen.has(k)) continue
+          seen.add(k)
+          edges.push({
+            parent_person_id: lid,
+            parent_layer_id: m.leader_layer_id,
+            child_person_id: mid,
+            child_layer_id: m.member_layer_id,
+            church_id: churchId,
+            source_mapping_id: m.id,
+          })
+        }
+      }
+    }
+
+    for (let i = 0; i < edges.length; i += 500) {
+      const chunk = edges.slice(i, i + 500)
+      await admin.from('tree_connections').upsert(chunk, {
+        onConflict: 'parent_person_id,parent_layer_id,child_person_id,child_layer_id',
+        ignoreDuplicates: true,
+      })
+    }
+    totalEdges += edges.length
+  }
+
+  return { mappings: mappings.length, edges: totalEdges }
+}
