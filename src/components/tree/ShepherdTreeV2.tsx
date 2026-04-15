@@ -136,8 +136,8 @@ const CARD_WIDTH = 210
 const CARD_HEIGHT = 96
 const CARD_GAP = 8
 const UNIT = CARD_WIDTH + CARD_GAP
-const BAND_PADDING_LEFT = 44 // leaves room for the vertical layer label on the left
-const CARD_TOP_OFFSET = 40 // cards start below the layer label
+const BAND_PADDING_LEFT = 16
+const CARD_TOP_OFFSET = 46 // cards start below the layer label (gives the label breathing room)
 const LINE_COLOR = 'rgba(0,0,0,0.25)'
 const LINE_COLOR_HOVER = '#7a5a00'
 
@@ -1030,7 +1030,7 @@ export default function ShepherdTreeV2() {
             height: totalTreeHeight,
             minWidth: '100%',
           }}>
-          {/* Layer backgrounds */}
+          {/* Layer backgrounds + horizontal dashed divider */}
           {sortedLayers.map((layer, i) => (
             <div
               key={`band-${layer.id}`}
@@ -1041,11 +1041,12 @@ export default function ShepherdTreeV2() {
                 width: totalTreeWidth,
                 height: BAND_HEIGHT,
                 background: layer.color.bg,
+                borderTop: i > 0 ? '2px dashed rgba(0,0,0,0.15)' : 'none',
               }}
             />
           ))}
 
-          {/* Vertical layer labels, sticky to the viewport's left edge */}
+          {/* Horizontal layer labels + SELECT ALL, sticky to the viewport's left edge */}
           {sortedLayers.map((layer, i) => {
             const people = peopleByLayer.get(layer.id) || []
             const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
@@ -1054,51 +1055,42 @@ export default function ShepherdTreeV2() {
                 key={`label-${layer.id}`}
                 style={{
                   position: 'sticky', left: 0, top: 0,
-                  width: 0, // doesn't take layout width; children absolutely positioned
-                  height: 0,
-                  zIndex: 3,
+                  width: 0, height: 0, zIndex: 3,
                 }}
               >
-                {/* Vertical name */}
                 <div
-                  className="sans"
                   style={{
                     position: 'absolute',
-                    left: 8,
-                    top: bandTop(i) + 12,
-                    height: BAND_HEIGHT - 24,
-                    width: 20,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    writingMode: 'vertical-rl',
-                    transform: 'rotate(180deg)',
-                    fontSize: 12, fontWeight: 800, letterSpacing: 2,
-                    color: layer.color.label,
+                    left: 16, top: bandTop(i) + 14,
+                    display: 'inline-flex', alignItems: 'center', gap: 10,
                     userSelect: 'none',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden', textOverflow: 'ellipsis',
+                    // Soft background so the label stays legible over cards if
+                    // they happen to scroll under it.
+                    padding: '2px 8px 2px 0',
                   }}
-                  title={layer.name}
                 >
-                  {layer.name.toUpperCase()}
+                  <span className="sans" style={{
+                    fontSize: 12, fontWeight: 800, letterSpacing: 2,
+                    color: layer.color.label, whiteSpace: 'nowrap',
+                  }}>
+                    {layer.name.toUpperCase()}
+                  </span>
+                  {(editMode || connectMode) && people.length > 0 && (
+                    <button
+                      onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
+                      className="sans"
+                      style={{
+                        fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+                        padding: '3px 8px', borderRadius: 6,
+                        border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
+                        background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                        color: selCount > 0 ? '#7a5a00' : layer.color.label,
+                        cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}>
+                      {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                    </button>
+                  )}
                 </div>
-                {/* SELECT ALL (only in edit/connect modes) */}
-                {(editMode || connectMode) && people.length > 0 && (
-                  <button
-                    onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
-                    className="sans"
-                    style={{
-                      position: 'absolute',
-                      left: 34, top: bandTop(i) + 10,
-                      fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
-                      padding: '3px 8px', borderRadius: 6,
-                      border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
-                      background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
-                      color: selCount > 0 ? '#7a5a00' : layer.color.label,
-                      cursor: 'pointer', whiteSpace: 'nowrap',
-                    }}>
-                    {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
-                  </button>
-                )}
               </div>
             )
           })}
