@@ -59,6 +59,7 @@ interface GtMapping {
   kind: 'groups' | 'teams'
   leaderLayerId: string | null
   memberLayerId: string | null
+  autoConnect: boolean
   itemIds: string[]
 }
 
@@ -325,6 +326,7 @@ export default function ShepherdTreeV2() {
     kind: 'groups' | 'teams'
     leaderLayerId: string | null
     memberLayerId: string | null
+    autoConnect: boolean
     itemIds: Set<string>
     search: string
   } | null>(null)
@@ -544,15 +546,24 @@ export default function ShepherdTreeV2() {
     }
 
     // Optimistic update
-    setExclusions(prev => {
-      const next = [...prev]
-      for (const { personId, layerId } of items) {
-        const idx = next.findIndex(e => e.personId === personId && e.layerId === layerId)
-        if (mode === 'remove' && idx === -1) next.push({ personId, layerId })
-        if (mode === 'restore' && idx !== -1) next.splice(idx, 1)
-      }
-      return next
-    })
+    const inclusionKeys = new Set(inclusions.map(i => `${i.personId}::${i.layerId}`))
+    if (mode === 'remove') {
+      // For manually-added people: delete the inclusion locally.
+      setInclusions(prev => prev.filter(i => !items.some(it => it.personId === i.personId && it.layerId === i.layerId)))
+      // For everyone else: add an exclusion locally.
+      setExclusions(prev => {
+        const next = [...prev]
+        for (const { personId, layerId } of items) {
+          if (inclusionKeys.has(`${personId}::${layerId}`)) continue
+          const idx = next.findIndex(e => e.personId === personId && e.layerId === layerId)
+          if (idx === -1) next.push({ personId, layerId })
+        }
+        return next
+      })
+    } else {
+      // restore: simply drop matching exclusions
+      setExclusions(prev => prev.filter(e => !items.some(it => it.personId === e.personId && it.layerId === e.layerId)))
+    }
     clearSelection()
 
     try {
@@ -561,15 +572,16 @@ export default function ShepherdTreeV2() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: mode === 'remove' ? 'exclude_person' : 'include_person',
+            action: mode === 'remove' ? 'remove_person_from_layer' : 'include_person',
             person_id: personId,
             layer_id: layerId,
           }),
         }).then(r => { if (!r.ok) throw new Error() })
       ))
+      // Refetch so server-truthful state lands (stats, connections, etc.)
+      fetchData()
     } catch (err) {
       console.error('Bulk', mode, 'error:', err)
-      // Re-sync from server on failure
       fetchData()
     }
   }
@@ -711,6 +723,7 @@ export default function ShepherdTreeV2() {
           leader_layer_id: mappingDraft.leaderLayerId,
           member_layer_id: mappingDraft.memberLayerId,
           item_ids: [...mappingDraft.itemIds],
+          auto_connect: mappingDraft.autoConnect,
         }),
       })
       if (!res.ok) throw new Error()
@@ -1780,12 +1793,20 @@ export default function ShepherdTreeV2() {
                               {m.kind === 'groups' ? 'Groups' : 'Teams'} · {m.itemIds.length} selected
                               {leaderLayer && <>  ·  leaders → <b style={{ color: leaderLayer.color.label }}>{leaderLayer.name}</b></>}
                               {memberLayer && <>  ·  members → <b style={{ color: memberLayer.color.label }}>{memberLayer.name}</b></>}
+                              {m.autoConnect && (
+                                <span style={{
+                                  marginLeft: 8, padding: '1px 6px', borderRadius: 4,
+                                  background: 'rgba(45,96,71,0.10)', color: '#2a6a3a',
+                                  fontWeight: 700, letterSpacing: 0.5,
+                                }}>AUTO-CONNECT</span>
+                              )}
                             </div>
                           </div>
                           <button
                             onClick={() => setMappingDraft({
                               id: m.id, name: m.name, kind: m.kind,
                               leaderLayerId: m.leaderLayerId, memberLayerId: m.memberLayerId,
+                              autoConnect: m.autoConnect,
                               itemIds: new Set(m.itemIds), search: '',
                             })}
                             className="sans"
@@ -1808,6 +1829,7 @@ export default function ShepherdTreeV2() {
                     onClick={() => setMappingDraft({
                       name: '', kind: 'groups',
                       leaderLayerId: null, memberLayerId: null,
+                      autoConnect: false,
                       itemIds: new Set(), search: '',
                     })}
                     className="sans"
@@ -2339,6 +2361,7 @@ interface MappingDraft {
   kind: 'groups' | 'teams'
   leaderLayerId: string | null
   memberLayerId: string | null
+  autoConnect: boolean
   itemIds: Set<string>
   search: string
 }
@@ -2437,6 +2460,35 @@ function MappingEditor({
           layers={layers}
         />
       </div>
+
+      {/* Auto-connect toggle */}
+      <label
+        className="sans"
+        style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          padding: '10px 12px', marginBottom: 14, borderRadius: 8,
+          border: '1px solid var(--border)',
+          background: draft.autoConnect ? 'rgba(45,96,71,0.06)' : 'white',
+          cursor: (draft.leaderLayerId && draft.memberLayerId) ? 'pointer' : 'default',
+          opacity: (draft.leaderLayerId && draft.memberLayerId) ? 1 : 0.5,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={draft.autoConnect}
+          disabled={!draft.leaderLayerId || !draft.memberLayerId}
+          onChange={e => update({ autoConnect: e.target.checked })}
+          style={{ margin: '2px 0 0' }}
+        />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--foreground)' }}>
+            Auto-connect leaders → members
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2, lineHeight: 1.3 }}>
+            For every selected {draft.kind === 'groups' ? 'group' : 'team'}, draw a connection from each leader on the leaders layer to each member on the members layer. Groups with multiple leaders will wire members to all of them. Auto-connections are refreshed every time you save this mapping.
+          </div>
+        </div>
+      </label>
 
       {/* Item picker */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>

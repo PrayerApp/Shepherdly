@@ -186,7 +186,7 @@ export async function GET() {
     admin.from('tree_layer_inclusions').select('person_id, layer_id')
       .eq('church_id', churchId!),
     admin.from('group_team_layer_mappings')
-      .select('id, name, kind, leader_layer_id, member_layer_id')
+      .select('id, name, kind, leader_layer_id, member_layer_id, auto_connect')
       .eq('church_id', churchId!),
     admin.from('group_team_layer_mapping_items')
       .select('mapping_id, item_id')
@@ -969,12 +969,13 @@ export async function GET() {
       name: t.name || 'Untitled team',
       serviceTypeName: getServiceTypeName(t),
     })),
-    gtMappings: (gtMappings || []).map((m: { id: string; name: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null }) => ({
+    gtMappings: (gtMappings || []).map((m: { id: string; name: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null; auto_connect: boolean }) => ({
       id: m.id,
       name: m.name,
       kind: m.kind,
       leaderLayerId: m.leader_layer_id,
       memberLayerId: m.member_layer_id,
+      autoConnect: !!m.auto_connect,
       itemIds: (gtMappingItems || [])
         .filter((it: { mapping_id: string; item_id: string }) => it.mapping_id === m.id)
         .map((it: { mapping_id: string; item_id: string }) => it.item_id),
@@ -1358,7 +1359,7 @@ export async function POST(request: Request) {
 
   // ── Create or update a Group/Team → (leader, member) layer mapping ──
   if (body.action === 'save_gt_mapping') {
-    const { id, name, kind, leader_layer_id, member_layer_id, item_ids } = body
+    const { id, name, kind, leader_layer_id, member_layer_id, item_ids, auto_connect } = body
     if (!name || !kind || !['groups', 'teams'].includes(kind)) {
       return NextResponse.json({ error: 'name and kind (groups|teams) required' }, { status: 400 })
     }
@@ -1369,12 +1370,24 @@ export async function POST(request: Request) {
     let mappingId = id as string | undefined
     if (mappingId) {
       const { error: uErr } = await admin.from('group_team_layer_mappings')
-        .update({ name, kind, leader_layer_id: leader_layer_id || null, member_layer_id: member_layer_id || null, updated_at: new Date().toISOString() })
+        .update({
+          name, kind,
+          leader_layer_id: leader_layer_id || null,
+          member_layer_id: member_layer_id || null,
+          auto_connect: !!auto_connect,
+          updated_at: new Date().toISOString(),
+        })
         .eq('id', mappingId).eq('church_id', churchId!)
       if (uErr) return NextResponse.json({ error: uErr.message }, { status: 500 })
     } else {
       const { data: ins, error: iErr } = await admin.from('group_team_layer_mappings')
-        .insert({ name, kind, leader_layer_id: leader_layer_id || null, member_layer_id: member_layer_id || null, church_id: churchId })
+        .insert({
+          name, kind,
+          leader_layer_id: leader_layer_id || null,
+          member_layer_id: member_layer_id || null,
+          auto_connect: !!auto_connect,
+          church_id: churchId,
+        })
         .select().single()
       if (iErr) return NextResponse.json({ error: iErr.message }, { status: 500 })
       mappingId = ins.id
@@ -1387,6 +1400,68 @@ export async function POST(request: Request) {
       const { error: itErr } = await admin.from('group_team_layer_mapping_items').insert(rows)
       if (itErr) return NextResponse.json({ error: itErr.message }, { status: 500 })
     }
+
+    // Regenerate the auto-connections owned by this mapping. Always wipe
+    // first so toggling off or changing items cleans up stale edges.
+    await admin.from('tree_connections').delete().eq('source_mapping_id', mappingId!)
+
+    if (auto_connect && leader_layer_id && member_layer_id && Array.isArray(item_ids) && item_ids.length > 0) {
+      // Rank check: leader layer must be above (lower rank than) member layer.
+      const { data: layerRows } = await admin.from('tree_layers')
+        .select('id, rank').eq('church_id', churchId!).in('id', [leader_layer_id, member_layer_id])
+      const rankMap = new Map((layerRows || []).map((l: { id: string; rank: number }) => [l.id, l.rank]))
+      const lRank = rankMap.get(leader_layer_id)
+      const mRank = rankMap.get(member_layer_id)
+      if (lRank !== undefined && mRank !== undefined && lRank < mRank) {
+        // Fetch memberships for all the selected groups or teams
+        const table = kind === 'groups' ? 'group_memberships' : 'team_memberships'
+        const fk = kind === 'groups' ? 'group_id' : 'team_id'
+        const { data: memberships } = await admin.from(table)
+          .select(`person_id, ${fk}, role, is_active`)
+          .eq('church_id', churchId!)
+          .eq('is_active', true)
+          .in(fk, item_ids)
+          .range(0, 49999)
+        type Mem = { person_id: string; role: string | null; [k: string]: unknown }
+        // Group by group/team id
+        const byItem = new Map<string, Mem[]>()
+        for (const m of (memberships || []) as Mem[]) {
+          const iid = m[fk] as string
+          if (!byItem.has(iid)) byItem.set(iid, [])
+          byItem.get(iid)!.push(m)
+        }
+
+        const leaderRe = /leader|co.?leader/i
+        const edges: { parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string; church_id: string; source_mapping_id: string }[] = []
+        const seen = new Set<string>()
+        for (const [, rows] of byItem) {
+          const leaders = rows.filter(r => leaderRe.test(r.role || '')).map(r => r.person_id)
+          const members = rows.filter(r => !leaderRe.test(r.role || '')).map(r => r.person_id)
+          if (leaders.length === 0 || members.length === 0) continue
+          for (const l of leaders) {
+            for (const m of members) {
+              if (l === m) continue
+              const k = `${l}|${m}`
+              if (seen.has(k)) continue
+              seen.add(k)
+              edges.push({
+                parent_person_id: l, parent_layer_id: leader_layer_id,
+                child_person_id: m, child_layer_id: member_layer_id,
+                church_id: churchId!, source_mapping_id: mappingId!,
+              })
+            }
+          }
+        }
+        for (let i = 0; i < edges.length; i += 500) {
+          const chunk = edges.slice(i, i + 500)
+          await admin.from('tree_connections').upsert(chunk, {
+            onConflict: 'parent_person_id,parent_layer_id,child_person_id,child_layer_id',
+            ignoreDuplicates: true,
+          })
+        }
+      }
+    }
+
     return NextResponse.json({ success: true, id: mappingId })
   }
 
@@ -1396,6 +1471,25 @@ export async function POST(request: Request) {
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
     await admin.from('group_team_layer_mappings').delete().eq('id', id).eq('church_id', churchId!)
     return NextResponse.json({ success: true })
+  }
+
+  // ── Remove a person from a layer, smart:
+  //   - if they were manually added (tree_layer_inclusions), delete that row
+  //     (they disappear entirely; there's nothing to "restore")
+  //   - otherwise soft-hide via tree_layer_exclusions
+  if (body.action === 'remove_person_from_layer') {
+    const { person_id, layer_id } = body
+    if (!person_id || !layer_id) return NextResponse.json({ error: 'person_id and layer_id required' }, { status: 400 })
+    const { data: inc } = await admin.from('tree_layer_inclusions')
+      .select('id').eq('person_id', person_id).eq('layer_id', layer_id).eq('church_id', churchId!).maybeSingle()
+    if (inc?.id) {
+      await admin.from('tree_layer_inclusions').delete().eq('id', inc.id)
+    } else {
+      const { error } = await admin.from('tree_layer_exclusions')
+        .upsert({ person_id, layer_id, church_id: churchId }, { onConflict: 'person_id,layer_id' })
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+    return NextResponse.json({ success: true, wasInclusion: !!inc?.id })
   }
 
   // ── Exclude a person from a layer (V2 soft-remove) ──────────
