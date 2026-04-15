@@ -131,13 +131,16 @@ const COLOR_PALETTE = [
   { bg: 'rgba(80, 120, 160, 0.30)',  label: '#3a5a7a' },   // slate
 ]
 
-const BAND_HEIGHT = 150
+const BAND_HEIGHT = 120
 const CARD_WIDTH = 210
 const CARD_HEIGHT = 96
 const CARD_GAP = 8
 const UNIT = CARD_WIDTH + CARD_GAP
-const BAND_PADDING_LEFT = 16
-const CARD_TOP_OFFSET = 46 // cards start below the layer label (gives the label breathing room)
+// Reserves a narrow column on the left of each band for the vertical
+// multiline layer label; cards start after this padding.
+const BAND_PADDING_LEFT = 50
+// Cards are vertically centered inside each band.
+const CARD_TOP_OFFSET = Math.max(0, Math.floor((BAND_HEIGHT - CARD_HEIGHT) / 2))
 const LINE_COLOR = 'rgba(0,0,0,0.25)'
 const LINE_COLOR_HOVER = '#7a5a00'
 
@@ -1046,7 +1049,7 @@ export default function ShepherdTreeV2() {
             />
           ))}
 
-          {/* Horizontal layer labels + SELECT ALL, sticky to the viewport's left edge */}
+          {/* Vertical multiline layer labels + SELECT ALL, sticky to the viewport's left edge */}
           {sortedLayers.map((layer, i) => {
             const people = peopleByLayer.get(layer.id) || []
             const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
@@ -1058,39 +1061,55 @@ export default function ShepherdTreeV2() {
                   width: 0, height: 0, zIndex: 3,
                 }}
               >
+                {/* Vertical label column */}
                 <div
+                  className="sans"
+                  title={layer.name}
                   style={{
                     position: 'absolute',
-                    left: 16, top: bandTop(i) + 14,
-                    display: 'inline-flex', alignItems: 'center', gap: 10,
+                    left: 6,
+                    top: bandTop(i) + 8,
+                    width: 38,
+                    height: BAND_HEIGHT - 16,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
                     userSelect: 'none',
-                    // Soft background so the label stays legible over cards if
-                    // they happen to scroll under it.
-                    padding: '2px 8px 2px 0',
                   }}
                 >
-                  <span className="sans" style={{
-                    fontSize: 12, fontWeight: 800, letterSpacing: 2,
-                    color: layer.color.label, whiteSpace: 'nowrap',
+                  <div style={{
+                    writingMode: 'vertical-rl',
+                    transform: 'rotate(180deg)',
+                    fontSize: 11, fontWeight: 800, letterSpacing: 2,
+                    lineHeight: 1.2,
+                    color: layer.color.label,
+                    textAlign: 'center',
+                    whiteSpace: 'normal',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
+                    maxHeight: '100%',
                   }}>
                     {layer.name.toUpperCase()}
-                  </span>
-                  {(editMode || connectMode) && people.length > 0 && (
-                    <button
-                      onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
-                      className="sans"
-                      style={{
-                        fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
-                        padding: '3px 8px', borderRadius: 6,
-                        border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
-                        background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
-                        color: selCount > 0 ? '#7a5a00' : layer.color.label,
-                        cursor: 'pointer', whiteSpace: 'nowrap',
-                      }}>
-                      {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
-                    </button>
-                  )}
+                  </div>
                 </div>
+
+                {/* SELECT ALL sits just to the right of the label column */}
+                {(editMode || connectMode) && people.length > 0 && (
+                  <button
+                    onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
+                    className="sans"
+                    style={{
+                      position: 'absolute',
+                      left: BAND_PADDING_LEFT,
+                      top: bandTop(i) + 8,
+                      fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+                      padding: '3px 8px', borderRadius: 6,
+                      border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
+                      background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                      color: selCount > 0 ? '#7a5a00' : layer.color.label,
+                      cursor: 'pointer', whiteSpace: 'nowrap',
+                    }}>
+                    {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                  </button>
+                )}
               </div>
             )
           })}
