@@ -1769,10 +1769,29 @@ export default function ShepherdTreeV2() {
                     {/* Color swatch */}
                     <div style={{ width: 10, height: 10, borderRadius: 3, background: layer.color.label, flexShrink: 0 }} />
 
-                    {/* Name */}
-                    <span className="sans" style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)', flex: 1 }}>
-                      {layer.name}
-                    </span>
+                    {/* Name (editable) */}
+                    <input
+                      type="text"
+                      value={layer.name}
+                      onChange={e => {
+                        const v = e.target.value
+                        setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, name: v } : l))
+                      }}
+                      onMouseDown={e => e.stopPropagation()}
+                      onDragStart={e => e.preventDefault()}
+                      draggable={false}
+                      className="sans"
+                      style={{
+                        flex: 1, minWidth: 0,
+                        fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
+                        padding: '4px 8px', borderRadius: 6,
+                        border: '1px solid transparent',
+                        background: 'rgba(255,255,255,0.6)',
+                        outline: 'none',
+                      }}
+                      onFocus={e => { e.currentTarget.style.border = `1px solid ${layer.color.label}55`; e.currentTarget.style.background = 'white' }}
+                      onBlur={e => { e.currentTarget.style.border = '1px solid transparent'; e.currentTarget.style.background = 'rgba(255,255,255,0.6)' }}
+                    />
 
                     {/* Delete */}
                     <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}
