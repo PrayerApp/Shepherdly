@@ -198,6 +198,7 @@ export default function ShepherdTreeV2() {
   // Tracks which connection line the mouse is over, so we can show a
   // tooltip + visually bold it. Useful for debugging tangled layouts.
   const [hoveredConnectionId, setHoveredConnectionId] = useState<string | null>(null)
+  const [connTooltip, setConnTooltip] = useState<{ x: number; y: number; text: string } | null>(null)
   const [viewportH, setViewportH] = useState<number | null>(null)
 
   // Toolbar search (quick-find + scroll-to)
@@ -1451,21 +1452,48 @@ export default function ShepherdTreeV2() {
                     fill="none"
                     style={{
                       pointerEvents: 'stroke',
-                      cursor: connectMode ? 'pointer' : 'help',
+                      cursor: connectMode ? 'pointer' : 'default',
                     }}
-                    onMouseEnter={() => setHoveredConnectionId(c.id)}
-                    onMouseLeave={() => setHoveredConnectionId(prev => prev === c.id ? null : prev)}
+                    onMouseEnter={e => {
+                      setHoveredConnectionId(c.id)
+                      setConnTooltip({ x: e.clientX, y: e.clientY, text: tooltip })
+                    }}
+                    onMouseMove={e => setConnTooltip({ x: e.clientX, y: e.clientY, text: tooltip })}
+                    onMouseLeave={() => {
+                      setHoveredConnectionId(prev => prev === c.id ? null : prev)
+                      setConnTooltip(null)
+                    }}
                     onClick={connectMode ? (e => { e.stopPropagation(); deleteConnection(c) }) : undefined}
-                  >
-                    <title>
-                      {tooltip}
-                      {connectMode ? '\n(click to remove this connection)' : ''}
-                    </title>
-                  </path>
-                </g>
+                  />
+                  </g>
               )
             })}
           </svg>
+
+          {/* Custom tooltip for the hovered connection */}
+          {connTooltip && (
+            <div
+              style={{
+                position: 'fixed',
+                left: connTooltip.x + 14,
+                top: connTooltip.y + 14,
+                pointerEvents: 'none',
+                zIndex: 100,
+                background: 'rgba(30, 30, 30, 0.92)',
+                color: 'white',
+                fontSize: 11, fontWeight: 500,
+                padding: '6px 10px', borderRadius: 6,
+                boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+                maxWidth: 360,
+                whiteSpace: 'pre-wrap',
+                lineHeight: 1.35,
+              }}
+              className="sans"
+            >
+              {connTooltip.text}
+              {connectMode && '\nClick to remove this connection'}
+            </div>
+          )}
 
           {/* Cards (absolute-positioned) */}
           {sortedLayers.map(layer => {
