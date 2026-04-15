@@ -75,6 +75,14 @@ interface LayerInclusion {
   personName: string
 }
 
+interface TreeConnection {
+  id: string
+  parentPersonId: string
+  parentLayerId: string
+  childPersonId: string
+  childLayerId: string
+}
+
 interface GroupLite {
   id: string
   name: string
@@ -101,6 +109,14 @@ const COLOR_PALETTE = [
 ]
 
 const BAND_HEIGHT = 150
+const CARD_WIDTH = 210
+const CARD_HEIGHT = 96
+const CARD_GAP = 10
+const UNIT = CARD_WIDTH + CARD_GAP
+const BAND_PADDING_LEFT = 16
+const CARD_TOP_OFFSET = 40 // cards start below the layer label
+const LINE_COLOR = 'rgba(0,0,0,0.25)'
+const LINE_COLOR_HOVER = '#7a5a00'
 
 const DEFAULT_LAYER_NAMES = [
   { name: 'Elder',        category: 'elder' },
@@ -148,11 +164,11 @@ export default function ShepherdTreeV2() {
   const [personStats, setPersonStats] = useState<Record<string, PersonStat>>({})
   const [exclusions, setExclusions] = useState<LayerExclusion[]>([])
   const [inclusions, setInclusions] = useState<LayerInclusion[]>([])
+  const [connections, setConnections] = useState<TreeConnection[]>([])
   const [gtMappings, setGtMappings] = useState<GtMapping[]>([])
   const [mappingLayerPeople, setMappingLayerPeople] = useState<MappingLayerPerson[]>([])
   const [groupsList, setGroupsList] = useState<GroupLite[]>([])
   const [teamsList, setTeamsList] = useState<TeamLite[]>([])
-  // When a card is long-pressed, we enter "delete mode" for that (personId,layerId).
   // ── People picker (placeholder click → add person to layer) ──
   const [pickerLayerId, setPickerLayerId] = useState<string | null>(null)
 
@@ -222,6 +238,7 @@ export default function ShepherdTreeV2() {
       setPersonStats(data.personStats || {})
       setExclusions(data.layerExclusions || [])
       setInclusions(data.layerInclusions || [])
+      setConnections(data.connections || [])
       setGtMappings(data.gtMappings || [])
       setMappingLayerPeople(data.mappingLayerPeople || [])
       setGroupsList(data.groupsList || [])
@@ -582,6 +599,156 @@ export default function ShepherdTreeV2() {
   // Which lists are already linked
   const linkedListIds = new Set(listLayerLinks.map(ll => ll.listId))
 
+  // ── Tree layout: compute x-position per card key ────────────
+  // Builds a forest from `connections`, lays out connected subtrees
+  // bottom-up (parent centered over children), then parks any unconnected
+  // cards to the right of their own layer.
+  const nodeKey = (personId: string, layerId: string) => `${personId}::${layerId}`
+
+  const sortedLayers = [...layers] // API already returns them in rank order
+
+  const peopleByLayer = new Map<string, (PersonCard & { isExcluded: boolean })[]>()
+  for (const l of sortedLayers) peopleByLayer.set(l.id, getPeopleForLayer(l.id))
+
+  const layerIndex = (layerId: string): number => sortedLayers.findIndex(l => l.id === layerId)
+
+  const layout = (() => {
+    const childrenMap = new Map<string, string[]>()
+    const parentsMap = new Map<string, string[]>()
+    for (const c of connections) {
+      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
+      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      if (!childrenMap.has(pk)) childrenMap.set(pk, [])
+      childrenMap.get(pk)!.push(ck)
+      if (!parentsMap.has(ck)) parentsMap.set(ck, [])
+      parentsMap.get(ck)!.push(pk)
+    }
+    const renderable = new Set<string>()
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) renderable.add(nodeKey(p.id, l.id))
+    }
+    for (const [k, kids] of childrenMap) {
+      childrenMap.set(k, kids.filter(ck => renderable.has(ck)))
+    }
+
+    const inGraph = new Set<string>()
+    for (const c of connections) {
+      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
+      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      if (renderable.has(pk)) inGraph.add(pk)
+      if (renderable.has(ck)) inGraph.add(ck)
+    }
+    const roots = [...inGraph].filter(k => !(parentsMap.get(k) || []).some(p => renderable.has(p)))
+
+    const xUnit = new Map<string, number>()
+    const visited = new Set<string>()
+    let cursor = 0
+    const layoutNode = (k: string): number => {
+      if (xUnit.has(k)) return xUnit.get(k)!
+      if (visited.has(k)) return cursor
+      visited.add(k)
+      const kids = (childrenMap.get(k) || []).filter(ck => !visited.has(ck))
+      if (kids.length === 0) {
+        const x = cursor++
+        xUnit.set(k, x)
+        return x
+      }
+      const childXs = kids.map(ck => layoutNode(ck))
+      const x = (childXs[0] + childXs[childXs.length - 1]) / 2
+      xUnit.set(k, x)
+      return x
+    }
+    const sortedRoots = [...roots].sort((a, b) => {
+      const la = layerIndex(a.split('::')[1])
+      const lb = layerIndex(b.split('::')[1])
+      if (la !== lb) return la - lb
+      return a.localeCompare(b)
+    })
+    for (const r of sortedRoots) layoutNode(r)
+
+    const parkingStart = cursor
+    const layerCursor = new Map<string, number>()
+    for (const l of sortedLayers) layerCursor.set(l.id, parkingStart)
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) {
+        const k = nodeKey(p.id, l.id)
+        if (xUnit.has(k)) continue
+        const c = layerCursor.get(l.id)!
+        xUnit.set(k, c)
+        layerCursor.set(l.id, c + 1)
+      }
+    }
+
+    const maxUnit = Math.max(
+      0,
+      ...[...layerCursor.values()].map(v => v - 1),
+      ...[...xUnit.values()],
+    )
+    return { xUnit, maxUnit, inGraph }
+  })()
+
+  const cardLeft = (k: string): number => {
+    const u = layout.xUnit.get(k) ?? 0
+    return BAND_PADDING_LEFT + u * UNIT
+  }
+  const bandTop = (layerIdx: number): number => layerIdx * (BAND_HEIGHT + 2)
+  const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
+  const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
+  const totalTreeHeight = sortedLayers.length * (BAND_HEIGHT + 2)
+
+  // ── Connect / Disconnect actions ────────────────────────────
+  const canConnectSelection: null | {
+    parent: { personId: string; layerId: string }
+    child: { personId: string; layerId: string }
+    exists: boolean
+  } = (() => {
+    if (!editMode || selected.size !== 2) return null
+    const pair = [...selected].map(s => {
+      const [personId, layerId] = s.split('::')
+      return { personId, layerId, rank: layerIndex(layerId) }
+    })
+    const [a, b] = pair
+    if (a.layerId === b.layerId || a.rank === b.rank) return null
+    const [parent, child] = a.rank < b.rank ? [a, b] : [b, a]
+    const exists = connections.some(c =>
+      c.parentPersonId === parent.personId && c.parentLayerId === parent.layerId
+      && c.childPersonId === child.personId && c.childLayerId === child.layerId
+    )
+    return {
+      parent: { personId: parent.personId, layerId: parent.layerId },
+      child: { personId: child.personId, layerId: child.layerId },
+      exists,
+    }
+  })()
+
+  const toggleConnection = async () => {
+    const pair = canConnectSelection
+    if (!pair) return
+    const action = pair.exists ? 'remove_connection' : 'add_connection'
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          parent_person_id: pair.parent.personId,
+          parent_layer_id: pair.parent.layerId,
+          child_person_id: pair.child.personId,
+          child_layer_id: pair.child.layerId,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        console.error('Connection error:', err)
+        return
+      }
+      clearSelection()
+      await fetchData()
+    } catch (err) {
+      console.error('Connection error:', err)
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300 }}>
@@ -648,26 +815,38 @@ export default function ShepherdTreeV2() {
         overflowY: 'hidden',
         WebkitOverflowScrolling: 'touch',
       }}>
-      <div style={{ minWidth: 'max-content' }}>
-        {layers.map((layer, i) => {
-          const people = getPeopleForLayer(layer.id)
-          const linkedList = getLinkedList(layer.id)
-
-          return (
-            <div key={layer.id}>
-              {i > 0 && (
-                <div style={{ borderTop: '2px dashed rgba(0,0,0,0.15)', margin: '0 16px' }} />
-              )}
+        <div
+          onClick={e => { if (e.target === e.currentTarget) clearSelection() }}
+          style={{
+            position: 'relative',
+            width: totalTreeWidth,
+            height: totalTreeHeight,
+            minWidth: '100%',
+          }}>
+          {/* Layer backgrounds + labels */}
+          {sortedLayers.map((layer, i) => {
+            const people = peopleByLayer.get(layer.id) || []
+            const linkedList = getLinkedList(layer.id)
+            const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
+            return (
               <div
+                key={`band-${layer.id}`}
                 onClick={e => { if (e.target === e.currentTarget) clearSelection() }}
                 style={{
-                  minHeight: BAND_HEIGHT,
+                  position: 'absolute',
+                  top: bandTop(i), left: 0,
+                  width: totalTreeWidth,
+                  height: BAND_HEIGHT,
                   background: layer.color.bg,
-                  position: 'relative',
-                  padding: '40px 16px 16px',
+                  borderTop: i > 0 ? '2px dashed rgba(0,0,0,0.15)' : 'none',
+                }}
+              >
+                {/* Layer label (sticky to the left edge of the viewport) */}
+                <div style={{
+                  position: 'sticky', left: 16, top: 0,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '12px 0 0', gap: 8, zIndex: 1, userSelect: 'none',
                 }}>
-                {/* Layer label */}
-                <div style={{ position: 'absolute', left: 16, top: 12, right: 16, userSelect: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                   <div className="sans" style={{ fontSize: 12, fontWeight: 800, letterSpacing: 2, color: layer.color.label }}>
                     {layer.name.toUpperCase()}
                     {linkedList && (
@@ -682,188 +861,203 @@ export default function ShepherdTreeV2() {
                       </span>
                     )}
                   </div>
-                  {editMode && people.length > 0 && (() => {
-                    const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
-                    const allSelected = selCount === people.length
-                    return (
-                      <button
-                        onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
-                        className="sans"
-                        title={allSelected ? 'Deselect all' : 'Select all in this layer'}
-                        style={{
-                          fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
-                          padding: '4px 8px', borderRadius: 6,
-                          border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
-                          background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
-                          color: selCount > 0 ? '#7a5a00' : layer.color.label,
-                          cursor: 'pointer', whiteSpace: 'nowrap',
-                        }}>
-                        {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
-                      </button>
-                    )
-                  })()}
-                </div>
-
-                {/* People cards + placeholder — row lays out in full width; tree scrolls as a whole */}
-                <div style={{
-                  display: 'flex', flexWrap: 'nowrap', gap: 8,
-                  alignItems: 'center',
-                  minHeight: BAND_HEIGHT - 56,
-                  width: 'max-content',
-                  ...(people.length === 0 ? { justifyContent: 'center' } : {}),
-                }}>
-                  {people.map(person => {
-                    const stat = personStats[person.id] || { s: 0, l: 0, p: 0, f: 0, total: 0 }
-                    const total = stat.total
-                    // Segmented bar proportions
-                    const segs: [keyof typeof STAT_STYLES, number][] = [
-                      ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
-                    ]
-                    const isSelected = selected.has(selKey(person.id, layer.id))
-                    const isExcluded = person.isExcluded
-                    return (
-                      <div
-                        key={person.id}
-                        title={isExcluded
-                          ? `${person.name} — hidden from ${layer.name}. Click to select, then "Restore" to bring back.`
-                          : `${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
-                        onClick={e => {
-                          e.stopPropagation()
-                          handleCardClick(e, person.id, layer.id, people)
-                        }}
-                        style={{
-                          position: 'relative',
-                          width: 210, height: 96,
-                          padding: '10px 12px',
-                          borderRadius: 12,
-                          background: isExcluded ? 'rgba(255,255,255,0.55)' : 'white',
-                          border: isSelected
-                            ? `2px solid ${SELECT_OUTLINE}`
-                            : isExcluded
-                              ? `1px dashed ${layer.color.label}55`
-                              : `1px solid ${layer.color.label}22`,
-                          outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
-                          outlineOffset: isSelected ? 1 : undefined,
-                          boxShadow: isSelected
-                            ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
-                            : isExcluded
-                              ? 'none'
-                              : '0 1px 4px rgba(0,0,0,0.06)',
-                          opacity: isExcluded ? 0.5 : 1,
-                          display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
-                          boxSizing: 'border-box',
-                          flexShrink: 0,
-                          userSelect: 'none',
-                          WebkitUserSelect: 'none',
-                          cursor: editMode ? 'pointer' : 'default',
-                          transition: 'box-shadow 0.15s, border-color 0.15s, opacity 0.15s',
-                          margin: isSelected ? -1 : 0,
-                        }}
-                      >
-                        {isExcluded && (
-                          <div
-                            className="sans"
-                            style={{
-                              position: 'absolute', top: 6, right: 8,
-                              fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
-                              color: '#c0392b', textTransform: 'uppercase',
-                            }}
-                          >
-                            hidden
-                          </div>
-                        )}
-                        {/* Name */}
-                        <div
-                          className="sans"
-                          style={{
-                            fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
-                            lineHeight: 1.2, whiteSpace: 'nowrap',
-                            overflow: 'hidden', textOverflow: 'ellipsis',
-                            textDecoration: isExcluded ? 'line-through' : 'none',
-                            paddingRight: isExcluded ? 46 : 0,
-                          }}
-                        >
-                          {person.name}
-                        </div>
-
-                        {/* Count + segmented bar */}
-                        <div>
-                          <div className="sans" style={{
-                            fontSize: 10, fontWeight: 500, color: 'var(--muted-foreground)',
-                            letterSpacing: 0.3, marginBottom: 4,
-                          }}>
-                            shepherding <span style={{ fontWeight: 700, color: layer.color.label, fontSize: 11 }}>{total}</span>
-                          </div>
-                          <div style={{
-                            display: 'flex', height: 4, borderRadius: 2,
-                            background: 'rgba(0,0,0,0.05)', overflow: 'hidden', marginBottom: 5,
-                          }}>
-                            {total > 0 && segs.map(([k, v]) => (
-                              v > 0 ? (
-                                <div
-                                  key={k}
-                                  style={{
-                                    flex: v,
-                                    background: STAT_STYLES[k].fg,
-                                    opacity: 0.85,
-                                  }}
-                                />
-                              ) : null
-                            ))}
-                          </div>
-                          {/* Stat pills */}
-                          <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between' }}>
-                            {(['s','l','p','f'] as const).map(k => {
-                              const v = stat[k]
-                              const style = STAT_STYLES[k]
-                              const faded = v === 0
-                              return (
-                                <span
-                                  key={k}
-                                  className="sans"
-                                  style={{
-                                    flex: 1, textAlign: 'center',
-                                    fontSize: 10, fontWeight: 600,
-                                    padding: '2px 0', borderRadius: 4,
-                                    background: faded ? 'rgba(0,0,0,0.03)' : style.bg,
-                                    color: faded ? 'var(--muted-foreground)' : style.fg,
-                                    letterSpacing: 0.2,
-                                  }}
-                                >
-                                  {v}{k.toUpperCase()}
-                                </span>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-
-                  {/* Placeholder: always visible, matches card size for uniform look */}
-                  <button
-                    onClick={e => { e.stopPropagation(); setPickerLayerId(layer.id) }}
-                    title={`Add someone to ${layer.name}`}
-                    style={{
-                    width: 210, height: 96,
-                    padding: 0,
-                    border: `2px dashed ${layer.color.label}70`,
-                    borderRadius: 12, background: 'white',
-                    cursor: 'pointer', opacity: 0.7,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexDirection: 'column', gap: 2,
-                    flexShrink: 0,
-                    boxSizing: 'border-box',
-                  }}>
-                    <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
-                    <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
-                  </button>
+                  {editMode && people.length > 0 && (
+                    <button
+                      onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
+                      className="sans"
+                      style={{
+                        marginLeft: 12,
+                        fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
+                        padding: '4px 8px', borderRadius: 6,
+                        border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
+                        background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                        color: selCount > 0 ? '#7a5a00' : layer.color.label,
+                        cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}>
+                      {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
-          )
-        })}
-      </div>
+            )
+          })}
+
+          {/* SVG overlay for connection lines */}
+          <svg
+            style={{
+              position: 'absolute', top: 0, left: 0,
+              width: totalTreeWidth, height: totalTreeHeight,
+              pointerEvents: 'none',
+            }}
+          >
+            {connections.map(c => {
+              const pk = nodeKey(c.parentPersonId, c.parentLayerId)
+              const ck = nodeKey(c.childPersonId, c.childLayerId)
+              if (!layout.xUnit.has(pk) || !layout.xUnit.has(ck)) return null
+              const px = cardLeft(pk) + CARD_WIDTH / 2
+              const py = cardTopAbs(c.parentLayerId) + CARD_HEIGHT
+              const cx = cardLeft(ck) + CARD_WIDTH / 2
+              const cy = cardTopAbs(c.childLayerId)
+              const midY = (py + cy) / 2
+              const highlight = selected.has(selKey(c.parentPersonId, c.parentLayerId))
+                || selected.has(selKey(c.childPersonId, c.childLayerId))
+              return (
+                <path
+                  key={c.id}
+                  d={`M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`}
+                  stroke={highlight ? LINE_COLOR_HOVER : LINE_COLOR}
+                  strokeWidth={highlight ? 2 : 1.4}
+                  fill="none"
+                />
+              )
+            })}
+          </svg>
+
+          {/* Cards (absolute-positioned) */}
+          {sortedLayers.map(layer => {
+            const people = peopleByLayer.get(layer.id) || []
+            return people.map(person => {
+              const stat = personStats[person.id] || { s: 0, l: 0, p: 0, f: 0, total: 0 }
+              const total = stat.total
+              const segs: [keyof typeof STAT_STYLES, number][] = [
+                ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
+              ]
+              const isSelected = selected.has(selKey(person.id, layer.id))
+              const isExcluded = person.isExcluded
+              const k = nodeKey(person.id, layer.id)
+              return (
+                <div
+                  key={k}
+                  title={isExcluded
+                    ? `${person.name} — hidden from ${layer.name}. Click to select, then "Restore" to bring back.`
+                    : `${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
+                  onClick={e => {
+                    e.stopPropagation()
+                    handleCardClick(e, person.id, layer.id, people)
+                  }}
+                  style={{
+                    position: 'absolute',
+                    left: cardLeft(k),
+                    top: cardTopAbs(layer.id),
+                    width: CARD_WIDTH, height: CARD_HEIGHT,
+                    padding: '10px 12px',
+                    borderRadius: 12,
+                    background: isExcluded ? 'rgba(255,255,255,0.55)' : 'white',
+                    border: isSelected
+                      ? `2px solid ${SELECT_OUTLINE}`
+                      : isExcluded
+                        ? `1px dashed ${layer.color.label}55`
+                        : `1px solid ${layer.color.label}22`,
+                    outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
+                    outlineOffset: isSelected ? 1 : undefined,
+                    boxShadow: isSelected
+                      ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                      : isExcluded
+                        ? 'none'
+                        : '0 1px 4px rgba(0,0,0,0.06)',
+                    opacity: isExcluded ? 0.5 : 1,
+                    display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+                    boxSizing: 'border-box',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                    cursor: editMode ? 'pointer' : 'default',
+                    transition: 'box-shadow 0.15s, border-color 0.15s, opacity 0.15s, left 0.2s, top 0.2s',
+                    zIndex: 2,
+                  }}
+                >
+                  {isExcluded && (
+                    <div className="sans" style={{
+                      position: 'absolute', top: 6, right: 8,
+                      fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                      color: '#c0392b', textTransform: 'uppercase',
+                    }}>
+                      hidden
+                    </div>
+                  )}
+                  <div className="sans" style={{
+                    fontSize: 13, fontWeight: 600, color: 'var(--foreground)',
+                    lineHeight: 1.2, whiteSpace: 'nowrap',
+                    overflow: 'hidden', textOverflow: 'ellipsis',
+                    textDecoration: isExcluded ? 'line-through' : 'none',
+                    paddingRight: isExcluded ? 46 : 0,
+                  }}>
+                    {person.name}
+                  </div>
+                  <div>
+                    <div className="sans" style={{
+                      fontSize: 10, fontWeight: 500, color: 'var(--muted-foreground)',
+                      letterSpacing: 0.3, marginBottom: 4,
+                    }}>
+                      shepherding <span style={{ fontWeight: 700, color: layer.color.label, fontSize: 11 }}>{total}</span>
+                    </div>
+                    <div style={{
+                      display: 'flex', height: 4, borderRadius: 2,
+                      background: 'rgba(0,0,0,0.05)', overflow: 'hidden', marginBottom: 5,
+                    }}>
+                      {total > 0 && segs.map(([sk, v]) => (
+                        v > 0 ? (
+                          <div key={sk} style={{ flex: v, background: STAT_STYLES[sk].fg, opacity: 0.85 }} />
+                        ) : null
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between' }}>
+                      {(['s','l','p','f'] as const).map(sk => {
+                        const v = stat[sk]
+                        const style = STAT_STYLES[sk]
+                        const faded = v === 0
+                        return (
+                          <span key={sk} className="sans" style={{
+                            flex: 1, textAlign: 'center',
+                            fontSize: 10, fontWeight: 600,
+                            padding: '2px 0', borderRadius: 4,
+                            background: faded ? 'rgba(0,0,0,0.03)' : style.bg,
+                            color: faded ? 'var(--muted-foreground)' : style.fg,
+                            letterSpacing: 0.2,
+                          }}>
+                            {v}{sk.toUpperCase()}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )
+            })
+          })}
+
+          {/* Per-layer "+ Layer" placeholders, positioned at the end of each layer */}
+          {sortedLayers.map(layer => {
+            const people = peopleByLayer.get(layer.id) || []
+            const maxX = people.reduce((mx, p) => {
+              const u = layout.xUnit.get(nodeKey(p.id, layer.id)) ?? -1
+              return Math.max(mx, u)
+            }, -1)
+            const placeholderLeft = BAND_PADDING_LEFT + (maxX + 1) * UNIT
+            return (
+              <button
+                key={`ph-${layer.id}`}
+                onClick={e => { e.stopPropagation(); setPickerLayerId(layer.id) }}
+                title={`Add someone to ${layer.name}`}
+                style={{
+                  position: 'absolute',
+                  left: placeholderLeft,
+                  top: cardTopAbs(layer.id),
+                  width: CARD_WIDTH, height: CARD_HEIGHT,
+                  padding: 0,
+                  border: `2px dashed ${layer.color.label}70`,
+                  borderRadius: 12, background: 'white',
+                  cursor: 'pointer', opacity: 0.7,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexDirection: 'column', gap: 2,
+                  boxSizing: 'border-box',
+                  zIndex: 2,
+                }}>
+                <span style={{ fontSize: 18, fontWeight: 300, color: layer.color.label }}>+</span>
+                <span className="sans" style={{ fontSize: 10, fontWeight: 600, color: layer.color.label }}>{layer.name}</span>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {/* ── Floating action bar (edit mode, selection > 0) ── */}
@@ -888,6 +1082,19 @@ export default function ShepherdTreeV2() {
               </span>
             )}
           </span>
+          {canConnectSelection && (
+            <button
+              onClick={toggleConnection}
+              style={{
+                fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                border: `1px solid ${canConnectSelection.exists ? '#c0392b44' : '#2a6a3a44'}`,
+                background: 'white',
+                color: canConnectSelection.exists ? '#c0392b' : '#2a6a3a',
+                cursor: 'pointer',
+              }}>
+              {canConnectSelection.exists ? 'Disconnect' : 'Connect'}
+            </button>
+          )}
           {selectionSummary.activeCount > 0 && (
             <button
               onClick={() => applyToSelection('remove')}

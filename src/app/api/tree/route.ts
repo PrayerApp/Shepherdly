@@ -145,6 +145,7 @@ export async function GET() {
     { data: layerInclusions },
     { data: gtMappings },
     { data: gtMappingItems },
+    { data: treeConnections },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -187,6 +188,9 @@ export async function GET() {
       .eq('church_id', churchId!),
     admin.from('group_team_layer_mapping_items')
       .select('mapping_id, item_id')
+      .eq('church_id', churchId!),
+    admin.from('tree_connections')
+      .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id')
       .eq('church_id', churchId!),
   ])
 
@@ -930,6 +934,13 @@ export async function GET() {
       layerId: e.layer_id,
       personName: personMap.get(e.person_id)?.name || 'Unknown',
     })),
+    connections: (treeConnections || []).map((c: { id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string }) => ({
+      id: c.id,
+      parentPersonId: c.parent_person_id,
+      parentLayerId: c.parent_layer_id,
+      childPersonId: c.child_person_id,
+      childLayerId: c.child_layer_id,
+    })),
     groupsList: (groups || []).map((g: { id: string; name: string; group_type_id?: string | null; pco_group_type_id?: string | null }) => ({
       id: g.id,
       name: g.name || 'Untitled group',
@@ -1235,6 +1246,49 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Add a connection between two person/layer appearances ──
+  if (body.action === 'add_connection') {
+    const { parent_person_id, parent_layer_id, child_person_id, child_layer_id } = body
+    if (!parent_person_id || !parent_layer_id || !child_person_id || !child_layer_id) {
+      return NextResponse.json({ error: 'parent and child person+layer required' }, { status: 400 })
+    }
+    if (parent_person_id === child_person_id && parent_layer_id === child_layer_id) {
+      return NextResponse.json({ error: 'cannot connect a card to itself' }, { status: 400 })
+    }
+    // Rank check: parent must be strictly above (lower rank) than child
+    const { data: layerRows } = await admin.from('tree_layers')
+      .select('id, rank').eq('church_id', churchId!).in('id', [parent_layer_id, child_layer_id])
+    const ranks = new Map((layerRows || []).map(l => [l.id, l.rank]))
+    const pRank = ranks.get(parent_layer_id)
+    const cRank = ranks.get(child_layer_id)
+    if (pRank === undefined || cRank === undefined) {
+      return NextResponse.json({ error: 'Unknown layer' }, { status: 400 })
+    }
+    if (pRank >= cRank) {
+      return NextResponse.json({ error: 'Parent must be on a higher layer than child' }, { status: 400 })
+    }
+    const { error } = await admin.from('tree_connections').upsert({
+      parent_person_id, parent_layer_id, child_person_id, child_layer_id, church_id: churchId,
+    }, { onConflict: 'parent_person_id,parent_layer_id,child_person_id,child_layer_id' })
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Remove a connection ─────────────────────────────────────
+  if (body.action === 'remove_connection') {
+    const { parent_person_id, parent_layer_id, child_person_id, child_layer_id } = body
+    if (!parent_person_id || !parent_layer_id || !child_person_id || !child_layer_id) {
+      return NextResponse.json({ error: 'parent and child person+layer required' }, { status: 400 })
+    }
+    await admin.from('tree_connections').delete()
+      .eq('parent_person_id', parent_person_id)
+      .eq('parent_layer_id', parent_layer_id)
+      .eq('child_person_id', child_person_id)
+      .eq('child_layer_id', child_layer_id)
+      .eq('church_id', churchId!)
     return NextResponse.json({ success: true })
   }
 
