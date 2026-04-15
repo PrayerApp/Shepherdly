@@ -75,15 +75,18 @@ export async function regenerateAutoConnectEdgesForChurch(
 
     const leaderRe = /leader|co.?leader/i
     const edges: any[] = []
+    // Dedupe per (leader, member, context) so the same membership doesn't
+    // create duplicate edges, but DIFFERENT memberships (e.g. same pair in
+    // two groups) now do create separate edges — one per group/team.
     const seen = new Set<string>()
-    for (const [, rows] of byItem) {
+    for (const [itemId, rows] of byItem) {
       const leaders = rows.filter(r => leaderRe.test(r.role || '')).map(r => r.person_id)
       const members = rows.filter(r => !leaderRe.test(r.role || '')).map(r => r.person_id)
       if (leaders.length === 0 || members.length === 0) continue
       for (const lid of leaders) {
         for (const mid of members) {
           if (lid === mid) continue
-          const k = `${lid}|${mid}`
+          const k = `${lid}|${mid}|${m.kind}|${itemId}`
           if (seen.has(k)) continue
           seen.add(k)
           edges.push({
@@ -93,17 +96,20 @@ export async function regenerateAutoConnectEdgesForChurch(
             child_layer_id: m.member_layer_id,
             church_id: churchId,
             source_mapping_id: m.id,
+            context_group_id: m.kind === 'groups' ? itemId : null,
+            context_team_id: m.kind === 'teams' ? itemId : null,
           })
         }
       }
     }
 
+    // The 4-tuple uniqueness was dropped in the 20260416 migration so
+    // multiple edges per pair (one per context) can coexist. Plain insert
+    // works since we wiped mapping-owned edges up-front; any remaining
+    // manual-edge conflicts are extremely rare (different context values).
     for (let i = 0; i < edges.length; i += 500) {
       const chunk = edges.slice(i, i + 500)
-      await admin.from('tree_connections').upsert(chunk, {
-        onConflict: 'parent_person_id,parent_layer_id,child_person_id,child_layer_id',
-        ignoreDuplicates: true,
-      })
+      await admin.from('tree_connections').insert(chunk)
     }
     totalEdges += edges.length
   }

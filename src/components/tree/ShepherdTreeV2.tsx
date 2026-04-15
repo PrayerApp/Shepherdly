@@ -8,6 +8,7 @@ interface LayerItem {
   name: string
   color: { bg: string; label: string }
   category?: string
+  isCongregational?: boolean
 }
 
 interface PcoList {
@@ -68,6 +69,8 @@ interface MappingLayerPerson {
   personId: string
   personName: string
   role: 'leader' | 'member'
+  contextKind: 'group' | 'team'
+  contextId: string
 }
 
 interface LayerInclusion {
@@ -82,6 +85,8 @@ interface TreeConnection {
   parentLayerId: string
   childPersonId: string
   childLayerId: string
+  contextGroupId?: string | null
+  contextTeamId?: string | null
 }
 
 interface MetricBucket {
@@ -364,6 +369,7 @@ export default function ShepherdTreeV2() {
         name: l.name,
         color: colorForIndex(i),
         category: l.category,
+        isCongregational: !!l.is_congregational,
       }))
 
       if (dbLayers.length > 0) {
@@ -383,6 +389,7 @@ export default function ShepherdTreeV2() {
           if (d2.layers) {
             setLayers(d2.layers.map((l: any, i: number) => ({
               id: l.id, name: l.name, color: colorForIndex(i), category: l.category,
+              isCongregational: !!l.is_congregational,
             })))
           }
         }
@@ -433,8 +440,9 @@ export default function ShepherdTreeV2() {
     // Find first layer where this person appears
     for (const l of sortedLayers) {
       const ppl = peopleByLayer.get(l.id) || []
-      if (!ppl.some(p => p.id === personId)) continue
-      const k = nodeKey(personId, l.id)
+      const match = ppl.find(p => p.personId === personId)
+      if (!match) continue
+      const k = match.key
       const el = cardRefs.current.get(k)
       const scroller = scrollerRef.current
       if (el && scroller) {
@@ -455,41 +463,114 @@ export default function ShepherdTreeV2() {
     return null
   }
 
-  // ── Derived: people per layer from list-layer links + Group/Team mappings ──
-  // Unions PCO list-based entries with any mapping-derived entries (leader/member
-  // derivations from Group/Team mappings). In edit mode, excluded people are
-  // kept and flagged as ghosts; otherwise they're hidden.
-  const getPeopleForLayer = (layerId: string): (PersonCard & { isExcluded: boolean })[] => {
+  // ── Derived: cards per layer (context-aware) ────────────────
+  //
+  // A "card" is one rendered tile. Its identity is:
+  //   cardKey = `${personId}::${layerId}::${contextKey}`
+  // contextKey is a stable suffix — either a membership context id
+  // (e.g. "group-<gid>" or "team-<tid>") for mapping-derived cards, or
+  // "primary" for list/inclusion/leader cards.
+  //
+  // Rules:
+  // 1) Congregational layers (is_congregational) duplicate a person for
+  //    every distinct membership, so someone in 3 groups gets 3 cards.
+  // 2) Non-congregational layers dedupe by personId, AND a person who
+  //    appears on multiple non-congregational layers is kept only on
+  //    their HIGHEST (lowest-rank) non-cong layer.
+  //
+  // Selection, layout, and connections all operate on cardKey.
+  type Card = { key: string; personId: string; name: string; isExcluded: boolean; contextKey: string }
+
+  const CONTEXT_PRIMARY = 'primary'
+  const cardKeyFor = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
+    `${personId}::${layerId}::${contextKey}`
+
+  // Compute, for every person, the highest non-congregational layer (by
+  // index in sortedLayers) they appear on. Used to cull their
+  // appearances on lower non-cong layers.
+  const highestNonCongLayerByPerson: Map<string, string> = (() => {
+    const out = new Map<string, string>() // personId -> layerId
+    const idx = (lid: string) => layers.findIndex(l => l.id === lid)
+    const consider = (personId: string, layerId: string) => {
+      const layer = layers.find(l => l.id === layerId)
+      if (!layer || layer.isCongregational) return
+      const cur = out.get(personId)
+      if (!cur || idx(layerId) < idx(cur)) out.set(personId, layerId)
+    }
+    // PCO lists
+    for (const link of listLayerLinks) {
+      for (const lp of listPeople) {
+        if (lp.listId === link.listId) consider(lp.personId, link.layerId)
+      }
+    }
+    // Mapping-derived
+    for (const mp of mappingLayerPeople) consider(mp.personId, mp.layerId)
+    // Manual inclusions
+    for (const inc of inclusions) consider(inc.personId, inc.layerId)
+    return out
+  })()
+
+  const getPeopleForLayer = (layerId: string): Card[] => {
+    const layer = layers.find(l => l.id === layerId)
+    const isCong = !!layer?.isCongregational
     const excluded = new Set(
       exclusions.filter(e => e.layerId === layerId).map(e => e.personId)
     )
 
-    // 1) People from a PCO reference list linked to this layer
+    // Collect raw appearances on this layer, keeping context info.
+    type Appearance = { personId: string; name: string; contextKey: string }
+    const appearances: Appearance[] = []
+
+    // 1) PCO list people — "primary" context
     const link = listLayerLinks.find(ll => ll.layerId === layerId)
-    const fromList: { id: string; name: string }[] = link
-      ? listPeople.filter(lp => lp.listId === link.listId).map(lp => ({ id: lp.personId, name: lp.personName }))
-      : []
-
-    // 2) People derived from Group/Team mappings where this layer is the leader
-    //    or member target
-    const fromMappings = mappingLayerPeople
-      .filter(mp => mp.layerId === layerId)
-      .map(mp => ({ id: mp.personId, name: mp.personName }))
-
-    // 3) People added to this layer directly (manual inclusions)
-    const fromInclusions = inclusions
-      .filter(inc => inc.layerId === layerId)
-      .map(inc => ({ id: inc.personId, name: inc.personName }))
-
-    // Merge by personId (dedupe)
-    const byId = new Map<string, { id: string; name: string }>()
-    for (const p of [...fromList, ...fromMappings, ...fromInclusions]) {
-      if (!byId.has(p.id)) byId.set(p.id, p)
+    if (link) {
+      for (const lp of listPeople) {
+        if (lp.listId !== link.listId) continue
+        appearances.push({ personId: lp.personId, name: lp.personName, contextKey: CONTEXT_PRIMARY })
+      }
     }
 
-    return [...byId.values()]
-      .filter(p => editMode || !excluded.has(p.id))
-      .map(p => ({ id: p.id, name: p.name, isExcluded: excluded.has(p.id) }))
+    // 2) Mapping-derived — context-specific so congregational layers
+    //    get one card per membership.
+    for (const mp of mappingLayerPeople) {
+      if (mp.layerId !== layerId) continue
+      const ctx = `${mp.contextKind}-${mp.contextId}`
+      appearances.push({ personId: mp.personId, name: mp.personName, contextKey: ctx })
+    }
+
+    // 3) Manual inclusions — "primary" context
+    for (const inc of inclusions) {
+      if (inc.layerId !== layerId) continue
+      appearances.push({ personId: inc.personId, name: inc.personName, contextKey: CONTEXT_PRIMARY })
+    }
+
+    // Apply rules.
+    const byKey = new Map<string, Card>()
+    for (const a of appearances) {
+      // Non-cong cross-layer rule: keep only the HIGHEST non-cong layer
+      // for each person. If this isn't their highest non-cong layer, drop.
+      if (!isCong) {
+        const highest = highestNonCongLayerByPerson.get(a.personId)
+        if (highest && highest !== layerId) continue
+      }
+      // Dedup strategy:
+      //   - On non-cong: one card per personId (ignore context)
+      //   - On cong: one card per (personId, contextKey)
+      const dedupKey = isCong
+        ? cardKeyFor(a.personId, layerId, a.contextKey)
+        : cardKeyFor(a.personId, layerId, CONTEXT_PRIMARY)
+      if (byKey.has(dedupKey)) continue
+      byKey.set(dedupKey, {
+        key: dedupKey,
+        personId: a.personId,
+        name: a.name,
+        isExcluded: excluded.has(a.personId),
+        contextKey: isCong ? a.contextKey : CONTEXT_PRIMARY,
+      })
+    }
+
+    return [...byKey.values()]
+      .filter(c => editMode || !c.isExcluded)
       .sort((a, b) => {
         const la = lastName(a.name), lb = lastName(b.name)
         const cmp = la.localeCompare(lb, undefined, { sensitivity: 'base' })
@@ -499,43 +580,42 @@ export default function ShepherdTreeV2() {
   }
 
   // ── Card click → selection (edit mode only) ────────────────
-  const handleCardClick = (e: React.MouseEvent, personId: string, layerId: string, people: (PersonCard & { isExcluded: boolean })[]) => {
+  const handleCardClick = (e: React.MouseEvent, cardKey: string, layerId: string, cards: Card[]) => {
     if (!editMode && !connectMode) return
-    const key = selKey(personId, layerId)
-    const index = people.findIndex(p => p.id === personId)
+    const index = cards.findIndex(c => c.key === cardKey)
 
     if (e.shiftKey && lastSelectedRef.current && lastSelectedRef.current.layerId === layerId) {
       // Range select within the same layer
       const [lo, hi] = [lastSelectedRef.current.index, index].sort((a, b) => a - b)
       const next = new Set(selected)
-      for (let i = lo; i <= hi; i++) next.add(selKey(people[i].id, layerId))
+      for (let i = lo; i <= hi; i++) next.add(cards[i].key)
       setSelected(next)
     } else if (e.metaKey || e.ctrlKey) {
       // Toggle additive
       const next = new Set(selected)
-      if (next.has(key)) next.delete(key); else next.add(key)
+      if (next.has(cardKey)) next.delete(cardKey); else next.add(cardKey)
       setSelected(next)
       lastSelectedRef.current = { layerId, index }
     } else {
       // Plain click: toggle this one, clear others
-      const wasOnlyMe = selected.size === 1 && selected.has(key)
+      const wasOnlyMe = selected.size === 1 && selected.has(cardKey)
       const next = new Set<string>()
-      if (!wasOnlyMe) next.add(key)
+      if (!wasOnlyMe) next.add(cardKey)
       setSelected(next)
       lastSelectedRef.current = { layerId, index }
     }
   }
 
-  const selectAllInLayer = (layerId: string, people: (PersonCard & { isExcluded: boolean })[]) => {
+  const selectAllInLayer = (layerId: string, cards: Card[]) => {
     const next = new Set(selected)
-    const allSelected = people.every(p => next.has(selKey(p.id, layerId)))
+    const allSelected = cards.every(c => next.has(c.key))
     if (allSelected) {
-      for (const p of people) next.delete(selKey(p.id, layerId))
+      for (const c of cards) next.delete(c.key)
     } else {
-      for (const p of people) next.add(selKey(p.id, layerId))
+      for (const c of cards) next.add(c.key)
     }
     setSelected(next)
-    if (people.length > 0) lastSelectedRef.current = { layerId, index: 0 }
+    if (cards.length > 0) lastSelectedRef.current = { layerId, index: 0 }
   }
 
   const clearSelection = () => setSelected(new Set())
@@ -549,6 +629,16 @@ export default function ShepherdTreeV2() {
       const [personId, layerId] = k.split('::')
       items.push({ personId, layerId })
     }
+    // Dedup because cong layers can have multiple selected cards per person.
+    const seen = new Set<string>()
+    const dedupedItems = items.filter(it => {
+      const k = `${it.personId}::${it.layerId}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+    items.length = 0
+    items.push(...dedupedItems)
 
     // Optimistic update
     const inclusionKeys = new Set(inclusions.map(i => `${i.personId}::${i.layerId}`))
@@ -644,6 +734,7 @@ export default function ShepherdTreeV2() {
             id: l.id.startsWith('local-') ? undefined : l.id,
             name: l.name,
             category: l.category || 'custom',
+            is_congregational: !!l.isCongregational,
           })),
         }),
       })
@@ -783,12 +874,42 @@ export default function ShepherdTreeV2() {
   // Builds a forest from `connections`, lays out connected subtrees
   // bottom-up (parent centered over children), then parks any unconnected
   // cards to the right of their own layer.
-  const nodeKey = (personId: string, layerId: string) => `${personId}::${layerId}`
+  // Node/card identity is three-part so a person can appear multiple
+  // times on congregational layers with distinct context keys.
+  const nodeKey = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
+    `${personId}::${layerId}::${contextKey}`
 
   const sortedLayers = [...layers] // API already returns them in rank order
 
-  const peopleByLayer = new Map<string, (PersonCard & { isExcluded: boolean })[]>()
+  const peopleByLayer = new Map<string, Card[]>()
   for (const l of sortedLayers) peopleByLayer.set(l.id, getPeopleForLayer(l.id))
+
+  // Resolve the appropriate child cardKey for a given connection edge.
+  // If the edge carries a context (auto-connect) and the child's layer has
+  // a context-matched card, use that. Otherwise fall through to primary.
+  const resolveChildCardKey = (c: TreeConnection): string => {
+    const cards = peopleByLayer.get(c.childLayerId) || []
+    if (c.contextGroupId) {
+      const k = nodeKey(c.childPersonId, c.childLayerId, `group-${c.contextGroupId}`)
+      if (cards.some(card => card.key === k)) return k
+    }
+    if (c.contextTeamId) {
+      const k = nodeKey(c.childPersonId, c.childLayerId, `team-${c.contextTeamId}`)
+      if (cards.some(card => card.key === k)) return k
+    }
+    // Fall back: first card for this person on this layer (for non-cong
+    // layers this is the one and only; for cong with no context match it
+    // picks the first available so the edge still renders somewhere).
+    const any = cards.find(card => card.personId === c.childPersonId)
+    return any?.key ?? nodeKey(c.childPersonId, c.childLayerId, CONTEXT_PRIMARY)
+  }
+  const resolveParentCardKey = (c: TreeConnection): string => {
+    // Parent side usually lives on a non-cong layer where there's only
+    // one card per person. Match by personId.
+    const cards = peopleByLayer.get(c.parentLayerId) || []
+    const any = cards.find(card => card.personId === c.parentPersonId)
+    return any?.key ?? nodeKey(c.parentPersonId, c.parentLayerId, CONTEXT_PRIMARY)
+  }
 
   const layerIndex = (layerId: string): number => sortedLayers.findIndex(l => l.id === layerId)
 
@@ -796,8 +917,8 @@ export default function ShepherdTreeV2() {
     const childrenMap = new Map<string, string[]>()
     const parentsMap = new Map<string, string[]>()
     for (const c of connections) {
-      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
-      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      const pk = resolveParentCardKey(c)
+      const ck = resolveChildCardKey(c)
       if (!childrenMap.has(pk)) childrenMap.set(pk, [])
       childrenMap.get(pk)!.push(ck)
       if (!parentsMap.has(ck)) parentsMap.set(ck, [])
@@ -805,14 +926,14 @@ export default function ShepherdTreeV2() {
     }
     const renderable = new Set<string>()
     for (const l of sortedLayers) {
-      for (const p of peopleByLayer.get(l.id) || []) renderable.add(nodeKey(p.id, l.id))
+      for (const p of peopleByLayer.get(l.id) || []) renderable.add(p.key)
     }
     // Build a key -> name lookup so we can sort children alphabetically
     // (by last name) before laying them out. This keeps tree branches in
     // a predictable left-to-right order.
     const nameForKey = new Map<string, string>()
     for (const l of sortedLayers) {
-      for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(nodeKey(p.id, l.id), p.name)
+      for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(p.key, p.name)
     }
     // Child order: higher layers first (lower index = higher in tree),
     // then alphabetical by last name.
@@ -835,8 +956,8 @@ export default function ShepherdTreeV2() {
 
     const inGraph = new Set<string>()
     for (const c of connections) {
-      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
-      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      const pk = resolveParentCardKey(c)
+      const ck = resolveChildCardKey(c)
       if (renderable.has(pk)) inGraph.add(pk)
       if (renderable.has(ck)) inGraph.add(ck)
     }
@@ -873,10 +994,9 @@ export default function ShepherdTreeV2() {
     for (const l of sortedLayers) layerCursor.set(l.id, parkingStart)
     for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
-        const k = nodeKey(p.id, l.id)
-        if (xUnit.has(k)) continue
+        if (xUnit.has(p.key)) continue
         const c = layerCursor.get(l.id)!
-        xUnit.set(k, c)
+        xUnit.set(p.key, c)
         layerCursor.set(l.id, c + 1)
       }
     }
@@ -899,8 +1019,8 @@ export default function ShepherdTreeV2() {
     const out = new Map<string, Set<string>>()
     const childrenAdj = new Map<string, string[]>()
     for (const c of connections) {
-      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
-      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      const pk = resolveParentCardKey(c)
+      const ck = resolveChildCardKey(c)
       if (!childrenAdj.has(pk)) childrenAdj.set(pk, [])
       childrenAdj.get(pk)!.push(ck)
     }
@@ -930,7 +1050,7 @@ export default function ShepherdTreeV2() {
     const out = new Map<string, Record<string, number>>()
     for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
-        const k = nodeKey(p.id, l.id)
+        const k = p.key
         const desc = descendantsByKey.get(k) || new Set<string>()
         const counts: Record<string, number> = {}
         // For each bucket: count DISTINCT person ids among descendants
@@ -1045,7 +1165,7 @@ export default function ShepherdTreeV2() {
   const disconnectSelectedFromParents = async () => {
     if (!connectMode || selected.size === 0) return
     const selSet = selected
-    const toRemove = connections.filter(c => selSet.has(selKey(c.childPersonId, c.childLayerId)))
+    const toRemove = connections.filter(c => selSet.has(resolveChildCardKey(c)))
     if (toRemove.length === 0) return
     try {
       await Promise.all(toRemove.map(c => fetch('/api/tree', {
@@ -1092,7 +1212,7 @@ export default function ShepherdTreeV2() {
   const selectedInboundEdgeCount = (() => {
     if (!connectMode || selected.size === 0) return 0
     const selSet = selected
-    return connections.filter(c => selSet.has(selKey(c.childPersonId, c.childLayerId))).length
+    return connections.filter(c => selSet.has(resolveChildCardKey(c))).length
   })()
 
   if (loading) {
@@ -1153,7 +1273,7 @@ export default function ShepherdTreeV2() {
               ) : (
                 searchResults.map(p => {
                   // Is this person currently on the tree somewhere?
-                  const onTree = sortedLayers.some(l => (peopleByLayer.get(l.id) || []).some(pp => pp.id === p.id))
+                  const onTree = sortedLayers.some(l => (peopleByLayer.get(l.id) || []).some(pp => pp.personId === p.id))
                   return (
                     <button
                       key={p.id}
@@ -1285,7 +1405,7 @@ export default function ShepherdTreeV2() {
           {/* Vertical multiline layer labels + SELECT ALL, sticky to the viewport's left edge */}
           {sortedLayers.map((layer, i) => {
             const people = peopleByLayer.get(layer.id) || []
-            const selCount = people.reduce((n, p) => n + (selected.has(selKey(p.id, layer.id)) ? 1 : 0), 0)
+            const selCount = people.reduce((n, p) => n + (selected.has(p.key) ? 1 : 0), 0)
             return (
               <div
                 key={`label-${layer.id}`}
@@ -1380,8 +1500,8 @@ export default function ShepherdTreeV2() {
             }}
           >
             {connections.map(c => {
-              const pk = nodeKey(c.parentPersonId, c.parentLayerId)
-              const ck = nodeKey(c.childPersonId, c.childLayerId)
+              const pk = resolveParentCardKey(c)
+              const ck = resolveChildCardKey(c)
               if (!layout.xUnit.has(pk) || !layout.xUnit.has(ck)) return null
               const px = cardLeft(pk) + CARD_WIDTH / 2
               const py = cardTopAbs(c.parentLayerId) + CARD_HEIGHT
@@ -1393,8 +1513,8 @@ export default function ShepherdTreeV2() {
               const labelStripY = labelStripTop + Math.min(CARD_TOP_OFFSET - 12, 20)
 
               const isHovered = hoveredConnectionId === c.id
-              const isSelected = selected.has(selKey(c.parentPersonId, c.parentLayerId))
-                || selected.has(selKey(c.childPersonId, c.childLayerId))
+              const isSelected = selected.has(resolveParentCardKey(c))
+                || selected.has(resolveChildCardKey(c))
               const highlight = isHovered || isSelected
 
               let d: string
@@ -1423,10 +1543,10 @@ export default function ShepherdTreeV2() {
               const parentLayer = sortedLayers.find(l => l.id === c.parentLayerId)
               const childLayer = sortedLayers.find(l => l.id === c.childLayerId)
               const parentName =
-                (peopleByLayer.get(c.parentLayerId) || []).find(p => p.id === c.parentPersonId)?.name
+                (peopleByLayer.get(c.parentLayerId) || []).find(p => p.personId === c.parentPersonId)?.name
                 || 'Unknown parent'
               const childName =
-                (peopleByLayer.get(c.childLayerId) || []).find(p => p.id === c.childPersonId)?.name
+                (peopleByLayer.get(c.childLayerId) || []).find(p => p.personId === c.childPersonId)?.name
                 || 'Unknown child'
               const sourceLabel = c.id
                 // Determined by whether this edge came from a mapping. That
@@ -1499,10 +1619,10 @@ export default function ShepherdTreeV2() {
           {sortedLayers.map(layer => {
             const people = peopleByLayer.get(layer.id) || []
             return people.map(person => {
-              const k = nodeKey(person.id, layer.id)
+              const k = person.key
               const bucketCounts = bucketStatsByKey.get(k) || {}
               const total = metricBuckets.reduce((sum, b) => sum + (bucketCounts[b.id] || 0), 0)
-              const isSelected = selected.has(selKey(person.id, layer.id))
+              const isSelected = selected.has(k)
               const isExcluded = person.isExcluded
               const tooltipStats = metricBuckets.length > 0
                 ? metricBuckets.map(b => `${bucketCounts[b.id] || 0} ${b.fullName}`).join(' · ')
@@ -1516,7 +1636,7 @@ export default function ShepherdTreeV2() {
                     : `${person.name} — ${total} shepherded${tooltipStats ? ` · ${tooltipStats}` : ''}`}
                   onClick={e => {
                     e.stopPropagation()
-                    handleCardClick(e, person.id, layer.id, people)
+                    handleCardClick(e, k, layer.id, people)
                   }}
                   style={{
                     position: 'absolute',
@@ -1618,7 +1738,7 @@ export default function ShepherdTreeV2() {
           {sortedLayers.map(layer => {
             const people = peopleByLayer.get(layer.id) || []
             const maxX = people.reduce((mx, p) => {
-              const u = layout.xUnit.get(nodeKey(p.id, layer.id)) ?? -1
+              const u = layout.xUnit.get(p.key) ?? -1
               return Math.max(mx, u)
             }, -1)
             const placeholderLeft = BAND_PADDING_LEFT + (maxX + 1) * UNIT
@@ -1765,7 +1885,7 @@ export default function ShepherdTreeV2() {
          ═══════════════════════════════════════════════════════════ */}
       {pickerLayerId && (() => {
         const layer = layers.find(l => l.id === pickerLayerId)
-        const existingInLayer = new Set(getPeopleForLayer(pickerLayerId).map(p => p.id))
+        const existingInLayer = new Set(getPeopleForLayer(pickerLayerId).map(p => p.personId))
         return (
           <PeoplePickerModal
             layerName={layer?.name || 'Layer'}
@@ -2161,6 +2281,26 @@ export default function ShepherdTreeV2() {
                       onFocus={e => { e.currentTarget.style.border = `1px solid ${layer.color.label}55`; e.currentTarget.style.background = 'white' }}
                       onBlur={e => { e.currentTarget.style.border = '1px solid transparent'; e.currentTarget.style.background = 'rgba(255,255,255,0.6)' }}
                     />
+
+                    {/* Congregational toggle */}
+                    <button
+                      onClick={e => {
+                        e.stopPropagation()
+                        setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isCongregational: !l.isCongregational } : l))
+                      }}
+                      title={layer.isCongregational ? 'Congregational level (allows duplicate cards per membership)' : 'Mark as congregational (lowest level, non-leadership)'}
+                      className="sans"
+                      style={{
+                        fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                        padding: '4px 8px', borderRadius: 6,
+                        border: `1px solid ${layer.isCongregational ? layer.color.label : layer.color.label + '40'}`,
+                        background: layer.isCongregational ? layer.color.label : 'rgba(255,255,255,0.6)',
+                        color: layer.isCongregational ? 'white' : layer.color.label,
+                        cursor: 'pointer', whiteSpace: 'nowrap',
+                        flexShrink: 0,
+                      }}>
+                      {layer.isCongregational ? '✓ CONG' : 'CONG'}
+                    </button>
 
                     {/* Delete */}
                     <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}

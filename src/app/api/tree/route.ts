@@ -165,7 +165,7 @@ export async function GET() {
     { data: metricBuckets },
     { data: metricBucketLayers },
   ] = await Promise.all([
-    admin.from('tree_layers').select('id, name, category, rank')
+    admin.from('tree_layers').select('id, name, category, rank, is_congregational')
       .eq('church_id', churchId!).order('rank'),
     admin.from('tree_assignments').select('id, person_id, layer_id, supervisor_person_id, sort_order, church_id')
       .eq('church_id', churchId!).order('sort_order'),
@@ -213,7 +213,7 @@ export async function GET() {
       .select('mapping_id, item_id')
       .eq('church_id', churchId!),
     admin.from('tree_connections')
-      .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id')
+      .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id, context_group_id, context_team_id')
       .eq('church_id', churchId!),
     admin.from('tree_metric_buckets')
       .select('id, label, full_name, color, sort_order')
@@ -973,12 +973,14 @@ export async function GET() {
         .filter((bl: { bucket_id: string; layer_id: string }) => bl.bucket_id === b.id)
         .map((bl: { bucket_id: string; layer_id: string }) => bl.layer_id),
     })),
-    connections: (treeConnections || []).map((c: { id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string }) => ({
+    connections: (treeConnections || []).map((c: { id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string; context_group_id: string | null; context_team_id: string | null }) => ({
       id: c.id,
       parentPersonId: c.parent_person_id,
       parentLayerId: c.parent_layer_id,
       childPersonId: c.child_person_id,
       childLayerId: c.child_layer_id,
+      contextGroupId: c.context_group_id,
+      contextTeamId: c.context_team_id,
     })),
     groupsList: (groups || []).map((g: { id: string; name: string; group_type_id?: string | null; pco_group_type_id?: string | null }) => ({
       id: g.id,
@@ -1002,24 +1004,32 @@ export async function GET() {
         .map((it: { mapping_id: string; item_id: string }) => it.item_id),
     })),
     // Pre-computed per-layer people derived from Groups/Teams mappings.
-    // Frontend unions these with pcoListPeople-based entries to render cards.
+    // Now carries the context (group/team id) of each appearance so the
+    // frontend can render one card per membership on congregational layers.
     mappingLayerPeople: (() => {
-      type Row = { layerId: string; personId: string; personName: string; role: 'leader' | 'member' }
+      type Row = {
+        layerId: string
+        personId: string
+        personName: string
+        role: 'leader' | 'member'
+        contextKind: 'group' | 'team'
+        contextId: string
+      }
       const rows: Row[] = []
-      const seen = new Set<string>() // layerId::personId::role
+      const seen = new Set<string>() // layerId::personId::role::contextKind::contextId
       for (const m of (gtMappings || []) as { id: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null }[]) {
         const items = (gtMappingItems || []).filter((it: { mapping_id: string }) => it.mapping_id === m.id).map((it: { item_id: string }) => it.item_id)
         if (items.length === 0) continue
-        const pool: { personId: string; role: string }[] = []
+        const pool: { personId: string; role: string; contextKind: 'group' | 'team'; contextId: string }[] = []
         if (m.kind === 'groups') {
           for (const gid of items) {
             const members = groupMembers.get(gid) || []
-            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role })
+            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role, contextKind: 'group', contextId: gid })
           }
         } else if (m.kind === 'teams') {
           for (const tid of items) {
             const members = teamMembers.get(tid) || []
-            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role })
+            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role, contextKind: 'team', contextId: tid })
           }
         }
         for (const mm of pool) {
@@ -1027,12 +1037,19 @@ export async function GET() {
           const layerId = isLeader ? m.leader_layer_id : m.member_layer_id
           if (!layerId) continue
           const role: 'leader' | 'member' = isLeader ? 'leader' : 'member'
-          const key = `${layerId}::${mm.personId}::${role}`
+          const key = `${layerId}::${mm.personId}::${role}::${mm.contextKind}-${mm.contextId}`
           if (seen.has(key)) continue
           seen.add(key)
           const p = personMap.get(mm.personId)
           if (!p) continue
-          rows.push({ layerId, personId: mm.personId, personName: p.name || 'Unknown', role })
+          rows.push({
+            layerId,
+            personId: mm.personId,
+            personName: p.name || 'Unknown',
+            role,
+            contextKind: mm.contextKind,
+            contextId: mm.contextId,
+          })
         }
       }
       return rows
@@ -1579,20 +1596,21 @@ export async function POST(request: Request) {
     const categoryMap: Record<string, string> = {
       'Elder': 'elder', 'Staff': 'staff', 'Volunteer': 'volunteer', 'Congregation': 'people',
     }
-    const resultLayers: { id: string; name: string; rank: number }[] = []
+    const resultLayers: { id: string; name: string; rank: number; is_congregational: boolean }[] = []
     for (let i = 0; i < layerList.length; i++) {
       const l = layerList[i]
       const rank = i * 10
       const category = categoryMap[l.name] || l.category || 'custom'
+      const isCong = !!l.is_congregational
       if (l.id && existingIds.has(l.id)) {
         await admin.from('tree_layers')
-          .update({ name: l.name, rank, category })
+          .update({ name: l.name, rank, category, is_congregational: isCong })
           .eq('id', l.id)
-        resultLayers.push({ id: l.id, name: l.name, rank })
+        resultLayers.push({ id: l.id, name: l.name, rank, is_congregational: isCong })
       } else {
         const { data: newLayer } = await admin.from('tree_layers')
-          .insert({ name: l.name, rank, category, church_id: churchId })
-          .select('id, name, rank')
+          .insert({ name: l.name, rank, category, is_congregational: isCong, church_id: churchId })
+          .select('id, name, rank, is_congregational')
           .single()
         if (newLayer) resultLayers.push(newLayer)
       }
