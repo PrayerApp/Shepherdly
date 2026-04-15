@@ -205,6 +205,23 @@ export default function ShepherdTreeV2() {
   // Connection-building mode. Mutually exclusive with edit mode.
   const [connectMode, setConnectMode] = useState(false)
 
+  // Settings modal + persisted preferences
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  type LineStyle = 'bezier' | 'straight' | 'elbow' | 'step'
+  const [lineStyle, setLineStyle] = useState<LineStyle>('bezier')
+  // Hydrate persisted prefs on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('shepherd.v2.lineStyle')
+      if (raw === 'bezier' || raw === 'straight' || raw === 'elbow' || raw === 'step') {
+        setLineStyle(raw)
+      }
+    } catch {}
+  }, [])
+  useEffect(() => {
+    try { localStorage.setItem('shepherd.v2.lineStyle', lineStyle) } catch {}
+  }, [lineStyle])
+
   // ── Selection (key = "personId::layerId") ───────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const lastSelectedRef = useRef<{ layerId: string; index: number } | null>(null)
@@ -637,11 +654,16 @@ export default function ShepherdTreeV2() {
     for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(nodeKey(p.id, l.id), p.name)
     }
+    // Child order: higher layers first (lower index = higher in tree),
+    // then alphabetical by last name.
     const childSortCmp = (a: string, b: string) => {
+      const la = layerIndex(a.split('::')[1])
+      const lb = layerIndex(b.split('::')[1])
+      if (la !== lb) return la - lb
       const na = nameForKey.get(a) || ''
       const nb = nameForKey.get(b) || ''
-      const la = lastName(na), lb = lastName(nb)
-      const c = la.localeCompare(lb, undefined, { sensitivity: 'base' })
+      const lna = lastName(na), lnb = lastName(nb)
+      const c = lna.localeCompare(lnb, undefined, { sensitivity: 'base' })
       if (c !== 0) return c
       return na.localeCompare(nb, undefined, { sensitivity: 'base' })
     }
@@ -711,10 +733,10 @@ export default function ShepherdTreeV2() {
     const u = layout.xUnit.get(k) ?? 0
     return BAND_PADDING_LEFT + u * UNIT
   }
-  const bandTop = (layerIdx: number): number => layerIdx * (BAND_HEIGHT + 2)
+  const bandTop = (layerIdx: number): number => layerIdx * BAND_HEIGHT
   const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
   const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
-  const totalTreeHeight = sortedLayers.length * (BAND_HEIGHT + 2)
+  const totalTreeHeight = sortedLayers.length * BAND_HEIGHT
 
   // ── Connect / Disconnect actions ────────────────────────────
   // A "connection plan" is derived from the current selection when in
@@ -811,14 +833,19 @@ export default function ShepherdTreeV2() {
         <h2 className="font-serif" style={{ fontSize: 16, color: 'var(--primary)', margin: 0 }}>Shepherd Tree</h2>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
-            onClick={() => { setAssignSelectedLayerId(null); setAssignModalOpen(true) }}
+            onClick={() => {
+              if (connectMode) { setConnectMode(false); clearSelection() }
+              else { setConnectMode(true); setEditMode(false); clearSelection() }
+            }}
             className="sans"
             style={{
-              fontSize: 12, fontWeight: 500, padding: '6px 12px', borderRadius: 8,
-              border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)',
+              fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+              border: `1px solid ${connectMode ? '#2a6a3a' : 'var(--border)'}`,
+              background: connectMode ? 'rgba(60,160,90,0.10)' : 'white',
+              color: connectMode ? '#2a6a3a' : 'var(--foreground)',
               cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
             }}>
-            Assign List
+            {connectMode ? 'Done connecting' : 'Connect People'}
           </button>
           <button
             onClick={openModal}
@@ -846,19 +873,17 @@ export default function ShepherdTreeV2() {
             {editMode ? 'Done' : 'Edit'}
           </button>
           <button
-            onClick={() => {
-              if (connectMode) { setConnectMode(false); clearSelection() }
-              else { setConnectMode(true); setEditMode(false); clearSelection() }
-            }}
+            onClick={() => setSettingsOpen(true)}
             className="sans"
+            title="Tree display settings"
+            aria-label="Settings"
             style={{
-              fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
-              border: `1px solid ${connectMode ? '#2a6a3a' : 'var(--border)'}`,
-              background: connectMode ? 'rgba(60,160,90,0.10)' : 'white',
-              color: connectMode ? '#2a6a3a' : 'var(--foreground)',
+              fontSize: 12, fontWeight: 500, padding: '6px 10px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)',
               cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+              display: 'inline-flex', alignItems: 'center', gap: 4,
             }}>
-            {connectMode ? 'Done connecting' : 'Make connections'}
+            <span style={{ fontSize: 14, lineHeight: 1 }}>⚙</span> Settings
           </button>
         </div>
       </div>
@@ -915,7 +940,7 @@ export default function ShepherdTreeV2() {
                       </span>
                     )}
                   </div>
-                  {editMode && people.length > 0 && (
+                  {(editMode || connectMode) && people.length > 0 && (
                     <button
                       onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
                       className="sans"
@@ -955,10 +980,34 @@ export default function ShepherdTreeV2() {
               const midY = (py + cy) / 2
               const highlight = selected.has(selKey(c.parentPersonId, c.parentLayerId))
                 || selected.has(selKey(c.childPersonId, c.childLayerId))
+              let d: string
+              if (lineStyle === 'straight') {
+                d = `M ${px} ${py} L ${cx} ${cy}`
+              } else if (lineStyle === 'elbow') {
+                // Vertical down, then horizontal, then vertical into child
+                d = `M ${px} ${py} V ${midY} H ${cx} V ${cy}`
+              } else if (lineStyle === 'step') {
+                // Like elbow but with small rounded corners
+                const r = 6
+                const dir = cx >= px ? 1 : -1
+                if (Math.abs(cx - px) < r * 2) {
+                  d = `M ${px} ${py} L ${cx} ${cy}`
+                } else {
+                  d = `M ${px} ${py}
+                       V ${midY - r}
+                       Q ${px} ${midY}, ${px + dir * r} ${midY}
+                       H ${cx - dir * r}
+                       Q ${cx} ${midY}, ${cx} ${midY + r}
+                       V ${cy}`
+                }
+              } else {
+                // bezier (default)
+                d = `M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`
+              }
               return (
                 <path
                   key={c.id}
-                  d={`M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`}
+                  d={d}
                   stroke={highlight ? LINE_COLOR_HOVER : LINE_COLOR}
                   strokeWidth={highlight ? 2 : 1.4}
                   fill="none"
@@ -1519,6 +1568,21 @@ export default function ShepherdTreeV2() {
                 Drag to reorder. New layers get their own color.
               </p>
 
+              {/* Assign sources: shortcut into the Assign modal */}
+              <button
+                onClick={() => { setModalOpen(false); setAssignSelectedLayerId(null); setMappingDraft(null); setAssignTab('lists'); setAssignModalOpen(true) }}
+                className="sans"
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '10px 12px', margin: '0 0 12px', borderRadius: 8,
+                  border: '1px solid var(--border)', background: 'white',
+                  cursor: 'pointer', fontSize: 12, fontWeight: 500, color: 'var(--foreground)',
+                }}>
+                <span>Assign sources to layers…</span>
+                <span style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>→</span>
+              </button>
+              <div style={{ borderTop: '1px solid var(--border)', margin: '0 0 12px' }} />
+
               {draftLayers.map((layer, idx) => {
                 // A layer is "new" if its id doesn't match any DB layer
                 const isFromDb = layers.some(l => l.id === layer.id)
@@ -1609,6 +1673,74 @@ export default function ShepherdTreeV2() {
                 className="sans"
                 style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: 'none', background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>
                 {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════
+          MODAL: Settings — display preferences
+         ═══════════════════════════════════════════════════════════ */}
+      {settingsOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, background: 'rgba(0,0,0,0.3)' }}
+          onClick={e => { if (e.target === e.currentTarget) setSettingsOpen(false) }}
+        >
+          <div style={{
+            background: 'white', borderRadius: 16,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)', border: '1px solid var(--border)',
+            width: 'min(92vw, 440px)', maxHeight: 'min(85vh, 560px)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <h3 className="font-serif" style={{ fontSize: 14, color: 'var(--primary)', margin: 0 }}>Tree Settings</h3>
+              <button onClick={() => setSettingsOpen(false)}
+                style={{ fontSize: 18, lineHeight: 1, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+            </div>
+            <div style={{ overflowY: 'auto', padding: '16px 20px', flex: 1 }}>
+              <div className="sans" style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', textTransform: 'uppercase', marginBottom: 10 }}>
+                Connection Line Style
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {(['bezier','straight','elbow','step'] as const).map(style => {
+                  const active = lineStyle === style
+                  // Tiny preview path
+                  const W = 120, H = 56, px = 20, py = 8, cx = W - 20, cy = H - 8, midY = H / 2
+                  let d = ''
+                  if (style === 'straight') d = `M ${px} ${py} L ${cx} ${cy}`
+                  else if (style === 'elbow') d = `M ${px} ${py} V ${midY} H ${cx} V ${cy}`
+                  else if (style === 'step') {
+                    const r = 6
+                    d = `M ${px} ${py} V ${midY - r} Q ${px} ${midY}, ${px + r} ${midY} H ${cx - r} Q ${cx} ${midY}, ${cx} ${midY + r} V ${cy}`
+                  } else d = `M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`
+                  return (
+                    <button
+                      key={style}
+                      onClick={() => setLineStyle(style)}
+                      className="sans"
+                      style={{
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                        padding: '8px 8px 10px', borderRadius: 10,
+                        border: active ? '2px solid var(--primary)' : '1px solid var(--border)',
+                        background: active ? 'rgba(45, 96, 71, 0.06)' : 'white',
+                        cursor: 'pointer',
+                      }}>
+                      <svg width={W} height={H}>
+                        <circle cx={px} cy={py} r={3} fill={active ? 'var(--primary)' : '#999'} />
+                        <circle cx={cx} cy={cy} r={3} fill={active ? 'var(--primary)' : '#999'} />
+                        <path d={d} stroke={active ? 'var(--primary)' : '#999'} strokeWidth={1.6} fill="none" />
+                      </svg>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: active ? 'var(--primary)' : 'var(--foreground)', textTransform: 'capitalize' }}>{style}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', borderRadius: '0 0 16px 16px' }}>
+              <button onClick={() => setSettingsOpen(false)} className="sans"
+                style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+                Close
               </button>
             </div>
           </div>
