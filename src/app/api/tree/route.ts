@@ -1401,65 +1401,15 @@ export async function POST(request: Request) {
       if (itErr) return NextResponse.json({ error: itErr.message }, { status: 500 })
     }
 
-    // Regenerate the auto-connections owned by this mapping. Always wipe
-    // first so toggling off or changing items cleans up stale edges.
+    // Always wipe mapping-owned edges up-front so toggling auto_connect
+    // off (or changing items) fully cleans up stale edges; the helper
+    // will only re-create them if auto_connect is still true.
     await admin.from('tree_connections').delete().eq('source_mapping_id', mappingId!)
-
-    if (auto_connect && leader_layer_id && member_layer_id && Array.isArray(item_ids) && item_ids.length > 0) {
-      // Rank check: leader layer must be above (lower rank than) member layer.
-      const { data: layerRows } = await admin.from('tree_layers')
-        .select('id, rank').eq('church_id', churchId!).in('id', [leader_layer_id, member_layer_id])
-      const rankMap = new Map((layerRows || []).map((l: { id: string; rank: number }) => [l.id, l.rank]))
-      const lRank = rankMap.get(leader_layer_id)
-      const mRank = rankMap.get(member_layer_id)
-      if (lRank !== undefined && mRank !== undefined && lRank < mRank) {
-        // Fetch memberships for all the selected groups or teams
-        const table = kind === 'groups' ? 'group_memberships' : 'team_memberships'
-        const fk = kind === 'groups' ? 'group_id' : 'team_id'
-        const { data: memberships } = await admin.from(table)
-          .select(`person_id, ${fk}, role, is_active`)
-          .eq('church_id', churchId!)
-          .eq('is_active', true)
-          .in(fk, item_ids)
-          .range(0, 49999)
-        type Mem = { person_id: string; role: string | null; [k: string]: unknown }
-        // Group by group/team id
-        const byItem = new Map<string, Mem[]>()
-        for (const m of (memberships || []) as Mem[]) {
-          const iid = m[fk] as string
-          if (!byItem.has(iid)) byItem.set(iid, [])
-          byItem.get(iid)!.push(m)
-        }
-
-        const leaderRe = /leader|co.?leader/i
-        const edges: { parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string; church_id: string; source_mapping_id: string }[] = []
-        const seen = new Set<string>()
-        for (const [, rows] of byItem) {
-          const leaders = rows.filter(r => leaderRe.test(r.role || '')).map(r => r.person_id)
-          const members = rows.filter(r => !leaderRe.test(r.role || '')).map(r => r.person_id)
-          if (leaders.length === 0 || members.length === 0) continue
-          for (const l of leaders) {
-            for (const m of members) {
-              if (l === m) continue
-              const k = `${l}|${m}`
-              if (seen.has(k)) continue
-              seen.add(k)
-              edges.push({
-                parent_person_id: l, parent_layer_id: leader_layer_id,
-                child_person_id: m, child_layer_id: member_layer_id,
-                church_id: churchId!, source_mapping_id: mappingId!,
-              })
-            }
-          }
-        }
-        for (let i = 0; i < edges.length; i += 500) {
-          const chunk = edges.slice(i, i + 500)
-          await admin.from('tree_connections').upsert(chunk, {
-            onConflict: 'parent_person_id,parent_layer_id,child_person_id,child_layer_id',
-            ignoreDuplicates: true,
-          })
-        }
-      }
+    try {
+      const { regenerateAutoConnectEdgesForChurch } = await import('@/lib/tree-auto-connect')
+      await regenerateAutoConnectEdgesForChurch(admin, churchId!, { onlyMappingId: mappingId! })
+    } catch (e) {
+      console.error('Auto-connect regeneration failed after save:', e)
     }
 
     return NextResponse.json({ success: true, id: mappingId })

@@ -13,12 +13,15 @@
 export async function regenerateAutoConnectEdgesForChurch(
   admin: any,
   churchId: string,
+  opts: { onlyMappingId?: string } = {},
 ): Promise<{ mappings: number; edges: number }> {
-  const { data: mappings } = await admin
+  let q = admin
     .from('group_team_layer_mappings')
     .select('id, kind, leader_layer_id, member_layer_id, auto_connect')
     .eq('church_id', churchId)
     .eq('auto_connect', true)
+  if (opts.onlyMappingId) q = q.eq('id', opts.onlyMappingId)
+  const { data: mappings } = await q
 
   if (!mappings || mappings.length === 0) return { mappings: 0, edges: 0 }
 
@@ -46,12 +49,22 @@ export async function regenerateAutoConnectEdgesForChurch(
 
     const table = m.kind === 'groups' ? 'group_memberships' : 'team_memberships'
     const fk = m.kind === 'groups' ? 'group_id' : 'team_id'
-    const { data: memberships } = await admin.from(table)
-      .select(`person_id, ${fk}, role, is_active`)
-      .eq('church_id', churchId)
-      .eq('is_active', true)
-      .in(fk, itemIds)
-      .range(0, 49999)
+    // Paginate — PostgREST caps single responses well below our needs for
+    // large groups/teams, and .range() alone doesn't raise that ceiling.
+    const memberships: any[] = []
+    const PAGE = 1000
+    for (let from = 0; ; from += PAGE) {
+      const { data: page } = await admin.from(table)
+        .select(`person_id, ${fk}, role, is_active`)
+        .eq('church_id', churchId)
+        .eq('is_active', true)
+        .in(fk, itemIds)
+        .order('id')
+        .range(from, from + PAGE - 1)
+      if (!page || page.length === 0) break
+      memberships.push(...page)
+      if (page.length < PAGE) break
+    }
 
     const byItem = new Map<string, { person_id: string; role: string | null }[]>()
     for (const row of (memberships || []) as any[]) {
