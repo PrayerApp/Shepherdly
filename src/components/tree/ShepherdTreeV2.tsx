@@ -111,7 +111,7 @@ const COLOR_PALETTE = [
 const BAND_HEIGHT = 150
 const CARD_WIDTH = 210
 const CARD_HEIGHT = 96
-const CARD_GAP = 10
+const CARD_GAP = 8
 const UNIT = CARD_WIDTH + CARD_GAP
 const BAND_PADDING_LEFT = 16
 const CARD_TOP_OFFSET = 40 // cards start below the layer label
@@ -202,6 +202,8 @@ export default function ShepherdTreeV2() {
   // restored. Clicking a card selects it (shift/cmd for multi-select).
   // Outside edit mode, cards are read-only.
   const [editMode, setEditMode] = useState(false)
+  // Connection-building mode. Mutually exclusive with edit mode.
+  const [connectMode, setConnectMode] = useState(false)
 
   // ── Selection (key = "personId::layerId") ───────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -333,7 +335,7 @@ export default function ShepherdTreeV2() {
 
   // ── Card click → selection (edit mode only) ────────────────
   const handleCardClick = (e: React.MouseEvent, personId: string, layerId: string, people: (PersonCard & { isExcluded: boolean })[]) => {
-    if (!editMode) return
+    if (!editMode && !connectMode) return
     const key = selKey(personId, layerId)
     const index = people.findIndex(p => p.id === personId)
 
@@ -429,10 +431,11 @@ export default function ShepherdTreeV2() {
       if (e.key !== 'Escape') return
       if (selected.size > 0) clearSelection()
       else if (editMode) setEditMode(false)
+      else if (connectMode) setConnectMode(false)
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [selected, editMode])
+  }, [selected, editMode, connectMode])
 
   const getLinkedList = (layerId: string): PcoList | null => {
     const link = listLayerLinks.find(ll => ll.layerId === layerId)
@@ -627,8 +630,25 @@ export default function ShepherdTreeV2() {
     for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) renderable.add(nodeKey(p.id, l.id))
     }
+    // Build a key -> name lookup so we can sort children alphabetically
+    // (by last name) before laying them out. This keeps tree branches in
+    // a predictable left-to-right order.
+    const nameForKey = new Map<string, string>()
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(nodeKey(p.id, l.id), p.name)
+    }
+    const childSortCmp = (a: string, b: string) => {
+      const na = nameForKey.get(a) || ''
+      const nb = nameForKey.get(b) || ''
+      const la = lastName(na), lb = lastName(nb)
+      const c = la.localeCompare(lb, undefined, { sensitivity: 'base' })
+      if (c !== 0) return c
+      return na.localeCompare(nb, undefined, { sensitivity: 'base' })
+    }
     for (const [k, kids] of childrenMap) {
-      childrenMap.set(k, kids.filter(ck => renderable.has(ck)))
+      const filtered = kids.filter(ck => renderable.has(ck))
+      filtered.sort(childSortCmp)
+      childrenMap.set(k, filtered)
     }
 
     const inGraph = new Set<string>()
@@ -662,7 +682,7 @@ export default function ShepherdTreeV2() {
       const la = layerIndex(a.split('::')[1])
       const lb = layerIndex(b.split('::')[1])
       if (la !== lb) return la - lb
-      return a.localeCompare(b)
+      return childSortCmp(a, b)
     })
     for (const r of sortedRoots) layoutNode(r)
 
@@ -697,51 +717,67 @@ export default function ShepherdTreeV2() {
   const totalTreeHeight = sortedLayers.length * (BAND_HEIGHT + 2)
 
   // ── Connect / Disconnect actions ────────────────────────────
-  const canConnectSelection: null | {
+  // A "connection plan" is derived from the current selection when in
+  // connect mode. Rule:
+  //   1. Find the topmost (lowest rank) layer among selected cards.
+  //   2. If there is exactly ONE person on that top layer → they become
+  //      the parent of every other selected card.
+  //   3. If there are multiple cards on the top layer → no valid plan.
+  //   4. The plan is "disconnect" only when every child→parent edge
+  //      already exists; otherwise it's "connect" (adds any missing edges).
+  const connectionPlan: null | {
     parent: { personId: string; layerId: string }
-    child: { personId: string; layerId: string }
-    exists: boolean
+    children: { personId: string; layerId: string }[]
+    existing: number
+    missing: number
   } = (() => {
-    if (!editMode || selected.size !== 2) return null
-    const pair = [...selected].map(s => {
+    if (!connectMode || selected.size < 2) return null
+    const items = [...selected].map(s => {
       const [personId, layerId] = s.split('::')
       return { personId, layerId, rank: layerIndex(layerId) }
     })
-    const [a, b] = pair
-    if (a.layerId === b.layerId || a.rank === b.rank) return null
-    const [parent, child] = a.rank < b.rank ? [a, b] : [b, a]
-    const exists = connections.some(c =>
-      c.parentPersonId === parent.personId && c.parentLayerId === parent.layerId
-      && c.childPersonId === child.personId && c.childLayerId === child.layerId
-    )
+    const topRank = Math.min(...items.map(i => i.rank))
+    const top = items.filter(i => i.rank === topRank)
+    if (top.length !== 1) return null
+    const parent = top[0]
+    const children = items.filter(i => !(i.personId === parent.personId && i.layerId === parent.layerId))
+    if (children.length === 0) return null
+    // All children must be strictly below the parent
+    if (children.some(c => c.rank <= parent.rank)) return null
+    let existing = 0
+    for (const c of children) {
+      const hasEdge = connections.some(con =>
+        con.parentPersonId === parent.personId && con.parentLayerId === parent.layerId
+        && con.childPersonId === c.personId && con.childLayerId === c.layerId
+      )
+      if (hasEdge) existing++
+    }
+    const missing = children.length - existing
     return {
       parent: { personId: parent.personId, layerId: parent.layerId },
-      child: { personId: child.personId, layerId: child.layerId },
-      exists,
+      children: children.map(c => ({ personId: c.personId, layerId: c.layerId })),
+      existing, missing,
     }
   })()
 
-  const toggleConnection = async () => {
-    const pair = canConnectSelection
-    if (!pair) return
-    const action = pair.exists ? 'remove_connection' : 'add_connection'
+  const applyConnectionPlan = async (mode: 'connect' | 'disconnect') => {
+    const plan = connectionPlan
+    if (!plan) return
+    const action = mode === 'connect' ? 'add_connection' : 'remove_connection'
     try {
-      const res = await fetch('/api/tree', {
+      await Promise.all(plan.children.map(c => fetch('/api/tree', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          parent_person_id: pair.parent.personId,
-          parent_layer_id: pair.parent.layerId,
-          child_person_id: pair.child.personId,
-          child_layer_id: pair.child.layerId,
+          parent_person_id: plan.parent.personId,
+          parent_layer_id: plan.parent.layerId,
+          child_person_id: c.personId,
+          child_layer_id: c.layerId,
         }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        console.error('Connection error:', err)
-        return
-      }
+      }).then(async r => {
+        if (!r.ok) throw new Error(await r.text())
+      })))
       clearSelection()
       await fetchData()
     } catch (err) {
@@ -795,7 +831,10 @@ export default function ShepherdTreeV2() {
             Manage Layers
           </button>
           <button
-            onClick={() => { setEditMode(m => !m); if (editMode) clearSelection() }}
+            onClick={() => {
+              if (editMode) { setEditMode(false); clearSelection() }
+              else { setEditMode(true); setConnectMode(false); clearSelection() }
+            }}
             className="sans"
             style={{
               fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
@@ -805,6 +844,21 @@ export default function ShepherdTreeV2() {
               cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
             }}>
             {editMode ? 'Done' : 'Edit'}
+          </button>
+          <button
+            onClick={() => {
+              if (connectMode) { setConnectMode(false); clearSelection() }
+              else { setConnectMode(true); setEditMode(false); clearSelection() }
+            }}
+            className="sans"
+            style={{
+              fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+              border: `1px solid ${connectMode ? '#2a6a3a' : 'var(--border)'}`,
+              background: connectMode ? 'rgba(60,160,90,0.10)' : 'white',
+              color: connectMode ? '#2a6a3a' : 'var(--foreground)',
+              cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+            }}>
+            {connectMode ? 'Done connecting' : 'Make connections'}
           </button>
         </div>
       </div>
@@ -960,7 +1014,7 @@ export default function ShepherdTreeV2() {
                     boxSizing: 'border-box',
                     userSelect: 'none',
                     WebkitUserSelect: 'none',
-                    cursor: editMode ? 'pointer' : 'default',
+                    cursor: (editMode || connectMode) ? 'pointer' : 'default',
                     transition: 'box-shadow 0.15s, border-color 0.15s, opacity 0.15s, left 0.2s, top 0.2s',
                     zIndex: 2,
                   }}
@@ -1060,42 +1114,65 @@ export default function ShepherdTreeV2() {
         </div>
       </div>
 
-      {/* ── Floating action bar (edit mode, selection > 0) ── */}
-      {editMode && selected.size > 0 && (
+      {/* ── Floating action bar (edit or connect, selection > 0) ── */}
+      {(editMode || connectMode) && selected.size > 0 && (
         <div
           className="sans"
           style={{
             position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
             zIndex: 40,
             background: 'white', borderRadius: 12,
-            border: `1px solid ${SELECT_OUTLINE}`,
+            border: `1px solid ${connectMode ? '#2a6a3a' : SELECT_OUTLINE}`,
             boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
             padding: '8px 10px',
             display: 'flex', alignItems: 'center', gap: 8,
+            maxWidth: 'calc(100vw - 40px)', flexWrap: 'wrap',
           }}
         >
-          <span style={{ fontSize: 12, fontWeight: 600, color: '#7a5a00', padding: '0 6px' }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: connectMode ? '#2a6a3a' : '#7a5a00', padding: '0 6px' }}>
             {selected.size} selected
-            {selectionSummary.excludedCount > 0 && (
+            {editMode && selectionSummary.excludedCount > 0 && (
               <span style={{ fontWeight: 400, color: 'var(--muted-foreground)', marginLeft: 6 }}>
                 ({selectionSummary.activeCount} active, {selectionSummary.excludedCount} hidden)
               </span>
             )}
           </span>
-          {canConnectSelection && (
-            <button
-              onClick={toggleConnection}
-              style={{
-                fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
-                border: `1px solid ${canConnectSelection.exists ? '#c0392b44' : '#2a6a3a44'}`,
-                background: 'white',
-                color: canConnectSelection.exists ? '#c0392b' : '#2a6a3a',
-                cursor: 'pointer',
-              }}>
-              {canConnectSelection.exists ? 'Disconnect' : 'Connect'}
-            </button>
+
+          {/* ── Connect-mode actions ── */}
+          {connectMode && (
+            <>
+              {!connectionPlan && selected.size >= 2 && (
+                <span style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '0 6px' }}>
+                  Select one person on the top-most layer + anyone below them.
+                </span>
+              )}
+              {connectionPlan && connectionPlan.missing > 0 && (
+                <button
+                  onClick={() => applyConnectionPlan('connect')}
+                  style={{
+                    fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                    border: '1px solid #2a6a3a44', background: 'white', color: '#2a6a3a',
+                    cursor: 'pointer',
+                  }}>
+                  Connect {connectionPlan.missing} under parent
+                </button>
+              )}
+              {connectionPlan && connectionPlan.existing > 0 && (
+                <button
+                  onClick={() => applyConnectionPlan('disconnect')}
+                  style={{
+                    fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                    border: '1px solid #c0392b44', background: 'white', color: '#c0392b',
+                    cursor: 'pointer',
+                  }}>
+                  Disconnect {connectionPlan.existing > 1 ? `(${connectionPlan.existing})` : ''}
+                </button>
+              )}
+            </>
           )}
-          {selectionSummary.activeCount > 0 && (
+
+          {/* ── Edit-mode actions ── */}
+          {editMode && selectionSummary.activeCount > 0 && (
             <button
               onClick={() => applyToSelection('remove')}
               style={{
@@ -1106,7 +1183,7 @@ export default function ShepherdTreeV2() {
               Remove {selectionSummary.activeCount > 1 ? `(${selectionSummary.activeCount})` : ''}
             </button>
           )}
-          {selectionSummary.excludedCount > 0 && (
+          {editMode && selectionSummary.excludedCount > 0 && (
             <button
               onClick={() => applyToSelection('restore')}
               style={{
@@ -1117,6 +1194,7 @@ export default function ShepherdTreeV2() {
               Restore {selectionSummary.excludedCount > 1 ? `(${selectionSummary.excludedCount})` : ''}
             </button>
           )}
+
           <button
             onClick={clearSelection}
             style={{
