@@ -937,18 +937,70 @@ export default function ShepherdTreeV2() {
     for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(p.key, p.name)
     }
+
+    // ── Co-leader clustering ──────────────────────────────────
+    // When two leaders co-lead the same group/team (share at least one
+    // child card), they should be rendered adjacent to each other —
+    // alphabetical order is ignored inside the cluster. Use union-find
+    // keyed on card keys. If two parents share a child, they're unioned.
+    const parent = new Map<string, string>()
+    const find = (x: string): string => {
+      if (!parent.has(x)) parent.set(x, x)
+      let p = parent.get(x)!
+      while (p !== parent.get(p)!) {
+        parent.set(p, parent.get(parent.get(p)!)!)
+        p = parent.get(p)!
+      }
+      return p
+    }
+    const union = (a: string, b: string) => {
+      const ra = find(a), rb = find(b)
+      if (ra !== rb) parent.set(ra, rb)
+    }
+    for (const [, ps] of parentsMap) {
+      for (let i = 1; i < ps.length; i++) union(ps[0], ps[i])
+    }
+
+    // The cluster "anchor" is the alphabetically-first member of each
+    // cluster. Clusters with only one member anchor to themselves, so the
+    // sort falls through to pure alphabetical.
+    const clusterAnchorCache = new Map<string, string>()
+    const lastNameOf = (k: string) => lastName(nameForKey.get(k) || '')
+    const nameOf = (k: string) => nameForKey.get(k) || ''
+    const alphaCmp = (a: string, b: string) => {
+      const c = lastNameOf(a).localeCompare(lastNameOf(b), undefined, { sensitivity: 'base' })
+      if (c !== 0) return c
+      return nameOf(a).localeCompare(nameOf(b), undefined, { sensitivity: 'base' })
+    }
+    // Pre-compute cluster members among all parents that exist in the graph
+    {
+      const clusterMembers = new Map<string, string[]>()
+      const allParents = new Set<string>()
+      for (const [, ps] of parentsMap) for (const p of ps) allParents.add(p)
+      for (const p of allParents) {
+        const r = find(p)
+        if (!clusterMembers.has(r)) clusterMembers.set(r, [])
+        clusterMembers.get(r)!.push(p)
+      }
+      for (const [, ms] of clusterMembers) {
+        ms.sort(alphaCmp)
+        const anchor = ms[0]
+        for (const m of ms) clusterAnchorCache.set(m, anchor)
+      }
+    }
+    const clusterAnchorOf = (k: string): string => clusterAnchorCache.get(k) || k
+
     // Child order: higher layers first (lower index = higher in tree),
-    // then alphabetical by last name.
+    // then group co-leaders together by cluster anchor, then alphabetical
+    // within a cluster.
     const childSortCmp = (a: string, b: string) => {
       const la = layerIndex(a.split('::')[1])
       const lb = layerIndex(b.split('::')[1])
       if (la !== lb) return la - lb
-      const na = nameForKey.get(a) || ''
-      const nb = nameForKey.get(b) || ''
-      const lna = lastName(na), lnb = lastName(nb)
-      const c = lna.localeCompare(lnb, undefined, { sensitivity: 'base' })
-      if (c !== 0) return c
-      return na.localeCompare(nb, undefined, { sensitivity: 'base' })
+      const ca = clusterAnchorOf(a)
+      const cb = clusterAnchorOf(b)
+      if (ca !== cb) return alphaCmp(ca, cb)
+      return alphaCmp(a, b)
     }
     for (const [k, kids] of childrenMap) {
       const filtered = kids.filter(ck => renderable.has(ck))
@@ -968,21 +1020,57 @@ export default function ShepherdTreeV2() {
     const xUnit = new Map<string, number>()
     const visited = new Set<string>()
     let cursor = 0
+    // Tracks how many co-leaders of a cluster we've already placed. The
+    // n-th co-leader lands at center + n so they line up adjacent to the
+    // cluster's shared children.
+    const clusterPlacedCount = new Map<string, number>()
+
     const layoutNode = (k: string): number => {
       if (xUnit.has(k)) return xUnit.get(k)!
       if (visited.has(k)) return cursor
       visited.add(k)
-      const kids = (childrenMap.get(k) || []).filter(ck => !visited.has(ck))
-      if (kids.length === 0) {
-        const x = cursor++
+      const allKids = childrenMap.get(k) || []
+      const newKids = allKids.filter(ck => !visited.has(ck))
+
+      if (newKids.length > 0) {
+        // Normal subtree: lay out the unvisited children and centre
+        // ourselves over their x-range.
+        const childXs = newKids.map(ck => layoutNode(ck))
+        const x = (childXs[0] + childXs[childXs.length - 1]) / 2
         xUnit.set(k, x)
         return x
       }
-      const childXs = kids.map(ck => layoutNode(ck))
-      const x = (childXs[0] + childXs[childXs.length - 1]) / 2
+
+      // No new children to lay out. If we ARE a co-leader (our children
+      // were already positioned by a previously-processed leader), snap
+      // us to the shared subtree's centre + an offset so co-leaders sit
+      // adjacent to each other instead of landing at cursor++.
+      if (allKids.length > 0) {
+        const knownXs = allKids
+          .map(ck => xUnit.get(ck))
+          .filter((x): x is number => x !== undefined)
+        if (knownXs.length > 0) {
+          const center = (Math.min(...knownXs) + Math.max(...knownXs)) / 2
+          const anchor = clusterAnchorOf(k)
+          const n = (clusterPlacedCount.get(anchor) || 0) + 1
+          clusterPlacedCount.set(anchor, n)
+          const x = center + n
+          xUnit.set(k, x)
+          // Make sure the cluster row isn't stepped on by the next root's
+          // subtree — advance the global cursor past us if needed.
+          if (x + 1 > cursor) cursor = Math.ceil(x + 1)
+          return x
+        }
+      }
+
+      // True leaf.
+      const x = cursor++
       xUnit.set(k, x)
       return x
     }
+
+    // Roots: sort so co-leaders of the same cluster appear consecutively
+    // (same anchor) and the anchor lands first.
     const sortedRoots = [...roots].sort((a, b) => {
       const la = layerIndex(a.split('::')[1])
       const lb = layerIndex(b.split('::')[1])
