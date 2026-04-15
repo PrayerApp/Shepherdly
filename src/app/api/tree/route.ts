@@ -146,6 +146,8 @@ export async function GET() {
     { data: gtMappings },
     { data: gtMappingItems },
     { data: treeConnections },
+    { data: metricBuckets },
+    { data: metricBucketLayers },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -191,6 +193,12 @@ export async function GET() {
       .eq('church_id', churchId!),
     admin.from('tree_connections')
       .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id')
+      .eq('church_id', churchId!),
+    admin.from('tree_metric_buckets')
+      .select('id, label, full_name, color, sort_order')
+      .eq('church_id', churchId!).order('sort_order'),
+    admin.from('tree_metric_bucket_layers')
+      .select('bucket_id, layer_id')
       .eq('church_id', churchId!),
   ])
 
@@ -934,6 +942,16 @@ export async function GET() {
       layerId: e.layer_id,
       personName: personMap.get(e.person_id)?.name || 'Unknown',
     })),
+    metricBuckets: (metricBuckets || []).map((b: { id: string; label: string; full_name: string; color: string | null; sort_order: number }) => ({
+      id: b.id,
+      label: b.label,
+      fullName: b.full_name,
+      color: b.color,
+      sortOrder: b.sort_order,
+      layerIds: (metricBucketLayers || [])
+        .filter((bl: { bucket_id: string; layer_id: string }) => bl.bucket_id === b.id)
+        .map((bl: { bucket_id: string; layer_id: string }) => bl.layer_id),
+    })),
     connections: (treeConnections || []).map((c: { id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string }) => ({
       id: c.id,
       parentPersonId: c.parent_person_id,
@@ -1246,6 +1264,39 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Save (replace) all metric buckets atomically ─────────────
+  if (body.action === 'save_buckets') {
+    const incoming = (body.buckets || []) as {
+      label: string; fullName: string; color?: string | null; sortOrder?: number; layerIds?: string[]
+    }[]
+    // Validate: each layer can appear in at most one bucket
+    const seenLayers = new Set<string>()
+    for (const b of incoming) {
+      for (const lid of b.layerIds || []) {
+        if (seenLayers.has(lid)) return NextResponse.json({ error: 'A layer can only belong to one bucket' }, { status: 400 })
+        seenLayers.add(lid)
+      }
+    }
+    await admin.from('tree_metric_buckets').delete().eq('church_id', churchId!)
+    for (let i = 0; i < incoming.length; i++) {
+      const b = incoming[i]
+      const { data: ins, error } = await admin.from('tree_metric_buckets').insert({
+        label: b.label,
+        full_name: b.fullName,
+        color: b.color || null,
+        sort_order: b.sortOrder ?? i,
+        church_id: churchId,
+      }).select().single()
+      if (error || !ins) return NextResponse.json({ error: error?.message || 'insert failed' }, { status: 500 })
+      if (b.layerIds && b.layerIds.length > 0) {
+        const rows = b.layerIds.map(lid => ({ bucket_id: ins.id, layer_id: lid, church_id: churchId }))
+        const { error: le } = await admin.from('tree_metric_bucket_layers').insert(rows)
+        if (le) return NextResponse.json({ error: le.message }, { status: 500 })
+      }
+    }
     return NextResponse.json({ success: true })
   }
 

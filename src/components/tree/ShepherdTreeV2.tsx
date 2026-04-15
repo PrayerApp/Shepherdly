@@ -83,6 +83,37 @@ interface TreeConnection {
   childLayerId: string
 }
 
+interface MetricBucket {
+  id: string
+  label: string
+  fullName: string
+  color: string | null
+  sortOrder: number
+  layerIds: string[]
+}
+
+// Auto colors for buckets without an explicit color, ordered by sortOrder
+const BUCKET_COLOR_PALETTE: { bg: string; fg: string }[] = [
+  { bg: 'rgba(140, 90, 180, 0.14)', fg: '#5a2e87' },  // purple
+  { bg: 'rgba(80, 130, 190, 0.16)', fg: '#2b5a8a' },  // blue
+  { bg: 'rgba(60, 160, 90, 0.16)',  fg: '#2a6a3a' },  // green
+  { bg: 'rgba(200, 140, 60, 0.18)', fg: '#8a5a1a' },  // amber
+  { bg: 'rgba(190, 100, 100, 0.18)', fg: '#8a3a3a' }, // rose
+  { bg: 'rgba(60, 160, 160, 0.18)', fg: '#2a7a7a' },  // teal
+]
+function bucketColors(b: MetricBucket, idx: number): { bg: string; fg: string } {
+  if (b.color) {
+    // Treat as the fg; derive a soft bg from 14% alpha
+    const hex = b.color.replace('#', '')
+    const n = parseInt(hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex, 16)
+    if (!Number.isNaN(n) && hex.length >= 3) {
+      const r = (n >> 16) & 255, g = (n >> 8) & 255, bb = n & 255
+      return { bg: `rgba(${r},${g},${bb},0.16)`, fg: b.color }
+    }
+  }
+  return BUCKET_COLOR_PALETTE[idx % BUCKET_COLOR_PALETTE.length]
+}
+
 interface GroupLite {
   id: string
   name: string
@@ -165,6 +196,7 @@ export default function ShepherdTreeV2() {
   const [exclusions, setExclusions] = useState<LayerExclusion[]>([])
   const [inclusions, setInclusions] = useState<LayerInclusion[]>([])
   const [connections, setConnections] = useState<TreeConnection[]>([])
+  const [metricBuckets, setMetricBuckets] = useState<MetricBucket[]>([])
   const [gtMappings, setGtMappings] = useState<GtMapping[]>([])
   const [mappingLayerPeople, setMappingLayerPeople] = useState<MappingLayerPerson[]>([])
   const [groupsList, setGroupsList] = useState<GroupLite[]>([])
@@ -204,6 +236,52 @@ export default function ShepherdTreeV2() {
   const [editMode, setEditMode] = useState(false)
   // Connection-building mode. Mutually exclusive with edit mode.
   const [connectMode, setConnectMode] = useState(false)
+
+  // Bucket editor modal
+  const [bucketsOpen, setBucketsOpen] = useState(false)
+  type BucketDraft = { id?: string; label: string; fullName: string; color: string; layerIds: Set<string> }
+  const [bucketDrafts, setBucketDrafts] = useState<BucketDraft[]>([])
+  const [bucketsSaving, setBucketsSaving] = useState(false)
+
+  const openBuckets = () => {
+    setBucketDrafts(metricBuckets.map(b => ({
+      id: b.id, label: b.label, fullName: b.fullName, color: b.color || '',
+      layerIds: new Set(b.layerIds),
+    })))
+    setBucketsOpen(true)
+  }
+  const saveBuckets = async () => {
+    // Validate: labels non-empty, no layer in more than one bucket
+    const seen = new Set<string>()
+    for (const d of bucketDrafts) {
+      if (!d.label.trim() || !d.fullName.trim()) return alert('Every bucket needs a label and full name.')
+      for (const lid of d.layerIds) {
+        if (seen.has(lid)) return alert('A layer can only belong to one bucket.')
+        seen.add(lid)
+      }
+    }
+    setBucketsSaving(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_buckets',
+          buckets: bucketDrafts.map((d, i) => ({
+            label: d.label.trim(), fullName: d.fullName.trim(),
+            color: d.color || null, sortOrder: i, layerIds: [...d.layerIds],
+          })),
+        }),
+      })
+      if (!res.ok) throw new Error()
+      setBucketsOpen(false)
+      await fetchData()
+    } catch (err) {
+      console.error('Save buckets error:', err)
+    } finally {
+      setBucketsSaving(false)
+    }
+  }
 
   // Settings modal + persisted preferences
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -258,6 +336,7 @@ export default function ShepherdTreeV2() {
       setExclusions(data.layerExclusions || [])
       setInclusions(data.layerInclusions || [])
       setConnections(data.connections || [])
+      setMetricBuckets(data.metricBuckets || [])
       setGtMappings(data.gtMappings || [])
       setMappingLayerPeople(data.mappingLayerPeople || [])
       setGroupsList(data.groupsList || [])
@@ -733,6 +812,63 @@ export default function ShepherdTreeV2() {
     const u = layout.xUnit.get(k) ?? 0
     return BAND_PADDING_LEFT + u * UNIT
   }
+
+  // ── Descendants via connections (transitive) ─────────────────
+  const descendantsByKey = (() => {
+    const out = new Map<string, Set<string>>()
+    const childrenAdj = new Map<string, string[]>()
+    for (const c of connections) {
+      const pk = nodeKey(c.parentPersonId, c.parentLayerId)
+      const ck = nodeKey(c.childPersonId, c.childLayerId)
+      if (!childrenAdj.has(pk)) childrenAdj.set(pk, [])
+      childrenAdj.get(pk)!.push(ck)
+    }
+    const dfs = (k: string, acc: Set<string>, stack: Set<string>) => {
+      if (stack.has(k)) return
+      stack.add(k)
+      for (const ck of childrenAdj.get(k) || []) {
+        if (!acc.has(ck)) {
+          acc.add(ck)
+          dfs(ck, acc, stack)
+        }
+      }
+      stack.delete(k)
+    }
+    for (const k of childrenAdj.keys()) {
+      const acc = new Set<string>()
+      dfs(k, acc, new Set())
+      out.set(k, acc)
+    }
+    return out
+  })()
+
+  // Bucket counts for every card: { [nodeKey]: { [bucketId]: count } }
+  const bucketStatsByKey = (() => {
+    const layersByBucket = new Map<string, Set<string>>()
+    for (const b of metricBuckets) layersByBucket.set(b.id, new Set(b.layerIds))
+    const out = new Map<string, Record<string, number>>()
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) {
+        const k = nodeKey(p.id, l.id)
+        const desc = descendantsByKey.get(k) || new Set<string>()
+        const counts: Record<string, number> = {}
+        // For each bucket: count DISTINCT person ids among descendants
+        // whose layer belongs to the bucket.
+        for (const b of metricBuckets) {
+          const layerSet = layersByBucket.get(b.id)!
+          const seen = new Set<string>()
+          for (const dk of desc) {
+            const [pid, lid] = dk.split('::')
+            if (!layerSet.has(lid)) continue
+            seen.add(pid)
+          }
+          counts[b.id] = seen.size
+        }
+        out.set(k, counts)
+      }
+    }
+    return out
+  })()
   const bandTop = (layerIdx: number): number => layerIdx * BAND_HEIGHT
   const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
   const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
@@ -978,26 +1114,32 @@ export default function ShepherdTreeV2() {
               const cx = cardLeft(ck) + CARD_WIDTH / 2
               const cy = cardTopAbs(c.childLayerId)
               const midY = (py + cy) / 2
+              // For elbow/step: route the horizontal cross-bar through the
+              // label strip of the layer just below the parent, so the line
+              // doesn't cut through any intermediate cards when skipping
+              // layers. Label strip is from bandTop to bandTop + CARD_TOP_OFFSET.
+              const parentLayerIdx = layerIndex(c.parentLayerId)
+              const labelStripTop = bandTop(parentLayerIdx + 1)
+              const labelStripY = labelStripTop + Math.min(CARD_TOP_OFFSET - 12, 20)
               const highlight = selected.has(selKey(c.parentPersonId, c.parentLayerId))
                 || selected.has(selKey(c.childPersonId, c.childLayerId))
               let d: string
               if (lineStyle === 'straight') {
                 d = `M ${px} ${py} L ${cx} ${cy}`
               } else if (lineStyle === 'elbow') {
-                // Vertical down, then horizontal, then vertical into child
-                d = `M ${px} ${py} V ${midY} H ${cx} V ${cy}`
+                // Down to the label strip of the next layer, horizontal, then down to child
+                d = `M ${px} ${py} V ${labelStripY} H ${cx} V ${cy}`
               } else if (lineStyle === 'step') {
-                // Like elbow but with small rounded corners
                 const r = 6
                 const dir = cx >= px ? 1 : -1
                 if (Math.abs(cx - px) < r * 2) {
                   d = `M ${px} ${py} L ${cx} ${cy}`
                 } else {
                   d = `M ${px} ${py}
-                       V ${midY - r}
-                       Q ${px} ${midY}, ${px + dir * r} ${midY}
+                       V ${labelStripY - r}
+                       Q ${px} ${labelStripY}, ${px + dir * r} ${labelStripY}
                        H ${cx - dir * r}
-                       Q ${cx} ${midY}, ${cx} ${midY + r}
+                       Q ${cx} ${labelStripY}, ${cx} ${labelStripY + r}
                        V ${cy}`
                 }
               } else {
@@ -1020,20 +1162,20 @@ export default function ShepherdTreeV2() {
           {sortedLayers.map(layer => {
             const people = peopleByLayer.get(layer.id) || []
             return people.map(person => {
-              const stat = personStats[person.id] || { s: 0, l: 0, p: 0, f: 0, total: 0 }
-              const total = stat.total
-              const segs: [keyof typeof STAT_STYLES, number][] = [
-                ['s', stat.s], ['l', stat.l], ['p', stat.p], ['f', stat.f],
-              ]
+              const k = nodeKey(person.id, layer.id)
+              const bucketCounts = bucketStatsByKey.get(k) || {}
+              const total = metricBuckets.reduce((sum, b) => sum + (bucketCounts[b.id] || 0), 0)
               const isSelected = selected.has(selKey(person.id, layer.id))
               const isExcluded = person.isExcluded
-              const k = nodeKey(person.id, layer.id)
+              const tooltipStats = metricBuckets.length > 0
+                ? metricBuckets.map(b => `${bucketCounts[b.id] || 0} ${b.fullName}`).join(' · ')
+                : ''
               return (
                 <div
                   key={k}
                   title={isExcluded
                     ? `${person.name} — hidden from ${layer.name}. Click to select, then "Restore" to bring back.`
-                    : `${person.name} — ${total} shepherded · ${stat.s} staff · ${stat.l} leaders · ${stat.p} via groups/teams · ${stat.f} floaters`}
+                    : `${person.name} — ${total} shepherded${tooltipStats ? ` · ${tooltipStats}` : ''}`}
                   onClick={e => {
                     e.stopPropagation()
                     handleCardClick(e, person.id, layer.id, people)
@@ -1097,31 +1239,35 @@ export default function ShepherdTreeV2() {
                       display: 'flex', height: 4, borderRadius: 2,
                       background: 'rgba(0,0,0,0.05)', overflow: 'hidden', marginBottom: 5,
                     }}>
-                      {total > 0 && segs.map(([sk, v]) => (
-                        v > 0 ? (
-                          <div key={sk} style={{ flex: v, background: STAT_STYLES[sk].fg, opacity: 0.85 }} />
-                        ) : null
-                      ))}
-                    </div>
-                    <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between' }}>
-                      {(['s','l','p','f'] as const).map(sk => {
-                        const v = stat[sk]
-                        const style = STAT_STYLES[sk]
-                        const faded = v === 0
-                        return (
-                          <span key={sk} className="sans" style={{
-                            flex: 1, textAlign: 'center',
-                            fontSize: 10, fontWeight: 600,
-                            padding: '2px 0', borderRadius: 4,
-                            background: faded ? 'rgba(0,0,0,0.03)' : style.bg,
-                            color: faded ? 'var(--muted-foreground)' : style.fg,
-                            letterSpacing: 0.2,
-                          }}>
-                            {v}{sk.toUpperCase()}
-                          </span>
-                        )
+                      {metricBuckets.map((b, bi) => {
+                        const v = bucketCounts[b.id] || 0
+                        if (v === 0) return null
+                        const col = bucketColors(b, bi)
+                        return <div key={b.id} style={{ flex: v, background: col.fg, opacity: 0.85 }} />
                       })}
                     </div>
+                    {metricBuckets.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, justifyContent: 'space-between' }}>
+                        {metricBuckets.slice(0, 6).map((b, bi) => {
+                          const v = bucketCounts[b.id] || 0
+                          const col = bucketColors(b, bi)
+                          const faded = v === 0
+                          return (
+                            <span key={b.id} className="sans" title={`${b.fullName}: ${v}`} style={{
+                              flex: 1, textAlign: 'center',
+                              fontSize: 10, fontWeight: 600,
+                              padding: '2px 0', borderRadius: 4,
+                              background: faded ? 'rgba(0,0,0,0.03)' : col.bg,
+                              color: faded ? 'var(--muted-foreground)' : col.fg,
+                              letterSpacing: 0.2,
+                              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+                            }}>
+                              {v}{b.label}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 </div>
               )
@@ -1568,9 +1714,21 @@ export default function ShepherdTreeV2() {
                 Drag to reorder. New layers get their own color.
               </p>
 
-              {/* Assign sources: shortcut into the Assign modal */}
+              {/* Shortcuts: Assign sources + Assign metrics */}
               <button
                 onClick={() => { setModalOpen(false); setAssignSelectedLayerId(null); setMappingDraft(null); setAssignTab('lists'); setAssignModalOpen(true) }}
+                className="sans"
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '10px 12px', margin: '0 0 6px', borderRadius: 8,
+                  border: '1px solid var(--border)', background: 'white',
+                  cursor: 'pointer', fontSize: 12, fontWeight: 500, color: 'var(--foreground)',
+                }}>
+                <span>Assign sources to layers…</span>
+                <span style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>→</span>
+              </button>
+              <button
+                onClick={() => { setModalOpen(false); openBuckets() }}
                 className="sans"
                 style={{
                   width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1578,7 +1736,7 @@ export default function ShepherdTreeV2() {
                   border: '1px solid var(--border)', background: 'white',
                   cursor: 'pointer', fontSize: 12, fontWeight: 500, color: 'var(--foreground)',
                 }}>
-                <span>Assign sources to layers…</span>
+                <span>Assign layers to metrics…</span>
                 <span style={{ fontSize: 14, color: 'var(--muted-foreground)' }}>→</span>
               </button>
               <div style={{ borderTop: '1px solid var(--border)', margin: '0 0 12px' }} />
@@ -1680,6 +1838,142 @@ export default function ShepherdTreeV2() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════
+          MODAL: Metric Buckets — map layers to card metrics
+         ═══════════════════════════════════════════════════════════ */}
+      {bucketsOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 55, background: 'rgba(0,0,0,0.3)' }}
+          onClick={e => { if (e.target === e.currentTarget) setBucketsOpen(false) }}
+        >
+          <div style={{
+            background: 'white', borderRadius: 16,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)', border: '1px solid var(--border)',
+            width: 'min(92vw, 560px)', maxHeight: 'min(88vh, 700px)',
+            display: 'flex', flexDirection: 'column',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <h3 className="font-serif" style={{ fontSize: 14, color: 'var(--primary)', margin: 0 }}>Metric Buckets</h3>
+              <button onClick={() => setBucketsOpen(false)}
+                style={{ fontSize: 18, lineHeight: 1, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+            </div>
+            <div style={{ overflowY: 'auto', padding: '14px 20px', flex: 1 }}>
+              <p className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', margin: '0 0 14px' }}>
+                Each bucket maps a set of layers to a metric shown on every card.
+                The count = distinct people in those layers that the card is connected to.
+                A layer may belong to at most one bucket.
+              </p>
+
+              {bucketDrafts.length === 0 && (
+                <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '8px 0' }}>
+                  No buckets yet. Add one to start showing counts on cards.
+                </p>
+              )}
+
+              {bucketDrafts.map((d, idx) => {
+                const col = bucketColors({ id: '', label: d.label, fullName: d.fullName, color: d.color || null, sortOrder: idx, layerIds: [] }, idx)
+                return (
+                  <div key={idx} style={{
+                    border: '1px solid var(--border)', borderRadius: 10, padding: 12,
+                    marginBottom: 10, background: 'white',
+                  }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                      <input
+                        type="text"
+                        value={d.label}
+                        onChange={e => setBucketDrafts(v => { const nv = [...v]; nv[idx] = { ...nv[idx], label: e.target.value.slice(0, 3) }; return nv })}
+                        placeholder="S"
+                        className="sans"
+                        style={{ width: 42, textAlign: 'center', padding: '7px 4px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 13, fontWeight: 700, color: col.fg, background: col.bg }}
+                      />
+                      <input
+                        type="text"
+                        value={d.fullName}
+                        onChange={e => setBucketDrafts(v => { const nv = [...v]; nv[idx] = { ...nv[idx], fullName: e.target.value }; return nv })}
+                        placeholder="Staff"
+                        className="sans"
+                        style={{ flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 13 }}
+                      />
+                      <input
+                        type="color"
+                        value={d.color || '#5a2e87'}
+                        onChange={e => setBucketDrafts(v => { const nv = [...v]; nv[idx] = { ...nv[idx], color: e.target.value }; return nv })}
+                        title="Bucket color"
+                        style={{ width: 32, height: 32, padding: 0, border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer' }}
+                      />
+                      <button
+                        onClick={() => setBucketDrafts(v => v.filter((_, i) => i !== idx))}
+                        className="sans"
+                        title="Remove bucket"
+                        style={{ width: 28, height: 28, borderRadius: 6, border: '1px solid #c0392b33', background: 'white', color: '#c0392b', cursor: 'pointer', fontSize: 14 }}>
+                        ×
+                      </button>
+                    </div>
+                    <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', textTransform: 'uppercase', marginBottom: 4 }}>
+                      Layers in this bucket
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {layers.map(l => {
+                        const on = d.layerIds.has(l.id)
+                        // Is this layer already used by a different bucket?
+                        const usedElsewhere = bucketDrafts.some((od, oi) => oi !== idx && od.layerIds.has(l.id))
+                        return (
+                          <button
+                            key={l.id}
+                            onClick={() => setBucketDrafts(v => {
+                              const nv = [...v]
+                              const s = new Set(nv[idx].layerIds)
+                              if (s.has(l.id)) s.delete(l.id); else s.add(l.id)
+                              nv[idx] = { ...nv[idx], layerIds: s }
+                              return nv
+                            })}
+                            disabled={usedElsewhere && !on}
+                            className="sans"
+                            style={{
+                              fontSize: 11, fontWeight: 600,
+                              padding: '5px 10px', borderRadius: 999,
+                              border: on ? `2px solid ${l.color.label}` : '1px solid var(--border)',
+                              background: on ? l.color.bg : 'white',
+                              color: usedElsewhere && !on ? 'var(--muted-foreground)' : l.color.label,
+                              cursor: usedElsewhere && !on ? 'default' : 'pointer',
+                              opacity: usedElsewhere && !on ? 0.45 : 1,
+                            }}>
+                            {l.name}
+                            {usedElsewhere && !on && <span style={{ fontSize: 9, marginLeft: 4 }}>(in use)</span>}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+
+              <button
+                onClick={() => setBucketDrafts(v => [...v, { label: '', fullName: '', color: '', layerIds: new Set() }])}
+                className="sans"
+                style={{
+                  marginTop: 4, width: '100%',
+                  padding: '10px', borderRadius: 8,
+                  border: '1px dashed var(--border)', background: 'white',
+                  color: 'var(--primary)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>
+                + Add bucket
+              </button>
+            </div>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', gap: 8, borderRadius: '0 0 16px 16px' }}>
+              <button onClick={() => setBucketsOpen(false)} className="sans"
+                style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+                Cancel
+              </button>
+              <button onClick={saveBuckets} disabled={bucketsSaving} className="sans"
+                style={{ fontSize: 12, fontWeight: 600, padding: '7px 14px', borderRadius: 8, border: 'none', background: 'var(--primary)', color: 'white', cursor: 'pointer', opacity: bucketsSaving ? 0.6 : 1 }}>
+                {bucketsSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════
           MODAL: Settings — display preferences
          ═══════════════════════════════════════════════════════════ */}
       {settingsOpen && (
@@ -1706,13 +2000,17 @@ export default function ShepherdTreeV2() {
                 {(['bezier','straight','elbow','step'] as const).map(style => {
                   const active = lineStyle === style
                   // Tiny preview path
-                  const W = 120, H = 56, px = 20, py = 8, cx = W - 20, cy = H - 8, midY = H / 2
+                  // Preview: mimic the real routing — turn happens near the
+                  // top of the "child" layer, not the midpoint.
+                  const W = 120, H = 56, px = 20, py = 8, cx = W - 20, cy = H - 8
+                  const turnY = H - 20
+                  const midY = H / 2
                   let d = ''
                   if (style === 'straight') d = `M ${px} ${py} L ${cx} ${cy}`
-                  else if (style === 'elbow') d = `M ${px} ${py} V ${midY} H ${cx} V ${cy}`
+                  else if (style === 'elbow') d = `M ${px} ${py} V ${turnY} H ${cx} V ${cy}`
                   else if (style === 'step') {
                     const r = 6
-                    d = `M ${px} ${py} V ${midY - r} Q ${px} ${midY}, ${px + r} ${midY} H ${cx - r} Q ${cx} ${midY}, ${cx} ${midY + r} V ${cy}`
+                    d = `M ${px} ${py} V ${turnY - r} Q ${px} ${turnY}, ${px + r} ${turnY} H ${cx - r} Q ${cx} ${turnY}, ${cx} ${turnY + r} V ${cy}`
                   } else d = `M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`
                   return (
                     <button
