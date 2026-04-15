@@ -757,6 +757,8 @@ export default function ShepherdTreeV2() {
       name: newName.trim(),
       color,
       category: 'custom',
+      // New layers default to leader-style (non-congregation).
+      isCongregational: false,
     }])
     setNewName('')
   }
@@ -2282,25 +2284,35 @@ export default function ShepherdTreeV2() {
                       onBlur={e => { e.currentTarget.style.border = '1px solid transparent'; e.currentTarget.style.background = 'rgba(255,255,255,0.6)' }}
                     />
 
-                    {/* Congregational toggle */}
-                    <button
-                      onClick={e => {
-                        e.stopPropagation()
-                        setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isCongregational: !l.isCongregational } : l))
-                      }}
-                      title={layer.isCongregational ? 'Congregational level (allows duplicate cards per membership)' : 'Mark as congregational (lowest level, non-leadership)'}
-                      className="sans"
-                      style={{
-                        fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
-                        padding: '4px 8px', borderRadius: 6,
-                        border: `1px solid ${layer.isCongregational ? layer.color.label : layer.color.label + '40'}`,
-                        background: layer.isCongregational ? layer.color.label : 'rgba(255,255,255,0.6)',
-                        color: layer.isCongregational ? 'white' : layer.color.label,
-                        cursor: 'pointer', whiteSpace: 'nowrap',
-                        flexShrink: 0,
-                      }}>
-                      {layer.isCongregational ? '✓ CONG' : 'CONG'}
-                    </button>
+                    {/* Leader toggle. ON = leader layer (deduped, highest-wins).
+                        OFF = congregation (allows duplicate cards per membership). */}
+                    {(() => {
+                      const isLeaderLayer = !layer.isCongregational
+                      return (
+                        <button
+                          onClick={e => {
+                            e.stopPropagation()
+                            // Toggle: flip isCongregational (button reflects
+                            // !isCongregational since ON = LEADER, OFF = congregation).
+                            setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isCongregational: !l.isCongregational } : l))
+                          }}
+                          title={isLeaderLayer
+                            ? 'Leader layer — one card per person, kept at their highest leader layer'
+                            : 'Congregation layer — one card per membership (duplicates allowed)'}
+                          className="sans"
+                          style={{
+                            fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                            padding: '4px 8px', borderRadius: 6,
+                            border: `1px solid ${isLeaderLayer ? layer.color.label : layer.color.label + '40'}`,
+                            background: isLeaderLayer ? layer.color.label : 'rgba(255,255,255,0.6)',
+                            color: isLeaderLayer ? 'white' : layer.color.label,
+                            cursor: 'pointer', whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                          }}>
+                          {isLeaderLayer ? '✓ LEADER' : 'LEADER'}
+                        </button>
+                      )
+                    })()}
 
                     {/* Delete */}
                     <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}
