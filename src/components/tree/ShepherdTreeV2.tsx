@@ -131,7 +131,11 @@ const COLOR_PALETTE = [
   { bg: 'rgba(80, 120, 160, 0.30)',  label: '#3a5a7a' },   // slate
 ]
 
-const BAND_HEIGHT = 120
+// Band height is computed at runtime from viewport height / layer count.
+// Fallback used during SSR / pre-mount.
+const BAND_HEIGHT_FALLBACK = 120
+const BAND_HEIGHT_MIN = 110
+const TOOLBAR_H = 56 // approximate sticky toolbar height (~48) + small buffer
 const CARD_WIDTH = 210
 const CARD_HEIGHT = 96
 const CARD_GAP = 8
@@ -139,8 +143,6 @@ const UNIT = CARD_WIDTH + CARD_GAP
 // Reserves a narrow column on the left of each band for the vertical
 // multiline layer label; cards start after this padding.
 const BAND_PADDING_LEFT = 50
-// Cards are vertically centered inside each band.
-const CARD_TOP_OFFSET = Math.max(0, Math.floor((BAND_HEIGHT - CARD_HEIGHT) / 2))
 const LINE_COLOR = 'rgba(0,0,0,0.25)'
 const LINE_COLOR_HOVER = '#7a5a00'
 
@@ -192,6 +194,7 @@ export default function ShepherdTreeV2() {
   const [inclusions, setInclusions] = useState<LayerInclusion[]>([])
   const [connections, setConnections] = useState<TreeConnection[]>([])
   const [metricBuckets, setMetricBuckets] = useState<MetricBucket[]>([])
+  const [viewportH, setViewportH] = useState<number | null>(null)
   const [gtMappings, setGtMappings] = useState<GtMapping[]>([])
   const [mappingLayerPeople, setMappingLayerPeople] = useState<MappingLayerPerson[]>([])
   const [groupsList, setGroupsList] = useState<GroupLite[]>([])
@@ -380,6 +383,14 @@ export default function ShepherdTreeV2() {
   }, [])
 
   useEffect(() => { fetchData(true) }, [fetchData])
+
+  // Track viewport height for dynamic band sizing
+  useEffect(() => {
+    const update = () => setViewportH(window.innerHeight)
+    update()
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [])
 
   // ── Derived: people per layer from list-layer links + Group/Team mappings ──
   // Unions PCO list-based entries with any mapping-derived entries (leader/member
@@ -864,6 +875,17 @@ export default function ShepherdTreeV2() {
     }
     return out
   })()
+  // Dynamic band height: fit all layers in the visible viewport under the
+  // sticky toolbar. Never go below a sensible minimum (and if there are
+  // many layers, fall back to min height so cards remain legible — the
+  // whole tree scrolls vertically in that case).
+  const BAND_HEIGHT = (() => {
+    if (!viewportH || sortedLayers.length === 0) return BAND_HEIGHT_FALLBACK
+    const ideal = Math.floor((viewportH - TOOLBAR_H) / sortedLayers.length)
+    return Math.max(BAND_HEIGHT_MIN, ideal)
+  })()
+  const CARD_TOP_OFFSET = Math.max(0, Math.floor((BAND_HEIGHT - CARD_HEIGHT) / 2))
+
   const bandTop = (layerIdx: number): number => layerIdx * BAND_HEIGHT
   const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
   const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
