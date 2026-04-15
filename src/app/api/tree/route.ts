@@ -142,6 +142,7 @@ export async function GET() {
     { data: departmentMembers },
     { data: shepherdingRelationships },
     { data: layerExclusions },
+    { data: layerInclusions },
     { data: gtMappings },
     { data: gtMappingItems },
   ] = await Promise.all([
@@ -179,6 +180,8 @@ export async function GET() {
       .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
     admin.from('tree_layer_exclusions').select('person_id, layer_id')
       .eq('church_id', churchId!),
+    admin.from('tree_layer_inclusions').select('person_id, layer_id')
+      .eq('church_id', churchId!),
     admin.from('group_team_layer_mappings')
       .select('id, name, kind, leader_layer_id, member_layer_id')
       .eq('church_id', churchId!),
@@ -199,6 +202,9 @@ export async function GET() {
   for (const r of shepherdingRelationships || []) {
     if (r.shepherd_id) neededPersonIds.add(r.shepherd_id)
     if (r.person_id) neededPersonIds.add(r.person_id)
+  }
+  for (const inc of layerInclusions || []) {
+    if (inc.person_id) neededPersonIds.add(inc.person_id)
   }
   if (currentUser?.person_id) neededPersonIds.add(currentUser.person_id)
 
@@ -919,6 +925,11 @@ export async function GET() {
     layerExclusions: (layerExclusions || []).map((e: { person_id: string; layer_id: string }) => ({
       personId: e.person_id, layerId: e.layer_id,
     })),
+    layerInclusions: (layerInclusions || []).map((e: { person_id: string; layer_id: string }) => ({
+      personId: e.person_id,
+      layerId: e.layer_id,
+      personName: personMap.get(e.person_id)?.name || 'Unknown',
+    })),
     groupsList: (groups || []).map((g: { id: string; name: string; group_type_id?: string | null; pco_group_type_id?: string | null }) => ({
       id: g.id,
       name: g.name || 'Untitled group',
@@ -1224,6 +1235,19 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Add a person to a layer directly (manual inclusion) ─────
+  if (body.action === 'add_person_to_layer') {
+    const { person_id, layer_id } = body
+    if (!person_id || !layer_id) return NextResponse.json({ error: 'person_id and layer_id required' }, { status: 400 })
+    // Clear any existing exclusion so they actually show up
+    await admin.from('tree_layer_exclusions')
+      .delete().eq('person_id', person_id).eq('layer_id', layer_id).eq('church_id', churchId!)
+    const { error } = await admin.from('tree_layer_inclusions')
+      .upsert({ person_id, layer_id, church_id: churchId }, { onConflict: 'person_id,layer_id' })
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     return NextResponse.json({ success: true })
   }
 
