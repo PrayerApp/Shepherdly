@@ -2,6 +2,22 @@ import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { NextResponse } from 'next/server'
 
+// Supabase/PostgREST caps single responses at max-rows (usually 1000),
+// regardless of .range(). Paginate explicitly for tables that can exceed
+// that cap, so the tree gets every membership row.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAllPaged<T>(buildQuery: (from: number, to: number) => any): Promise<{ data: T[] }> {
+  const out: T[] = []
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data } = await buildQuery(from, from + PAGE - 1)
+    if (!data || data.length === 0) break
+    out.push(...(data as T[]))
+    if (data.length < PAGE) break
+  }
+  return { data: out }
+}
+
 /**
  * Rebuild tree_assignments from PCO list→layer links.
  * - Fetches all list-layer links and their people
@@ -155,14 +171,18 @@ export async function GET() {
       .eq('church_id', churchId!).order('sort_order'),
     admin.from('tree_oversight').select('id, person_id, context_type, context_id')
       .eq('church_id', churchId!),
-    admin.from('group_memberships').select('person_id, group_id, role, is_active')
-      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
-    admin.from('groups').select('id, name, is_active, group_type_id, pco_group_type_id')
-      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
-    admin.from('team_memberships').select('person_id, team_id, role, is_active')
-      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
-    admin.from('teams').select('id, name, is_active, service_type_id, pco_service_type_id')
-      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
+    fetchAllPaged<{ person_id: string; group_id: string; role: string | null; is_active: boolean }>(
+      (from, to) => admin.from('group_memberships').select('person_id, group_id, role, is_active')
+        .eq('church_id', churchId!).eq('is_active', true).order('id').range(from, to)),
+    fetchAllPaged<{ id: string; name: string; is_active: boolean; group_type_id: string | null; pco_group_type_id: string | null }>(
+      (from, to) => admin.from('groups').select('id, name, is_active, group_type_id, pco_group_type_id')
+        .eq('church_id', churchId!).eq('is_active', true).order('id').range(from, to)),
+    fetchAllPaged<{ person_id: string; team_id: string; role: string | null; is_active: boolean }>(
+      (from, to) => admin.from('team_memberships').select('person_id, team_id, role, is_active')
+        .eq('church_id', churchId!).eq('is_active', true).order('id').range(from, to)),
+    fetchAllPaged<{ id: string; name: string; is_active: boolean; service_type_id: string | null; pco_service_type_id: string | null }>(
+      (from, to) => admin.from('teams').select('id, name, is_active, service_type_id, pco_service_type_id')
+        .eq('church_id', churchId!).eq('is_active', true).order('id').range(from, to)),
     admin.from('group_types').select('id, pco_id, name, is_tracked')
       .eq('church_id', churchId!).order('name'),
     admin.from('service_types').select('id, pco_id, name, is_tracked')
@@ -179,8 +199,9 @@ export async function GET() {
       .eq('church_id', churchId!).order('name'),
     admin.from('department_members').select('department_id, person_id')
       .eq('church_id', churchId!),
-    admin.from('shepherding_relationships').select('shepherd_id, person_id, is_active')
-      .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
+    fetchAllPaged<{ shepherd_id: string; person_id: string; is_active: boolean }>(
+      (from, to) => admin.from('shepherding_relationships').select('shepherd_id, person_id, is_active')
+        .eq('church_id', churchId!).eq('is_active', true).order('id').range(from, to)),
     admin.from('tree_layer_exclusions').select('person_id, layer_id')
       .eq('church_id', churchId!),
     admin.from('tree_layer_inclusions').select('person_id, layer_id')
