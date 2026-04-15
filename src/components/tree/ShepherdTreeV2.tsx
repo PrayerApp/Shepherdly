@@ -195,6 +195,16 @@ export default function ShepherdTreeV2() {
   const [connections, setConnections] = useState<TreeConnection[]>([])
   const [metricBuckets, setMetricBuckets] = useState<MetricBucket[]>([])
   const [viewportH, setViewportH] = useState<number | null>(null)
+
+  // Toolbar search (quick-find + scroll-to)
+  const [searchQ, setSearchQ] = useState('')
+  const [searchResults, setSearchResults] = useState<PickerPerson[]>([])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchReqRef = useRef(0)
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  // Briefly pulse a card after scrolling to it
+  const [pulseKey, setPulseKey] = useState<string | null>(null)
   const [gtMappings, setGtMappings] = useState<GtMapping[]>([])
   const [mappingLayerPeople, setMappingLayerPeople] = useState<MappingLayerPerson[]>([])
   const [groupsList, setGroupsList] = useState<GroupLite[]>([])
@@ -391,6 +401,52 @@ export default function ShepherdTreeV2() {
     window.addEventListener('resize', update)
     return () => window.removeEventListener('resize', update)
   }, [])
+
+  // Debounced toolbar search (uses the same /api/people/search endpoint)
+  useEffect(() => {
+    if (!searchOpen || !searchQ.trim()) { setSearchResults([]); return }
+    const reqId = ++searchReqRef.current
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/people/search?q=${encodeURIComponent(searchQ)}&limit=15`)
+        if (!res.ok) throw new Error()
+        const data = await res.json()
+        if (reqId !== searchReqRef.current) return
+        setSearchResults(data.people || [])
+      } catch {
+        if (reqId === searchReqRef.current) setSearchResults([])
+      }
+    }, 180)
+    return () => clearTimeout(t)
+  }, [searchQ, searchOpen])
+
+  // Scroll to the first appearance of a person on the tree.
+  // Returns the nodeKey scrolled to (or null if not on tree).
+  const scrollToPerson = (personId: string): string | null => {
+    // Find first layer where this person appears
+    for (const l of sortedLayers) {
+      const ppl = peopleByLayer.get(l.id) || []
+      if (!ppl.some(p => p.id === personId)) continue
+      const k = nodeKey(personId, l.id)
+      const el = cardRefs.current.get(k)
+      const scroller = scrollerRef.current
+      if (el && scroller) {
+        // Horizontal scroll: center the card in the scroller
+        const left = cardLeft(k)
+        const target = left + CARD_WIDTH / 2 - scroller.clientWidth / 2
+        scroller.scrollTo({ left: Math.max(0, target), behavior: 'smooth' })
+      }
+      if (el) {
+        // Also scroll vertically via the page
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+      }
+      // Pulse the card for a moment
+      setPulseKey(k)
+      setTimeout(() => setPulseKey(p => p === k ? null : p), 1800)
+      return k
+    }
+    return null
+  }
 
   // ── Derived: people per layer from list-layer links + Group/Team mappings ──
   // Unions PCO list-based entries with any mapping-derived entries (leader/member
@@ -879,9 +935,13 @@ export default function ShepherdTreeV2() {
   // sticky toolbar. Never go below a sensible minimum (and if there are
   // many layers, fall back to min height so cards remain legible — the
   // whole tree scrolls vertically in that case).
+  // Size bands as if there were 6 layers. Fewer than 6 → everyone gets
+  // more room but the tree still fits. More than 6 → same per-band height
+  // and the tree scrolls vertically.
+  const DISPLAY_TARGET_LAYERS = 6
   const BAND_HEIGHT = (() => {
     if (!viewportH || sortedLayers.length === 0) return BAND_HEIGHT_FALLBACK
-    const ideal = Math.floor((viewportH - TOOLBAR_H) / sortedLayers.length)
+    const ideal = Math.floor((viewportH - TOOLBAR_H) / DISPLAY_TARGET_LAYERS)
     return Math.max(BAND_HEIGHT_MIN, ideal)
   })()
   const CARD_TOP_OFFSET = Math.max(0, Math.floor((BAND_HEIGHT - CARD_HEIGHT) / 2))
@@ -960,6 +1020,62 @@ export default function ShepherdTreeV2() {
     }
   }
 
+  // Disconnect every inbound edge whose child is in the current selection.
+  // Useful when you just want to "detach these cards from their parents"
+  // without having to select the parent too.
+  const disconnectSelectedFromParents = async () => {
+    if (!connectMode || selected.size === 0) return
+    const selSet = selected
+    const toRemove = connections.filter(c => selSet.has(selKey(c.childPersonId, c.childLayerId)))
+    if (toRemove.length === 0) return
+    try {
+      await Promise.all(toRemove.map(c => fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'remove_connection',
+          parent_person_id: c.parentPersonId,
+          parent_layer_id: c.parentLayerId,
+          child_person_id: c.childPersonId,
+          child_layer_id: c.childLayerId,
+        }),
+      }).then(async r => { if (!r.ok) throw new Error(await r.text()) })))
+      clearSelection()
+      await fetchData()
+    } catch (err) {
+      console.error('Disconnect error:', err)
+    }
+  }
+
+  // Delete a single connection edge by clicking the line.
+  const deleteConnection = async (c: TreeConnection) => {
+    if (!connectMode) return
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'remove_connection',
+          parent_person_id: c.parentPersonId,
+          parent_layer_id: c.parentLayerId,
+          child_person_id: c.childPersonId,
+          child_layer_id: c.childLayerId,
+        }),
+      })
+      if (!res.ok) throw new Error()
+      await fetchData()
+    } catch (err) {
+      console.error('Delete connection error:', err)
+    }
+  }
+
+  // How many inbound edges does the current selection have (summed)?
+  const selectedInboundEdgeCount = (() => {
+    if (!connectMode || selected.size === 0) return 0
+    const selSet = selected
+    return connections.filter(c => selSet.has(selKey(c.childPersonId, c.childLayerId))).length
+  })()
+
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 300 }}>
@@ -984,6 +1100,80 @@ export default function ShepherdTreeV2() {
         boxSizing: 'border-box',
       }}>
         <h2 className="font-serif" style={{ fontSize: 16, color: 'var(--primary)', margin: 0 }}>Shepherd Tree</h2>
+
+        {/* Quick-find search */}
+        <div style={{ position: 'relative', flex: 1, maxWidth: 340, margin: '0 16px' }}>
+          <input
+            type="text"
+            value={searchQ}
+            onFocus={() => setSearchOpen(true)}
+            onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
+            onChange={e => { setSearchQ(e.target.value); setSearchOpen(true) }}
+            placeholder="Find a person…"
+            className="sans"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '7px 10px', borderRadius: 8,
+              border: '1px solid var(--border)', fontSize: 12,
+              background: 'white',
+            }}
+          />
+          {searchOpen && searchQ.trim() && (
+            <div style={{
+              position: 'absolute', top: '100%', left: 0, right: 0,
+              marginTop: 4, background: 'white',
+              border: '1px solid var(--border)', borderRadius: 8,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.10)',
+              maxHeight: 300, overflowY: 'auto',
+              zIndex: 20,
+            }}>
+              {searchResults.length === 0 ? (
+                <p className="sans" style={{ padding: '10px 12px', fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
+                  No matches.
+                </p>
+              ) : (
+                searchResults.map(p => {
+                  // Is this person currently on the tree somewhere?
+                  const onTree = sortedLayers.some(l => (peopleByLayer.get(l.id) || []).some(pp => pp.id === p.id))
+                  return (
+                    <button
+                      key={p.id}
+                      className="sans"
+                      onMouseDown={e => e.preventDefault()}
+                      onClick={() => {
+                        const k = scrollToPerson(p.id)
+                        setSearchOpen(false)
+                        setSearchQ('')
+                        if (!k) {
+                          // Not on tree — could open picker instead; just hint for now
+                          // eslint-disable-next-line no-alert
+                          alert(`${p.name} isn't currently on the tree. Add them via a layer's "+" placeholder.`)
+                        }
+                      }}
+                      disabled={!onTree}
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+                        width: '100%', padding: '8px 12px', margin: 0, borderRadius: 0,
+                        border: 'none', background: 'white',
+                        cursor: onTree ? 'pointer' : 'default',
+                        textAlign: 'left', fontSize: 12,
+                        color: onTree ? 'var(--foreground)' : 'var(--muted-foreground)',
+                        opacity: onTree ? 1 : 0.6,
+                      }}>
+                      <span style={{ fontWeight: 500 }}>{p.name}</span>
+                      <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                        {p.isStaff && <span style={{ fontSize: 9, fontWeight: 700, color: '#5a2e87', background: 'rgba(140,90,180,0.14)', padding: '2px 6px', borderRadius: 4 }}>STAFF</span>}
+                        {p.isLeader && !p.isStaff && <span style={{ fontSize: 9, fontWeight: 700, color: '#2b5a8a', background: 'rgba(80,130,190,0.14)', padding: '2px 6px', borderRadius: 4 }}>LEADER</span>}
+                        {!onTree && <span style={{ fontSize: 10, color: 'var(--muted-foreground)' }}>not on tree</span>}
+                      </span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+          )}
+        </div>
+
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={() => {
@@ -1042,7 +1232,9 @@ export default function ShepherdTreeV2() {
       </div>
 
       {/* ── Bands: one shared horizontal scroller so columns align ── */}
-      <div style={{
+      <div
+        ref={scrollerRef}
+        style={{
         overflowX: 'auto',
         overflowY: 'hidden',
         WebkitOverflowScrolling: 'touch',
@@ -1083,16 +1275,16 @@ export default function ShepherdTreeV2() {
                   width: 0, height: 0, zIndex: 3,
                 }}
               >
-                {/* Vertical label column */}
+                {/* Vertical label column (text only; SELECT ALL chip sits above it) */}
                 <div
                   className="sans"
                   title={layer.name}
                   style={{
                     position: 'absolute',
                     left: 6,
-                    top: bandTop(i) + 8,
+                    top: bandTop(i) + ((editMode || connectMode) && people.length > 0 ? 30 : 8),
                     width: 38,
-                    height: BAND_HEIGHT - 16,
+                    height: BAND_HEIGHT - ((editMode || connectMode) && people.length > 0 ? 38 : 16),
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     userSelect: 'none',
                   }}
@@ -1113,23 +1305,25 @@ export default function ShepherdTreeV2() {
                   </div>
                 </div>
 
-                {/* SELECT ALL sits just to the right of the label column */}
+                {/* Compact SELECT ALL chip inside the label column */}
                 {(editMode || connectMode) && people.length > 0 && (
                   <button
                     onClick={e => { e.stopPropagation(); selectAllInLayer(layer.id, people) }}
                     className="sans"
+                    title={selCount === people.length ? 'Deselect all in this layer' : 'Select all in this layer'}
                     style={{
                       position: 'absolute',
-                      left: BAND_PADDING_LEFT,
-                      top: bandTop(i) + 8,
-                      fontSize: 10, fontWeight: 600, letterSpacing: 0.5,
-                      padding: '3px 8px', borderRadius: 6,
+                      left: 6, top: bandTop(i) + 6,
+                      width: 38, height: 20,
+                      fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                      padding: 0, borderRadius: 6,
                       border: `1px solid ${selCount > 0 ? SELECT_OUTLINE : layer.color.label + '40'}`,
-                      background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.6)',
+                      background: selCount > 0 ? `${SELECT_OUTLINE}22` : 'rgba(255,255,255,0.7)',
                       color: selCount > 0 ? '#7a5a00' : layer.color.label,
                       cursor: 'pointer', whiteSpace: 'nowrap',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
                     }}>
-                    {selCount > 0 ? `${selCount} SELECTED` : 'SELECT ALL'}
+                    {selCount > 0 ? `${selCount}` : 'ALL'}
                   </button>
                 )}
               </div>
@@ -1141,6 +1335,8 @@ export default function ShepherdTreeV2() {
             style={{
               position: 'absolute', top: 0, left: 0,
               width: totalTreeWidth, height: totalTreeHeight,
+              // In connect mode, let the SVG receive clicks only on the
+              // stroke itself; elsewhere clicks fall through to cards.
               pointerEvents: 'none',
             }}
           >
@@ -1186,13 +1382,28 @@ export default function ShepherdTreeV2() {
                 d = `M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`
               }
               return (
-                <path
-                  key={c.id}
-                  d={d}
-                  stroke={highlight ? LINE_COLOR_HOVER : LINE_COLOR}
-                  strokeWidth={highlight ? 2 : 1.4}
-                  fill="none"
-                />
+                <g key={c.id}>
+                  {/* Visible line */}
+                  <path
+                    d={d}
+                    stroke={highlight ? LINE_COLOR_HOVER : LINE_COLOR}
+                    strokeWidth={highlight ? 2 : 1.4}
+                    fill="none"
+                  />
+                  {/* Wide invisible hit area; clickable only in connect mode */}
+                  {connectMode && (
+                    <path
+                      d={d}
+                      stroke="transparent"
+                      strokeWidth={14}
+                      fill="none"
+                      style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+                      onClick={e => { e.stopPropagation(); deleteConnection(c) }}
+                    >
+                      <title>Click to remove this connection</title>
+                    </path>
+                  )}
+                </g>
               )
             })}
           </svg>
@@ -1212,6 +1423,7 @@ export default function ShepherdTreeV2() {
               return (
                 <div
                   key={k}
+                  ref={el => { if (el) { cardRefs.current.set(k, el) } else { cardRefs.current.delete(k) } }}
                   title={isExcluded
                     ? `${person.name} — hidden from ${layer.name}. Click to select, then "Restore" to bring back.`
                     : `${person.name} — ${total} shepherded${tooltipStats ? ` · ${tooltipStats}` : ''}`}
@@ -1234,11 +1446,13 @@ export default function ShepherdTreeV2() {
                         : `1px solid ${layer.color.label}22`,
                     outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
                     outlineOffset: isSelected ? 1 : undefined,
-                    boxShadow: isSelected
-                      ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
-                      : isExcluded
-                        ? 'none'
-                        : '0 1px 4px rgba(0,0,0,0.06)',
+                    boxShadow: pulseKey === k
+                      ? '0 0 0 4px rgba(45,96,71,0.35), 0 2px 8px rgba(0,0,0,0.12)'
+                      : isSelected
+                        ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                        : isExcluded
+                          ? 'none'
+                          : '0 1px 4px rgba(0,0,0,0.06)',
                     opacity: isExcluded ? 0.5 : 1,
                     display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
                     boxSizing: 'border-box',
@@ -1375,9 +1589,14 @@ export default function ShepherdTreeV2() {
           {/* ── Connect-mode actions ── */}
           {connectMode && (
             <>
-              {!connectionPlan && selected.size >= 2 && (
+              {!connectionPlan && selected.size >= 2 && selectedInboundEdgeCount === 0 && (
                 <span style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '0 6px' }}>
-                  Select one person on the top-most layer + anyone below them.
+                  Select one person on the top-most layer + anyone below them, or click a line to remove it.
+                </span>
+              )}
+              {selected.size < 2 && !connectionPlan && selectedInboundEdgeCount === 0 && (
+                <span style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '0 6px' }}>
+                  Click a line to remove a single connection, or select cards to connect.
                 </span>
               )}
               {connectionPlan && connectionPlan.missing > 0 && (
@@ -1400,6 +1619,19 @@ export default function ShepherdTreeV2() {
                     cursor: 'pointer',
                   }}>
                   Disconnect {connectionPlan.existing > 1 ? `(${connectionPlan.existing})` : ''}
+                </button>
+              )}
+              {/* Always-available: disconnect selected cards from their parents */}
+              {!connectionPlan && selectedInboundEdgeCount > 0 && (
+                <button
+                  onClick={disconnectSelectedFromParents}
+                  title="Remove every incoming connection on the selected cards"
+                  style={{
+                    fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                    border: '1px solid #c0392b44', background: 'white', color: '#c0392b',
+                    cursor: 'pointer',
+                  }}>
+                  Disconnect from parents ({selectedInboundEdgeCount})
                 </button>
               )}
             </>
