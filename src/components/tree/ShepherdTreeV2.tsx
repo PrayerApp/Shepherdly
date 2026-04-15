@@ -195,6 +195,9 @@ export default function ShepherdTreeV2() {
   const [inclusions, setInclusions] = useState<LayerInclusion[]>([])
   const [connections, setConnections] = useState<TreeConnection[]>([])
   const [metricBuckets, setMetricBuckets] = useState<MetricBucket[]>([])
+  // Tracks which connection line the mouse is over, so we can show a
+  // tooltip + visually bold it. Useful for debugging tangled layouts.
+  const [hoveredConnectionId, setHoveredConnectionId] = useState<string | null>(null)
   const [viewportH, setViewportH] = useState<number | null>(null)
 
   // Toolbar search (quick-find + scroll-to)
@@ -1369,8 +1372,9 @@ export default function ShepherdTreeV2() {
             style={{
               position: 'absolute', top: 0, left: 0,
               width: totalTreeWidth, height: totalTreeHeight,
-              // In connect mode, let the SVG receive clicks only on the
-              // stroke itself; elsewhere clicks fall through to cards.
+              // Lines are pointer-events:none at the SVG level; the wide
+              // invisible hit-path per edge opts in via pointerEvents:'stroke'
+              // so hover/click work without blocking card interactions.
               pointerEvents: 'none',
             }}
           >
@@ -1383,20 +1387,19 @@ export default function ShepherdTreeV2() {
               const cx = cardLeft(ck) + CARD_WIDTH / 2
               const cy = cardTopAbs(c.childLayerId)
               const midY = (py + cy) / 2
-              // For elbow/step: route the horizontal cross-bar through the
-              // label strip of the layer just below the parent, so the line
-              // doesn't cut through any intermediate cards when skipping
-              // layers. Label strip is from bandTop to bandTop + CARD_TOP_OFFSET.
               const parentLayerIdx = layerIndex(c.parentLayerId)
               const labelStripTop = bandTop(parentLayerIdx + 1)
               const labelStripY = labelStripTop + Math.min(CARD_TOP_OFFSET - 12, 20)
-              const highlight = selected.has(selKey(c.parentPersonId, c.parentLayerId))
+
+              const isHovered = hoveredConnectionId === c.id
+              const isSelected = selected.has(selKey(c.parentPersonId, c.parentLayerId))
                 || selected.has(selKey(c.childPersonId, c.childLayerId))
+              const highlight = isHovered || isSelected
+
               let d: string
               if (lineStyle === 'straight') {
                 d = `M ${px} ${py} L ${cx} ${cy}`
               } else if (lineStyle === 'elbow') {
-                // Down to the label strip of the next layer, horizontal, then down to child
                 d = `M ${px} ${py} V ${labelStripY} H ${cx} V ${cy}`
               } else if (lineStyle === 'step') {
                 const r = 6
@@ -1412,31 +1415,53 @@ export default function ShepherdTreeV2() {
                        V ${cy}`
                 }
               } else {
-                // bezier (default)
                 d = `M ${px} ${py} C ${px} ${midY}, ${cx} ${midY}, ${cx} ${cy}`
               }
+
+              // Resolve names for the hover tooltip.
+              const parentLayer = sortedLayers.find(l => l.id === c.parentLayerId)
+              const childLayer = sortedLayers.find(l => l.id === c.childLayerId)
+              const parentName =
+                (peopleByLayer.get(c.parentLayerId) || []).find(p => p.id === c.parentPersonId)?.name
+                || 'Unknown parent'
+              const childName =
+                (peopleByLayer.get(c.childLayerId) || []).find(p => p.id === c.childPersonId)?.name
+                || 'Unknown child'
+              const sourceLabel = c.id
+                // Determined by whether this edge came from a mapping. That
+                // info isn't currently piped to the frontend per-edge, so
+                // fall back to a minimal label here.
+              void sourceLabel
+              const tooltip = `${parentName} (${parentLayer?.name || '?'})  →  ${childName} (${childLayer?.name || '?'})`
+
               return (
                 <g key={c.id}>
                   {/* Visible line */}
                   <path
                     d={d}
                     stroke={highlight ? LINE_COLOR_HOVER : LINE_COLOR}
-                    strokeWidth={highlight ? 2 : 1.4}
+                    strokeWidth={isHovered ? 2.4 : highlight ? 2 : 1.4}
                     fill="none"
                   />
-                  {/* Wide invisible hit area; clickable only in connect mode */}
-                  {connectMode && (
-                    <path
-                      d={d}
-                      stroke="transparent"
-                      strokeWidth={14}
-                      fill="none"
-                      style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
-                      onClick={e => { e.stopPropagation(); deleteConnection(c) }}
-                    >
-                      <title>Click to remove this connection</title>
-                    </path>
-                  )}
+                  {/* Wide invisible hit area for hover + (in connect mode) click-to-delete */}
+                  <path
+                    d={d}
+                    stroke="transparent"
+                    strokeWidth={14}
+                    fill="none"
+                    style={{
+                      pointerEvents: 'stroke',
+                      cursor: connectMode ? 'pointer' : 'help',
+                    }}
+                    onMouseEnter={() => setHoveredConnectionId(c.id)}
+                    onMouseLeave={() => setHoveredConnectionId(prev => prev === c.id ? null : prev)}
+                    onClick={connectMode ? (e => { e.stopPropagation(); deleteConnection(c) }) : undefined}
+                  >
+                    <title>
+                      {tooltip}
+                      {connectMode ? '\n(click to remove this connection)' : ''}
+                    </title>
+                  </path>
                 </g>
               )
             })}
