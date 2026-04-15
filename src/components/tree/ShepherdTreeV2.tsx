@@ -53,6 +53,33 @@ interface LayerExclusion {
   layerId: string
 }
 
+interface GtMapping {
+  id: string
+  name: string
+  kind: 'groups' | 'teams'
+  leaderLayerId: string | null
+  memberLayerId: string | null
+  itemIds: string[]
+}
+
+interface MappingLayerPerson {
+  layerId: string
+  personId: string
+  personName: string
+  role: 'leader' | 'member'
+}
+
+interface GroupLite {
+  id: string
+  name: string
+  groupTypeName: string | null
+}
+interface TeamLite {
+  id: string
+  name: string
+  serviceTypeName: string | null
+}
+
 // ── Color palette — each layer gets its own unique color ───────
 const COLOR_PALETTE = [
   { bg: 'rgba(200, 175, 60, 0.30)',  label: '#7a6a10' },   // gold
@@ -114,6 +141,10 @@ export default function ShepherdTreeV2() {
   const [listsLoaded, setListsLoaded] = useState(false)
   const [personStats, setPersonStats] = useState<Record<string, PersonStat>>({})
   const [exclusions, setExclusions] = useState<LayerExclusion[]>([])
+  const [gtMappings, setGtMappings] = useState<GtMapping[]>([])
+  const [mappingLayerPeople, setMappingLayerPeople] = useState<MappingLayerPerson[]>([])
+  const [groupsList, setGroupsList] = useState<GroupLite[]>([])
+  const [teamsList, setTeamsList] = useState<TeamLite[]>([])
   // When a card is long-pressed, we enter "delete mode" for that (personId,layerId).
   // ── Edit mode: toggled from the toolbar ─────────────────────
   // In edit mode, excluded people re-appear as ghost cards and can be
@@ -129,6 +160,18 @@ export default function ShepherdTreeV2() {
   const [assignModalOpen, setAssignModalOpen] = useState(false)
   const [assignSelectedLayerId, setAssignSelectedLayerId] = useState<string | null>(null)
   const [assignBusy, setAssignBusy] = useState(false)
+  // Assign modal tab: 'lists' (existing REF list flow) or 'mappings' (Group/Team flow)
+  const [assignTab, setAssignTab] = useState<'lists' | 'mappings'>('lists')
+  // Mapping editor state
+  const [mappingDraft, setMappingDraft] = useState<{
+    id?: string
+    name: string
+    kind: 'groups' | 'teams'
+    leaderLayerId: string | null
+    memberLayerId: string | null
+    itemIds: Set<string>
+    search: string
+  } | null>(null)
 
   // ── Fetch all data from API ─────────────────────────────────
   const fetchData = useCallback(async (isInit = false) => {
@@ -143,6 +186,10 @@ export default function ShepherdTreeV2() {
       setListLayerLinks(data.listLayerLinks || [])
       setPersonStats(data.personStats || {})
       setExclusions(data.layerExclusions || [])
+      setGtMappings(data.gtMappings || [])
+      setMappingLayerPeople(data.mappingLayerPeople || [])
+      setGroupsList(data.groupsList || [])
+      setTeamsList(data.teamsList || [])
       setListsLoaded(true)
 
       // Layers from DB
@@ -188,19 +235,36 @@ export default function ShepherdTreeV2() {
 
   useEffect(() => { fetchData(true) }, [fetchData])
 
-  // ── Derived: people per layer from list-layer links ─────────
-  // In edit mode we return excluded people too (flagged so the card can
-  // render them as "ghosts"). Outside edit mode they're hidden entirely.
+  // ── Derived: people per layer from list-layer links + Group/Team mappings ──
+  // Unions PCO list-based entries with any mapping-derived entries (leader/member
+  // derivations from Group/Team mappings). In edit mode, excluded people are
+  // kept and flagged as ghosts; otherwise they're hidden.
   const getPeopleForLayer = (layerId: string): (PersonCard & { isExcluded: boolean })[] => {
-    const link = listLayerLinks.find(ll => ll.layerId === layerId)
-    if (!link) return []
     const excluded = new Set(
       exclusions.filter(e => e.layerId === layerId).map(e => e.personId)
     )
-    return listPeople
-      .filter(lp => lp.listId === link.listId)
-      .filter(lp => editMode || !excluded.has(lp.personId))
-      .map(lp => ({ id: lp.personId, name: lp.personName, isExcluded: excluded.has(lp.personId) }))
+
+    // 1) People from a PCO reference list linked to this layer
+    const link = listLayerLinks.find(ll => ll.layerId === layerId)
+    const fromList: { id: string; name: string }[] = link
+      ? listPeople.filter(lp => lp.listId === link.listId).map(lp => ({ id: lp.personId, name: lp.personName }))
+      : []
+
+    // 2) People derived from Group/Team mappings where this layer is the leader
+    //    or member target
+    const fromMappings = mappingLayerPeople
+      .filter(mp => mp.layerId === layerId)
+      .map(mp => ({ id: mp.personId, name: mp.personName }))
+
+    // Merge by personId (dedupe)
+    const byId = new Map<string, { id: string; name: string }>()
+    for (const p of [...fromList, ...fromMappings]) {
+      if (!byId.has(p.id)) byId.set(p.id, p)
+    }
+
+    return [...byId.values()]
+      .filter(p => editMode || !excluded.has(p.id))
+      .map(p => ({ id: p.id, name: p.name, isExcluded: excluded.has(p.id) }))
       .sort((a, b) => {
         const la = lastName(a.name), lb = lastName(b.name)
         const cmp = la.localeCompare(lb, undefined, { sensitivity: 'base' })
@@ -405,6 +469,53 @@ export default function ShepherdTreeV2() {
       await fetchData()
     } catch (err) {
       console.error('Link list error:', err)
+    } finally {
+      setAssignBusy(false)
+    }
+  }
+
+  // ── Group/Team mapping: save + delete ───────────────────────
+  const saveMappingDraft = async () => {
+    if (!mappingDraft) return
+    if (!mappingDraft.name.trim()) return
+    if (!mappingDraft.leaderLayerId && !mappingDraft.memberLayerId) return
+    setAssignBusy(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_gt_mapping',
+          id: mappingDraft.id,
+          name: mappingDraft.name.trim(),
+          kind: mappingDraft.kind,
+          leader_layer_id: mappingDraft.leaderLayerId,
+          member_layer_id: mappingDraft.memberLayerId,
+          item_ids: [...mappingDraft.itemIds],
+        }),
+      })
+      if (!res.ok) throw new Error()
+      setMappingDraft(null)
+      await fetchData()
+    } catch (err) {
+      console.error('Save mapping error:', err)
+    } finally {
+      setAssignBusy(false)
+    }
+  }
+  const deleteMapping = async (id: string) => {
+    if (!confirm('Delete this mapping?')) return
+    setAssignBusy(true)
+    try {
+      const res = await fetch('/api/tree', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete_gt_mapping', id }),
+      })
+      if (!res.ok) throw new Error()
+      await fetchData()
+    } catch (err) {
+      console.error('Delete mapping error:', err)
     } finally {
       setAssignBusy(false)
     }
@@ -778,20 +889,123 @@ export default function ShepherdTreeV2() {
           <div style={{
             background: 'white', borderRadius: 16,
             boxShadow: '0 8px 30px rgba(0,0,0,0.12)', border: '1px solid var(--border)',
-            width: 'min(90vw, 440px)', maxHeight: 'min(85vh, 600px)',
+            width: 'min(92vw, 520px)', maxHeight: 'min(88vh, 680px)',
             display: 'flex', flexDirection: 'column',
           }}>
             {/* Header */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
               <h3 className="font-serif" style={{ fontSize: 14, color: 'var(--primary)', margin: 0 }}>
-                {assignSelectedLayerId ? 'Choose a Reference List' : 'Assign List to Layer'}
+                {mappingDraft
+                  ? (mappingDraft.id ? 'Edit Mapping' : 'New Group/Team Mapping')
+                  : assignSelectedLayerId ? 'Choose a Reference List' : 'Assign Sources to Layers'}
               </h3>
-              <button onClick={() => { setAssignModalOpen(false); setAssignSelectedLayerId(null) }}
+              <button onClick={() => { setAssignModalOpen(false); setAssignSelectedLayerId(null); setMappingDraft(null) }}
                 style={{ fontSize: 18, lineHeight: 1, color: 'var(--muted-foreground)', background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
             </div>
 
+            {/* Tab bar (hidden when editing a mapping draft or in list-picker step) */}
+            {!mappingDraft && !assignSelectedLayerId && (
+              <div style={{ display: 'flex', padding: '6px 20px 0', borderBottom: '1px solid var(--border)', gap: 4, flexShrink: 0 }}>
+                {([['lists', 'Reference Lists'], ['mappings', 'Groups & Teams']] as const).map(([k, label]) => (
+                  <button
+                    key={k}
+                    onClick={() => setAssignTab(k)}
+                    className="sans"
+                    style={{
+                      fontSize: 12, fontWeight: 600, padding: '8px 12px',
+                      borderRadius: '6px 6px 0 0',
+                      border: 'none',
+                      borderBottom: assignTab === k ? '2px solid var(--primary)' : '2px solid transparent',
+                      background: 'none',
+                      color: assignTab === k ? 'var(--primary)' : 'var(--muted-foreground)',
+                      cursor: 'pointer',
+                    }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <div style={{ overflowY: 'auto', padding: '12px 20px', flex: 1 }}>
-              {!assignSelectedLayerId ? (
+              {mappingDraft ? (
+                /* ── Mapping editor ───────────────────────────────── */
+                <MappingEditor
+                  draft={mappingDraft}
+                  setDraft={setMappingDraft}
+                  layers={layers}
+                  groupsList={groupsList}
+                  teamsList={teamsList}
+                />
+              ) : assignTab === 'mappings' ? (
+                /* ── Mappings tab: list existing + new button ─────── */
+                <>
+                  <p className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', margin: '0 0 12px' }}>
+                    Map a curated set of PCO Groups or Teams onto two layers: one for leaders, one for members.
+                    You can have multiple mappings (e.g. A TEAM vs B TEAM) pointing to different layers.
+                  </p>
+                  {gtMappings.length === 0 ? (
+                    <p className="sans" style={{ fontSize: 12, color: 'var(--muted-foreground)', padding: '12px 0' }}>
+                      No mappings yet. Click "New mapping" below to create one.
+                    </p>
+                  ) : (
+                    gtMappings.map(m => {
+                      const leaderLayer = layers.find(l => l.id === m.leaderLayerId)
+                      const memberLayer = layers.find(l => l.id === m.memberLayerId)
+                      return (
+                        <div key={m.id} style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          padding: '10px 12px', margin: '0 0 4px', borderRadius: 8,
+                          border: '1px solid var(--border)', background: 'white',
+                        }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="sans" style={{ fontSize: 13, fontWeight: 600, color: 'var(--foreground)' }}>
+                              {m.name}
+                            </div>
+                            <div className="sans" style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 3 }}>
+                              {m.kind === 'groups' ? 'Groups' : 'Teams'} · {m.itemIds.length} selected
+                              {leaderLayer && <>  ·  leaders → <b style={{ color: leaderLayer.color.label }}>{leaderLayer.name}</b></>}
+                              {memberLayer && <>  ·  members → <b style={{ color: memberLayer.color.label }}>{memberLayer.name}</b></>}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setMappingDraft({
+                              id: m.id, name: m.name, kind: m.kind,
+                              leaderLayerId: m.leaderLayerId, memberLayerId: m.memberLayerId,
+                              itemIds: new Set(m.itemIds), search: '',
+                            })}
+                            className="sans"
+                            style={{ fontSize: 11, fontWeight: 500, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)', cursor: 'pointer' }}>
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => deleteMapping(m.id)}
+                            disabled={assignBusy}
+                            className="sans"
+                            style={{ fontSize: 11, fontWeight: 500, padding: '5px 8px', borderRadius: 6, border: '1px solid #c0392b33', background: 'white', color: '#c0392b', cursor: 'pointer' }}
+                            title="Delete">
+                            ×
+                          </button>
+                        </div>
+                      )
+                    })
+                  )}
+                  <button
+                    onClick={() => setMappingDraft({
+                      name: '', kind: 'groups',
+                      leaderLayerId: null, memberLayerId: null,
+                      itemIds: new Set(), search: '',
+                    })}
+                    className="sans"
+                    style={{
+                      marginTop: 12, width: '100%',
+                      padding: '10px', borderRadius: 8,
+                      border: '1px dashed var(--border)', background: 'white',
+                      color: 'var(--primary)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                    }}>
+                    + New mapping
+                  </button>
+                </>
+              ) : !assignSelectedLayerId ? (
                 /* Step 1: Pick a layer */
                 <>
                   <p className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', margin: '0 0 12px' }}>
@@ -891,12 +1105,39 @@ export default function ShepherdTreeV2() {
             </div>
 
             {/* Footer */}
-            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', borderRadius: '0 0 16px 16px' }}>
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--muted)', flexShrink: 0, display: 'flex', justifyContent: 'flex-end', gap: 8, borderRadius: '0 0 16px 16px' }}>
+              {mappingDraft && (
+                <>
+                  <button
+                    onClick={() => setMappingDraft(null)}
+                    className="sans"
+                    style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+                    Back
+                  </button>
+                  <button
+                    onClick={saveMappingDraft}
+                    disabled={assignBusy
+                      || !mappingDraft.name.trim()
+                      || (!mappingDraft.leaderLayerId && !mappingDraft.memberLayerId)
+                      || mappingDraft.itemIds.size === 0}
+                    className="sans"
+                    style={{
+                      fontSize: 12, fontWeight: 600, padding: '7px 14px', borderRadius: 8,
+                      border: 'none', background: 'var(--primary)', color: 'white',
+                      cursor: 'pointer',
+                      opacity: assignBusy ? 0.6 : 1,
+                    }}>
+                    {assignBusy ? 'Saving...' : 'Save mapping'}
+                  </button>
+                </>
+              )}
+              {!mappingDraft && (
               <button onClick={() => { setAssignModalOpen(false); setAssignSelectedLayerId(null) }}
                 className="sans"
                 style={{ fontSize: 12, fontWeight: 500, padding: '7px 14px', borderRadius: 8, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
                 Close
               </button>
+              )}
             </div>
           </div>
         </div>
@@ -1024,6 +1265,211 @@ export default function ShepherdTreeV2() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Group/Team Mapping editor sub-component ─────────────────────
+interface MappingDraft {
+  id?: string
+  name: string
+  kind: 'groups' | 'teams'
+  leaderLayerId: string | null
+  memberLayerId: string | null
+  itemIds: Set<string>
+  search: string
+}
+
+function MappingEditor({
+  draft, setDraft, layers, groupsList, teamsList,
+}: {
+  draft: MappingDraft
+  setDraft: (d: MappingDraft | null) => void
+  layers: LayerItem[]
+  groupsList: GroupLite[]
+  teamsList: TeamLite[]
+}) {
+  const update = (patch: Partial<MappingDraft>) => setDraft({ ...draft, ...patch })
+
+  // Source items for the current kind, optionally filtered by search
+  const items = (draft.kind === 'groups' ? groupsList : teamsList) as (GroupLite | TeamLite)[]
+  const typeKey = (it: GroupLite | TeamLite) =>
+    (it as GroupLite).groupTypeName ?? (it as TeamLite).serviceTypeName ?? 'Other'
+
+  const q = draft.search.trim().toLowerCase()
+  const filtered = items.filter(it => {
+    if (!q) return true
+    return it.name.toLowerCase().includes(q) || (typeKey(it) || '').toLowerCase().includes(q)
+  })
+  // Group by type for readability
+  const byType = new Map<string, typeof filtered>()
+  for (const it of filtered) {
+    const k = typeKey(it) || 'Other'
+    if (!byType.has(k)) byType.set(k, [])
+    byType.get(k)!.push(it)
+  }
+  const sortedTypes = [...byType.keys()].sort()
+
+  const toggleItem = (id: string) => {
+    const next = new Set(draft.itemIds)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    update({ itemIds: next })
+  }
+
+  const selectAllFiltered = () => {
+    const next = new Set(draft.itemIds)
+    for (const it of filtered) next.add(it.id)
+    update({ itemIds: next })
+  }
+  const clearSelection = () => update({ itemIds: new Set() })
+
+  return (
+    <div>
+      {/* Name */}
+      <label className="sans" style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 4 }}>
+        Mapping name
+      </label>
+      <input
+        type="text"
+        value={draft.name}
+        onChange={e => update({ name: e.target.value })}
+        placeholder="e.g. Worship A TEAM"
+        className="sans"
+        style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13, marginBottom: 14, boxSizing: 'border-box' }}
+      />
+
+      {/* Kind toggle */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+        {(['groups', 'teams'] as const).map(k => (
+          <button
+            key={k}
+            onClick={() => update({ kind: k, itemIds: new Set() })}
+            className="sans"
+            style={{
+              flex: 1, fontSize: 12, fontWeight: 600, padding: '8px 10px', borderRadius: 8,
+              border: draft.kind === k ? '2px solid var(--primary)' : '1px solid var(--border)',
+              background: draft.kind === k ? 'rgba(45, 96, 71, 0.06)' : 'white',
+              color: draft.kind === k ? 'var(--primary)' : 'var(--foreground)',
+              cursor: 'pointer',
+            }}>
+            PCO {k === 'groups' ? 'Groups' : 'Teams'}
+          </button>
+        ))}
+      </div>
+
+      {/* Layer pickers */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <LayerSelect
+          label="Leaders layer"
+          helper={`Leaders of selected ${draft.kind}`}
+          value={draft.leaderLayerId}
+          onChange={v => update({ leaderLayerId: v })}
+          layers={layers}
+        />
+        <LayerSelect
+          label="Members layer"
+          helper={`Members of selected ${draft.kind}`}
+          value={draft.memberLayerId}
+          onChange={v => update({ memberLayerId: v })}
+          layers={layers}
+        />
+      </div>
+
+      {/* Item picker */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <label className="sans" style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)' }}>
+          {draft.kind === 'groups' ? 'Groups' : 'Teams'} to include
+          <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--muted-foreground)' }}>({draft.itemIds.size} selected)</span>
+        </label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button onClick={selectAllFiltered} className="sans" style={{ fontSize: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'white', color: 'var(--foreground)', cursor: 'pointer' }}>
+            Select all{q ? ' (filtered)' : ''}
+          </button>
+          <button onClick={clearSelection} className="sans" style={{ fontSize: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'white', color: 'var(--muted-foreground)', cursor: 'pointer' }}>
+            Clear
+          </button>
+        </div>
+      </div>
+      <input
+        type="text"
+        value={draft.search}
+        onChange={e => update({ search: e.target.value })}
+        placeholder={`Search ${draft.kind}…`}
+        className="sans"
+        style={{ width: '100%', padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12, marginBottom: 8, boxSizing: 'border-box' }}
+      />
+      <div style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+        {items.length === 0 ? (
+          <p className="sans" style={{ padding: 12, fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
+            No {draft.kind} found. Sync PCO first.
+          </p>
+        ) : filtered.length === 0 ? (
+          <p className="sans" style={{ padding: 12, fontSize: 12, color: 'var(--muted-foreground)', margin: 0 }}>
+            No matches.
+          </p>
+        ) : (
+          sortedTypes.map(type => (
+            <div key={type}>
+              <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', padding: '8px 10px 4px', background: 'rgba(0,0,0,0.02)', textTransform: 'uppercase' }}>
+                {type}
+              </div>
+              {byType.get(type)!.map(it => {
+                const selected = draft.itemIds.has(it.id)
+                return (
+                  <label
+                    key={it.id}
+                    className="sans"
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 10px', fontSize: 12,
+                      borderTop: '1px solid rgba(0,0,0,0.04)',
+                      cursor: 'pointer',
+                      background: selected ? 'rgba(45, 96, 71, 0.06)' : 'white',
+                    }}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => toggleItem(it.id)}
+                      style={{ margin: 0 }}
+                    />
+                    <span style={{ flex: 1, fontWeight: selected ? 600 : 400, color: 'var(--foreground)' }}>
+                      {it.name}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+function LayerSelect({ label, helper, value, onChange, layers }: {
+  label: string
+  helper: string
+  value: string | null
+  onChange: (v: string | null) => void
+  layers: LayerItem[]
+}) {
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <label className="sans" style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 4 }}>
+        {label}
+      </label>
+      <select
+        value={value || ''}
+        onChange={e => onChange(e.target.value || null)}
+        className="sans"
+        style={{ width: '100%', padding: '7px 8px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12, background: 'white', color: 'var(--foreground)' }}
+      >
+        <option value="">— none —</option>
+        {layers.map(l => (
+          <option key={l.id} value={l.id}>{l.name}</option>
+        ))}
+      </select>
+      <div className="sans" style={{ fontSize: 10, color: 'var(--muted-foreground)', marginTop: 3 }}>{helper}</div>
     </div>
   )
 }

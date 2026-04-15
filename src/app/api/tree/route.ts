@@ -142,6 +142,8 @@ export async function GET() {
     { data: departmentMembers },
     { data: shepherdingRelationships },
     { data: layerExclusions },
+    { data: gtMappings },
+    { data: gtMappingItems },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank')
       .eq('church_id', churchId!).order('rank'),
@@ -176,6 +178,12 @@ export async function GET() {
     admin.from('shepherding_relationships').select('shepherd_id, person_id, is_active')
       .eq('church_id', churchId!).eq('is_active', true).range(0, 49999),
     admin.from('tree_layer_exclusions').select('person_id, layer_id')
+      .eq('church_id', churchId!),
+    admin.from('group_team_layer_mappings')
+      .select('id, name, kind, leader_layer_id, member_layer_id')
+      .eq('church_id', churchId!),
+    admin.from('group_team_layer_mapping_items')
+      .select('mapping_id, item_id')
       .eq('church_id', churchId!),
   ])
 
@@ -911,6 +919,62 @@ export async function GET() {
     layerExclusions: (layerExclusions || []).map((e: { person_id: string; layer_id: string }) => ({
       personId: e.person_id, layerId: e.layer_id,
     })),
+    groupsList: (groups || []).map((g: { id: string; name: string; group_type_id?: string | null; pco_group_type_id?: string | null }) => ({
+      id: g.id,
+      name: g.name || 'Untitled group',
+      groupTypeName: getGroupTypeName(g),
+    })),
+    teamsList: (teams || []).map((t: { id: string; name: string; service_type_id?: string | null; pco_service_type_id?: string | null }) => ({
+      id: t.id,
+      name: t.name || 'Untitled team',
+      serviceTypeName: getServiceTypeName(t),
+    })),
+    gtMappings: (gtMappings || []).map((m: { id: string; name: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null }) => ({
+      id: m.id,
+      name: m.name,
+      kind: m.kind,
+      leaderLayerId: m.leader_layer_id,
+      memberLayerId: m.member_layer_id,
+      itemIds: (gtMappingItems || [])
+        .filter((it: { mapping_id: string; item_id: string }) => it.mapping_id === m.id)
+        .map((it: { mapping_id: string; item_id: string }) => it.item_id),
+    })),
+    // Pre-computed per-layer people derived from Groups/Teams mappings.
+    // Frontend unions these with pcoListPeople-based entries to render cards.
+    mappingLayerPeople: (() => {
+      type Row = { layerId: string; personId: string; personName: string; role: 'leader' | 'member' }
+      const rows: Row[] = []
+      const seen = new Set<string>() // layerId::personId::role
+      for (const m of (gtMappings || []) as { id: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null }[]) {
+        const items = (gtMappingItems || []).filter((it: { mapping_id: string }) => it.mapping_id === m.id).map((it: { item_id: string }) => it.item_id)
+        if (items.length === 0) continue
+        const pool: { personId: string; role: string }[] = []
+        if (m.kind === 'groups') {
+          for (const gid of items) {
+            const members = groupMembers.get(gid) || []
+            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role })
+          }
+        } else if (m.kind === 'teams') {
+          for (const tid of items) {
+            const members = teamMembers.get(tid) || []
+            for (const mm of members) pool.push({ personId: mm.personId, role: mm.role })
+          }
+        }
+        for (const mm of pool) {
+          const isLeader = /leader|co.?leader/i.test(mm.role || '')
+          const layerId = isLeader ? m.leader_layer_id : m.member_layer_id
+          if (!layerId) continue
+          const role: 'leader' | 'member' = isLeader ? 'leader' : 'member'
+          const key = `${layerId}::${mm.personId}::${role}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          const p = personMap.get(mm.personId)
+          if (!p) continue
+          rows.push({ layerId, personId: mm.personId, personName: p.name || 'Unknown', role })
+        }
+      }
+      return rows
+    })(),
     currentUserRole: currentUser?.role,
     groupTypes: (groupTypes || []).map(gt => ({ id: gt.id, name: gt.name, is_tracked: gt.is_tracked })),
     serviceTypes: (serviceTypes || []).map(st => ({ id: st.id, name: st.name, is_tracked: (st as any).is_tracked })),
@@ -1160,6 +1224,48 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     // Auto-rebuild assignments from lists
     await syncListAssignments(admin, churchId!)
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Create or update a Group/Team → (leader, member) layer mapping ──
+  if (body.action === 'save_gt_mapping') {
+    const { id, name, kind, leader_layer_id, member_layer_id, item_ids } = body
+    if (!name || !kind || !['groups', 'teams'].includes(kind)) {
+      return NextResponse.json({ error: 'name and kind (groups|teams) required' }, { status: 400 })
+    }
+    if (!leader_layer_id && !member_layer_id) {
+      return NextResponse.json({ error: 'at least one of leader_layer_id or member_layer_id required' }, { status: 400 })
+    }
+
+    let mappingId = id as string | undefined
+    if (mappingId) {
+      const { error: uErr } = await admin.from('group_team_layer_mappings')
+        .update({ name, kind, leader_layer_id: leader_layer_id || null, member_layer_id: member_layer_id || null, updated_at: new Date().toISOString() })
+        .eq('id', mappingId).eq('church_id', churchId!)
+      if (uErr) return NextResponse.json({ error: uErr.message }, { status: 500 })
+    } else {
+      const { data: ins, error: iErr } = await admin.from('group_team_layer_mappings')
+        .insert({ name, kind, leader_layer_id: leader_layer_id || null, member_layer_id: member_layer_id || null, church_id: churchId })
+        .select().single()
+      if (iErr) return NextResponse.json({ error: iErr.message }, { status: 500 })
+      mappingId = ins.id
+    }
+
+    // Replace item_ids
+    await admin.from('group_team_layer_mapping_items').delete().eq('mapping_id', mappingId!)
+    if (Array.isArray(item_ids) && item_ids.length > 0) {
+      const rows = item_ids.map((iid: string) => ({ mapping_id: mappingId, item_id: iid, church_id: churchId }))
+      const { error: itErr } = await admin.from('group_team_layer_mapping_items').insert(rows)
+      if (itErr) return NextResponse.json({ error: itErr.message }, { status: 500 })
+    }
+    return NextResponse.json({ success: true, id: mappingId })
+  }
+
+  // ── Delete a Group/Team mapping ─────────────────────────────
+  if (body.action === 'delete_gt_mapping') {
+    const { id } = body
+    if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+    await admin.from('group_team_layer_mappings').delete().eq('id', id).eq('church_id', churchId!)
     return NextResponse.json({ success: true })
   }
 
