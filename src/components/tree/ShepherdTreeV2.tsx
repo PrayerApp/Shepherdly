@@ -485,28 +485,33 @@ export default function ShepherdTreeV2() {
   const cardKeyFor = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
     `${personId}::${layerId}::${contextKey}`
 
-  // Compute, for every person, the highest non-congregational layer (by
-  // index in sortedLayers) they appear on. Used to cull their
-  // appearances on lower non-cong layers.
-  const highestNonCongLayerByPerson: Map<string, string> = (() => {
-    const out = new Map<string, string>() // personId -> layerId
+  // Compute, for every (person, contextKey), the highest non-congregational
+  // layer (by index in sortedLayers) they appear on. Used to cull their
+  // appearances on lower non-cong layers. Context-aware so that a leader
+  // of Group A on Layer 2 and Group B on Layer 3 appears on both.
+  const highestNonCongLayerByPersonCtx: Map<string, string> = (() => {
+    const out = new Map<string, string>() // "personId::contextKey" -> layerId
     const idx = (lid: string) => layers.findIndex(l => l.id === lid)
-    const consider = (personId: string, layerId: string) => {
+    const consider = (personId: string, layerId: string, contextKey: string) => {
       const layer = layers.find(l => l.id === layerId)
       if (!layer || layer.isCongregational) return
-      const cur = out.get(personId)
-      if (!cur || idx(layerId) < idx(cur)) out.set(personId, layerId)
+      const k = `${personId}::${contextKey}`
+      const cur = out.get(k)
+      if (!cur || idx(layerId) < idx(cur)) out.set(k, layerId)
     }
-    // PCO lists
+    // PCO lists — "primary" context
     for (const link of listLayerLinks) {
       for (const lp of listPeople) {
-        if (lp.listId === link.listId) consider(lp.personId, link.layerId)
+        if (lp.listId === link.listId) consider(lp.personId, link.layerId, CONTEXT_PRIMARY)
       }
     }
-    // Mapping-derived
-    for (const mp of mappingLayerPeople) consider(mp.personId, mp.layerId)
-    // Manual inclusions
-    for (const inc of inclusions) consider(inc.personId, inc.layerId)
+    // Mapping-derived — use the actual context
+    for (const mp of mappingLayerPeople) {
+      const ctx = `${mp.contextKind}-${mp.contextId}`
+      consider(mp.personId, mp.layerId, ctx)
+    }
+    // Manual inclusions — "primary" context
+    for (const inc of inclusions) consider(inc.personId, inc.layerId, CONTEXT_PRIMARY)
     return out
   })()
 
@@ -547,25 +552,24 @@ export default function ShepherdTreeV2() {
     // Apply rules.
     const byKey = new Map<string, Card>()
     for (const a of appearances) {
-      // Non-cong cross-layer rule: keep only the HIGHEST non-cong layer
-      // for each person. If this isn't their highest non-cong layer, drop.
+      // Cross-layer rule: for non-cong layers, keep only appearances whose
+      // (personId, contextKey) highest layer matches THIS layer.
       if (!isCong) {
-        const highest = highestNonCongLayerByPerson.get(a.personId)
+        const k = `${a.personId}::${a.contextKey}`
+        const highest = highestNonCongLayerByPersonCtx.get(k)
         if (highest && highest !== layerId) continue
       }
-      // Dedup strategy:
-      //   - On non-cong: one card per personId (ignore context)
-      //   - On cong: one card per (personId, contextKey)
-      const dedupKey = isCong
-        ? cardKeyFor(a.personId, layerId, a.contextKey)
-        : cardKeyFor(a.personId, layerId, CONTEXT_PRIMARY)
+      // Dedup strategy: one card per (personId, contextKey) on ALL layers.
+      // Leaders of multiple groups/teams get distinct cards just like
+      // congregational members do.
+      const dedupKey = cardKeyFor(a.personId, layerId, a.contextKey)
       if (byKey.has(dedupKey)) continue
       byKey.set(dedupKey, {
         key: dedupKey,
         personId: a.personId,
         name: a.name,
         isExcluded: excluded.has(a.personId),
-        contextKey: isCong ? a.contextKey : CONTEXT_PRIMARY,
+        contextKey: a.contextKey,
       })
     }
 
@@ -906,9 +910,18 @@ export default function ShepherdTreeV2() {
     return any?.key ?? nodeKey(c.childPersonId, c.childLayerId, CONTEXT_PRIMARY)
   }
   const resolveParentCardKey = (c: TreeConnection): string => {
-    // Parent side usually lives on a non-cong layer where there's only
-    // one card per person. Match by personId.
+    // Parent (leader) side now also has per-context cards when the leader
+    // is in multiple groups/teams. Try matching by edge context first.
     const cards = peopleByLayer.get(c.parentLayerId) || []
+    if (c.contextGroupId) {
+      const k = nodeKey(c.parentPersonId, c.parentLayerId, `group-${c.contextGroupId}`)
+      if (cards.some(card => card.key === k)) return k
+    }
+    if (c.contextTeamId) {
+      const k = nodeKey(c.parentPersonId, c.parentLayerId, `team-${c.contextTeamId}`)
+      if (cards.some(card => card.key === k)) return k
+    }
+    // Fall back: first card for this person on this layer.
     const any = cards.find(card => card.personId === c.parentPersonId)
     return any?.key ?? nodeKey(c.parentPersonId, c.parentLayerId, CONTEXT_PRIMARY)
   }
