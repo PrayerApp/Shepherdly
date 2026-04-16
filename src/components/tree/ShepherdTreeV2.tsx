@@ -8,7 +8,6 @@ interface LayerItem {
   name: string
   color: { bg: string; label: string }
   category?: string
-  isCongregational?: boolean
 }
 
 interface PcoList {
@@ -369,7 +368,6 @@ export default function ShepherdTreeV2() {
         name: l.name,
         color: colorForIndex(i),
         category: l.category,
-        isCongregational: !!l.is_congregational,
       }))
 
       if (dbLayers.length > 0) {
@@ -389,8 +387,7 @@ export default function ShepherdTreeV2() {
           if (d2.layers) {
             setLayers(d2.layers.map((l: any, i: number) => ({
               id: l.id, name: l.name, color: colorForIndex(i), category: l.category,
-              isCongregational: !!l.is_congregational,
-            })))
+                  })))
           }
         }
       }
@@ -472,11 +469,10 @@ export default function ShepherdTreeV2() {
   // "primary" for list/inclusion/leader cards.
   //
   // Rules:
-  // 1) Congregational layers (is_congregational) duplicate a person for
-  //    every distinct membership, so someone in 3 groups gets 3 cards.
-  // 2) Non-congregational layers dedupe by personId, AND a person who
-  //    appears on multiple non-congregational layers is kept only on
-  //    their HIGHEST (lowest-rank) non-cong layer.
+  // 1) Every layer duplicates a person for every distinct membership
+  //    context, so someone leading 3 groups gets 3 cards.
+  // 2) A person appearing on multiple layers for the SAME context is
+  //    kept only on their highest (lowest-rank) layer.
   //
   // Selection, layout, and connections all operate on cardKey.
   type Card = { key: string; personId: string; name: string; isExcluded: boolean; contextKey: string }
@@ -485,16 +481,14 @@ export default function ShepherdTreeV2() {
   const cardKeyFor = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
     `${personId}::${layerId}::${contextKey}`
 
-  // Compute, for every (person, contextKey), the highest non-congregational
-  // layer (by index in sortedLayers) they appear on. Used to cull their
-  // appearances on lower non-cong layers. Context-aware so that a leader
-  // of Group A on Layer 2 and Group B on Layer 3 appears on both.
-  const highestNonCongLayerByPersonCtx: Map<string, string> = (() => {
+  // Compute, for every (person, contextKey), the highest layer (by index
+  // in sortedLayers) they appear on. Used to cull duplicate appearances
+  // on lower layers. Context-aware so that a person leading Group A on
+  // Layer 2 and Group B on Layer 3 appears on both.
+  const highestLayerByPersonCtx: Map<string, string> = (() => {
     const out = new Map<string, string>() // "personId::contextKey" -> layerId
     const idx = (lid: string) => layers.findIndex(l => l.id === lid)
     const consider = (personId: string, layerId: string, contextKey: string) => {
-      const layer = layers.find(l => l.id === layerId)
-      if (!layer || layer.isCongregational) return
       const k = `${personId}::${contextKey}`
       const cur = out.get(k)
       if (!cur || idx(layerId) < idx(cur)) out.set(k, layerId)
@@ -516,8 +510,6 @@ export default function ShepherdTreeV2() {
   })()
 
   const getPeopleForLayer = (layerId: string): Card[] => {
-    const layer = layers.find(l => l.id === layerId)
-    const isCong = !!layer?.isCongregational
     const excluded = new Set(
       exclusions.filter(e => e.layerId === layerId).map(e => e.personId)
     )
@@ -535,8 +527,7 @@ export default function ShepherdTreeV2() {
       }
     }
 
-    // 2) Mapping-derived — context-specific so congregational layers
-    //    get one card per membership.
+    // 2) Mapping-derived — context-specific: one card per membership.
     for (const mp of mappingLayerPeople) {
       if (mp.layerId !== layerId) continue
       const ctx = `${mp.contextKind}-${mp.contextId}`
@@ -552,16 +543,13 @@ export default function ShepherdTreeV2() {
     // Apply rules.
     const byKey = new Map<string, Card>()
     for (const a of appearances) {
-      // Cross-layer rule: for non-cong layers, keep only appearances whose
-      // (personId, contextKey) highest layer matches THIS layer.
-      if (!isCong) {
-        const k = `${a.personId}::${a.contextKey}`
-        const highest = highestNonCongLayerByPersonCtx.get(k)
-        if (highest && highest !== layerId) continue
-      }
-      // Dedup strategy: one card per (personId, contextKey) on ALL layers.
-      // Leaders of multiple groups/teams get distinct cards just like
-      // congregational members do.
+      // Cross-layer rule: keep only appearances whose (personId, contextKey)
+      // highest layer matches THIS layer. Prevents the same person from
+      // appearing on multiple layers for the same context.
+      const k = `${a.personId}::${a.contextKey}`
+      const highest = highestLayerByPersonCtx.get(k)
+      if (highest && highest !== layerId) continue
+      // Dedup: one card per (personId, contextKey).
       const dedupKey = cardKeyFor(a.personId, layerId, a.contextKey)
       if (byKey.has(dedupKey)) continue
       byKey.set(dedupKey, {
@@ -738,7 +726,7 @@ export default function ShepherdTreeV2() {
             id: l.id.startsWith('local-') ? undefined : l.id,
             name: l.name,
             category: l.category || 'custom',
-            is_congregational: !!l.isCongregational,
+            is_congregational: false,
           })),
         }),
       })
@@ -761,8 +749,6 @@ export default function ShepherdTreeV2() {
       name: newName.trim(),
       color,
       category: 'custom',
-      // New layers default to leader-style (non-congregation).
-      isCongregational: false,
     }])
     setNewName('')
   }
@@ -2384,36 +2370,6 @@ export default function ShepherdTreeV2() {
                       onFocus={e => { e.currentTarget.style.border = `1px solid ${layer.color.label}55`; e.currentTarget.style.background = 'white' }}
                       onBlur={e => { e.currentTarget.style.border = '1px solid transparent'; e.currentTarget.style.background = 'rgba(255,255,255,0.6)' }}
                     />
-
-                    {/* Leader toggle. ON = leader layer (deduped, highest-wins).
-                        OFF = congregation (allows duplicate cards per membership). */}
-                    {(() => {
-                      const isLeaderLayer = !layer.isCongregational
-                      return (
-                        <button
-                          onClick={e => {
-                            e.stopPropagation()
-                            // Toggle: flip isCongregational (button reflects
-                            // !isCongregational since ON = LEADER, OFF = congregation).
-                            setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isCongregational: !l.isCongregational } : l))
-                          }}
-                          title={isLeaderLayer
-                            ? 'Leader layer — one card per person, kept at their highest leader layer'
-                            : 'Congregation layer — one card per membership (duplicates allowed)'}
-                          className="sans"
-                          style={{
-                            fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
-                            padding: '4px 8px', borderRadius: 6,
-                            border: `1px solid ${isLeaderLayer ? layer.color.label : layer.color.label + '40'}`,
-                            background: isLeaderLayer ? layer.color.label : 'rgba(255,255,255,0.6)',
-                            color: isLeaderLayer ? 'white' : layer.color.label,
-                            cursor: 'pointer', whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}>
-                          {isLeaderLayer ? '✓ LEADER' : 'LEADER'}
-                        </button>
-                      )
-                    })()}
 
                     {/* Delete */}
                     <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}
