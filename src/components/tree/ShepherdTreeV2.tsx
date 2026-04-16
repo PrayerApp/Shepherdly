@@ -61,6 +61,7 @@ interface GtMapping {
   leaderLayerId: string | null
   memberLayerId: string | null
   autoConnect: boolean
+  countMode: 'all' | 'split' | 'split_round'
   itemIds: string[]
 }
 
@@ -148,7 +149,7 @@ const CARD_GAP = 8
 const UNIT = CARD_WIDTH + CARD_GAP
 // Reserves a narrow column on the left of each band for the vertical
 // multiline layer label; cards start after this padding.
-const BAND_PADDING_LEFT = 50
+const BAND_PADDING_LEFT = 62
 const LINE_COLOR = 'rgba(0,0,0,0.25)'
 const LINE_COLOR_HOVER = '#7a5a00'
 
@@ -337,6 +338,7 @@ export default function ShepherdTreeV2() {
     leaderLayerId: string | null
     memberLayerId: string | null
     autoConnect: boolean
+    countMode: 'all' | 'split' | 'split_round'
     itemIds: Set<string>
     search: string
   } | null>(null)
@@ -816,6 +818,7 @@ export default function ShepherdTreeV2() {
           member_layer_id: mappingDraft.memberLayerId,
           item_ids: [...mappingDraft.itemIds],
           auto_connect: mappingDraft.autoConnect,
+          count_mode: mappingDraft.countMode,
         }),
       })
       if (!res.ok) throw new Error()
@@ -1168,35 +1171,43 @@ export default function ShepherdTreeV2() {
     return out
   })()
 
-  // Global stats per person: merge descendants across ALL cards for the
-  // same personId so every card shows the person's full shepherding picture.
+  // Global stats per person: merge per-card stats across ALL cards for the
+  // same personId. Applies co-leader counting mode: for cards in a cluster
+  // whose mapping uses 'split' or 'split_round', divide counts by cluster size.
   const globalBucketStatsByPerson: Map<string, Record<string, number>> = (() => {
-    // First, collect all distinct descendant person-ids per bucket per person.
-    const personDescs = new Map<string, Set<string>>() // personId -> all descendant card keys
-    for (const l of sortedLayers) {
-      for (const p of peopleByLayer.get(l.id) || []) {
-        const desc = descendantsByKey.get(p.key) || new Set<string>()
-        if (!personDescs.has(p.personId)) personDescs.set(p.personId, new Set())
-        const merged = personDescs.get(p.personId)!
-        for (const dk of desc) merged.add(dk)
+    // Build a lookup: context key (e.g. "group-<id>") -> countMode from the
+    // mapping that governs that group/team.
+    const contextCountMode = new Map<string, 'all' | 'split' | 'split_round'>()
+    for (const m of gtMappings) {
+      for (const iid of m.itemIds) {
+        const ctx = m.kind === 'groups' ? `group-${iid}` : `team-${iid}`
+        contextCountMode.set(ctx, (m.countMode as 'all' | 'split' | 'split_round') || 'all')
       }
     }
-    const layersByBucket = new Map<string, Set<string>>()
-    for (const b of metricBuckets) layersByBucket.set(b.id, new Set(b.layerIds))
+    // Quick lookup: cardKey -> cluster size
+    const clusterSizeByKey = new Map<string, number>()
+    for (const [, members] of layout.coLeaderClusters) {
+      for (const k of members) clusterSizeByKey.set(k, members.length)
+    }
+
     const out = new Map<string, Record<string, number>>()
-    for (const [personId, descKeys] of personDescs) {
-      const counts: Record<string, number> = {}
-      for (const b of metricBuckets) {
-        const layerSet = layersByBucket.get(b.id)!
-        const seen = new Set<string>()
-        for (const dk of descKeys) {
-          const [pid, lid] = dk.split('::')
-          if (!layerSet.has(lid)) continue
-          seen.add(pid)
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) {
+        const cardCounts = bucketStatsByKey.get(p.key) || {}
+        const clusterSize = clusterSizeByKey.get(p.key) || 1
+        const mode = contextCountMode.get(p.contextKey) || 'all'
+        const divisor = mode === 'all' ? 1 : clusterSize
+
+        if (!out.has(p.personId)) out.set(p.personId, {})
+        const merged = out.get(p.personId)!
+        for (const [bId, raw] of Object.entries(cardCounts)) {
+          let val: number
+          if (divisor <= 1) val = raw
+          else if (mode === 'split_round') val = Math.ceil(raw / divisor)
+          else val = Math.round((raw / divisor) * 10) / 10 // one decimal
+          merged[bId] = (merged[bId] || 0) + val
         }
-        counts[b.id] = seen.size
       }
-      out.set(personId, counts)
     }
     return out
   })()
@@ -1279,21 +1290,19 @@ export default function ShepherdTreeV2() {
       // Sort by layer index (highest/top first).
       cards.sort((a, b) => a.layerIdx - b.layerIdx)
       // Link from the topmost card to every lower duplicate, but only
-      // when the topmost layer is marked as a LEADER layer.
+      // when the LOWER card's layer is marked as LEAD (meaning it's a
+      // shepherding layer, not just participation).
       const top = cards[0]
-      const topLayer = layers.find(l => l.id === top.layerId)
-      if (!topLayer?.isLeader) continue
       for (let i = 1; i < cards.length; i++) {
-        // Only link across different layers (same-layer dupes are
-        // same-person-different-context, not "duplicates" in this sense).
-        if (cards[i].layerIdx !== top.layerIdx) {
-          links.push({
-            fromKey: top.key,
-            toKey: cards[i].key,
-            fromLayerId: top.layerId,
-            toLayerId: cards[i].layerId,
-          })
-        }
+        if (cards[i].layerIdx === top.layerIdx) continue
+        const lowerLayer = layers.find(l => l.id === cards[i].layerId)
+        if (!lowerLayer?.isLeader) continue
+        links.push({
+          fromKey: top.key,
+          toKey: cards[i].key,
+          fromLayerId: top.layerId,
+          toLayerId: cards[i].layerId,
+        })
       }
     }
     return links
@@ -2281,6 +2290,7 @@ export default function ShepherdTreeV2() {
                               id: m.id, name: m.name, kind: m.kind,
                               leaderLayerId: m.leaderLayerId, memberLayerId: m.memberLayerId,
                               autoConnect: m.autoConnect,
+                              countMode: m.countMode || 'all',
                               itemIds: new Set(m.itemIds), search: '',
                             })}
                             className="sans"
@@ -2304,6 +2314,7 @@ export default function ShepherdTreeV2() {
                       name: '', kind: 'groups',
                       leaderLayerId: null, memberLayerId: null,
                       autoConnect: false,
+                      countMode: 'all',
                       itemIds: new Set(), search: '',
                     })}
                     className="sans"
@@ -2863,6 +2874,7 @@ interface MappingDraft {
   leaderLayerId: string | null
   memberLayerId: string | null
   autoConnect: boolean
+  countMode: 'all' | 'split' | 'split_round'
   itemIds: Set<string>
   search: string
 }
@@ -2996,10 +3008,42 @@ function MappingEditor({
             Auto-connect leaders → members
           </div>
           <div style={{ fontSize: 11, color: 'var(--muted-foreground)', marginTop: 2, lineHeight: 1.3 }}>
-            For every selected {draft.kind === 'groups' ? 'group' : 'team'}, draw a connection from each leader on the leaders layer to each member on the members layer. Groups with multiple leaders will wire members to all of them. Auto-connections are refreshed every time you save this mapping.
+            Automatically connect leaders to members for each selected {draft.kind === 'groups' ? 'group' : 'team'}. Refreshed on every save and PCO sync.
           </div>
         </div>
       </label>
+
+      {/* Co-leader counting mode */}
+      {draft.leaderLayerId && draft.memberLayerId && (
+        <div style={{ marginBottom: 14 }}>
+          <label className="sans" style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--muted-foreground)', marginBottom: 6 }}>
+            Co-leader counting
+          </label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {([
+              { value: 'all' as const, label: 'Full count', desc: 'Each leader counts all members' },
+              { value: 'split' as const, label: 'Split evenly', desc: 'Divide members across leaders' },
+              { value: 'split_round' as const, label: 'Split (round up)', desc: 'Split and round up per leader' },
+            ]).map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => update({ countMode: opt.value })}
+                title={opt.desc}
+                className="sans"
+                style={{
+                  flex: 1, fontSize: 11, fontWeight: draft.countMode === opt.value ? 600 : 400,
+                  padding: '7px 6px', borderRadius: 8,
+                  border: draft.countMode === opt.value ? '2px solid var(--primary)' : '1px solid var(--border)',
+                  background: draft.countMode === opt.value ? 'rgba(45,96,71,0.06)' : 'white',
+                  color: draft.countMode === opt.value ? 'var(--primary)' : 'var(--foreground)',
+                  cursor: 'pointer', lineHeight: 1.2,
+                }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Item picker */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>

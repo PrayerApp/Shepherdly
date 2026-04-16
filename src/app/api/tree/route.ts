@@ -992,13 +992,14 @@ export async function GET() {
       name: t.name || 'Untitled team',
       serviceTypeName: getServiceTypeName(t),
     })),
-    gtMappings: (gtMappings || []).map((m: { id: string; name: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null; auto_connect: boolean }) => ({
+    gtMappings: (gtMappings || []).map((m: { id: string; name: string; kind: string; leader_layer_id: string | null; member_layer_id: string | null; auto_connect: boolean; count_mode?: string }) => ({
       id: m.id,
       name: m.name,
       kind: m.kind,
       leaderLayerId: m.leader_layer_id,
       memberLayerId: m.member_layer_id,
       autoConnect: !!m.auto_connect,
+      countMode: m.count_mode || 'all',
       itemIds: (gtMappingItems || [])
         .filter((it: { mapping_id: string; item_id: string }) => it.mapping_id === m.id)
         .map((it: { mapping_id: string; item_id: string }) => it.item_id),
@@ -1411,7 +1412,7 @@ export async function POST(request: Request) {
 
   // ── Create or update a Group/Team → (leader, member) layer mapping ──
   if (body.action === 'save_gt_mapping') {
-    const { id, name, kind, leader_layer_id, member_layer_id, item_ids, auto_connect } = body
+    const { id, name, kind, leader_layer_id, member_layer_id, item_ids, auto_connect, count_mode } = body
     if (!name || !kind || !['groups', 'teams'].includes(kind)) {
       return NextResponse.json({ error: 'name and kind (groups|teams) required' }, { status: 400 })
     }
@@ -1427,6 +1428,7 @@ export async function POST(request: Request) {
           leader_layer_id: leader_layer_id || null,
           member_layer_id: member_layer_id || null,
           auto_connect: !!auto_connect,
+          count_mode: count_mode || 'all',
           updated_at: new Date().toISOString(),
         })
         .eq('id', mappingId).eq('church_id', churchId!)
@@ -1438,6 +1440,7 @@ export async function POST(request: Request) {
           leader_layer_id: leader_layer_id || null,
           member_layer_id: member_layer_id || null,
           auto_connect: !!auto_connect,
+          count_mode: count_mode || 'all',
           church_id: churchId,
         })
         .select().single()
