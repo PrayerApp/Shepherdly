@@ -972,16 +972,16 @@ export default function ShepherdTreeV2() {
       return nameOf(a).localeCompare(nameOf(b), undefined, { sensitivity: 'base' })
     }
     // Pre-compute cluster members among all parents that exist in the graph
+    const coLeaderClusters = new Map<string, string[]>()
     {
-      const clusterMembers = new Map<string, string[]>()
       const allParents = new Set<string>()
       for (const [, ps] of parentsMap) for (const p of ps) allParents.add(p)
       for (const p of allParents) {
         const r = find(p)
-        if (!clusterMembers.has(r)) clusterMembers.set(r, [])
-        clusterMembers.get(r)!.push(p)
+        if (!coLeaderClusters.has(r)) coLeaderClusters.set(r, [])
+        coLeaderClusters.get(r)!.push(p)
       }
-      for (const [, ms] of clusterMembers) {
+      for (const [, ms] of coLeaderClusters) {
         ms.sort(alphaCmp)
         const anchor = ms[0]
         for (const m of ms) clusterAnchorCache.set(m, anchor)
@@ -1095,7 +1095,12 @@ export default function ShepherdTreeV2() {
       ...[...layerCursor.values()].map(v => v - 1),
       ...[...xUnit.values()],
     )
-    return { xUnit, maxUnit, inGraph }
+    // Only keep clusters with 2+ members for visual grouping.
+    const multiClusters = new Map<string, string[]>()
+    for (const [anchor, members] of coLeaderClusters) {
+      if (members.length >= 2) multiClusters.set(anchor, members)
+    }
+    return { xUnit, maxUnit, inGraph, coLeaderClusters: multiClusters }
   })()
 
   const cardLeft = (k: string): number => {
@@ -1178,6 +1183,44 @@ export default function ShepherdTreeV2() {
   const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
   const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
   const totalTreeHeight = sortedLayers.length * BAND_HEIGHT
+
+  // ── Co-leader cluster boxes ───────────────────────────────────
+  // For each cluster of 2+ co-leaders, compute bounding box geometry
+  // so we can render a visual group box and route lines from it.
+  const BOX_PAD = 6
+  type ClusterBox = {
+    anchor: string
+    members: string[]
+    layerId: string
+    left: number
+    top: number
+    width: number
+    height: number
+    centerX: number
+    bottomY: number
+  }
+  const clusterBoxes: ClusterBox[] = []
+  const cardToClusterBox = new Map<string, ClusterBox>()
+  for (const [anchor, members] of layout.coLeaderClusters) {
+    const layerId = members[0].split('::')[1]
+    const lefts = members.map(k => cardLeft(k))
+    const minLeft = Math.min(...lefts)
+    const maxLeft = Math.max(...lefts)
+    const top = cardTopAbs(layerId)
+    const box: ClusterBox = {
+      anchor,
+      members,
+      layerId,
+      left: minLeft - BOX_PAD,
+      top: top - BOX_PAD,
+      width: (maxLeft + CARD_WIDTH) - minLeft + BOX_PAD * 2,
+      height: CARD_HEIGHT + BOX_PAD * 2,
+      centerX: (minLeft + maxLeft + CARD_WIDTH) / 2,
+      bottomY: top + CARD_HEIGHT + BOX_PAD,
+    }
+    clusterBoxes.push(box)
+    for (const k of members) cardToClusterBox.set(k, box)
+  }
 
   // ── Connect / Disconnect actions ────────────────────────────
   // A "connection plan" is derived from the current selection when in
@@ -1592,8 +1635,11 @@ export default function ShepherdTreeV2() {
               const pk = resolveParentCardKey(c)
               const ck = resolveChildCardKey(c)
               if (!layout.xUnit.has(pk) || !layout.xUnit.has(ck)) return null
-              const px = cardLeft(pk) + CARD_WIDTH / 2
-              const py = cardTopAbs(c.parentLayerId) + CARD_HEIGHT
+              // If parent is in a co-leader cluster box, originate from
+              // the box's bottom-center instead of the individual card.
+              const parentBox = cardToClusterBox.get(pk)
+              const px = parentBox ? parentBox.centerX : cardLeft(pk) + CARD_WIDTH / 2
+              const py = parentBox ? parentBox.bottomY : cardTopAbs(c.parentLayerId) + CARD_HEIGHT
               const cx = cardLeft(ck) + CARD_WIDTH / 2
               const cy = cardTopAbs(c.childLayerId)
               const midY = (py + cy) / 2
@@ -1703,6 +1749,29 @@ export default function ShepherdTreeV2() {
               {connectMode && '\nClick to remove this connection'}
             </div>
           )}
+
+          {/* Co-leader cluster boxes — rendered behind cards */}
+          {clusterBoxes.map(box => {
+            const layer = sortedLayers.find(l => l.id === box.layerId)
+            return (
+              <div
+                key={`cluster-${box.anchor}`}
+                style={{
+                  position: 'absolute',
+                  left: box.left,
+                  top: box.top,
+                  width: box.width,
+                  height: box.height,
+                  borderRadius: 16,
+                  border: `1.5px solid ${layer?.color.label ?? '#999'}33`,
+                  background: `${layer?.color.label ?? '#999'}08`,
+                  pointerEvents: 'none',
+                  zIndex: 1,
+                  transition: 'left 0.2s, top 0.2s, width 0.2s',
+                }}
+              />
+            )
+          })}
 
           {/* Cards (absolute-positioned) */}
           {sortedLayers.map(layer => {
