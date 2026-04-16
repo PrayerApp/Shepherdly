@@ -1164,6 +1164,40 @@ export default function ShepherdTreeV2() {
     }
     return out
   })()
+
+  // Global stats per person: merge descendants across ALL cards for the
+  // same personId so every card shows the person's full shepherding picture.
+  const globalBucketStatsByPerson: Map<string, Record<string, number>> = (() => {
+    // First, collect all distinct descendant person-ids per bucket per person.
+    const personDescs = new Map<string, Set<string>>() // personId -> all descendant card keys
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) {
+        const desc = descendantsByKey.get(p.key) || new Set<string>()
+        if (!personDescs.has(p.personId)) personDescs.set(p.personId, new Set())
+        const merged = personDescs.get(p.personId)!
+        for (const dk of desc) merged.add(dk)
+      }
+    }
+    const layersByBucket = new Map<string, Set<string>>()
+    for (const b of metricBuckets) layersByBucket.set(b.id, new Set(b.layerIds))
+    const out = new Map<string, Record<string, number>>()
+    for (const [personId, descKeys] of personDescs) {
+      const counts: Record<string, number> = {}
+      for (const b of metricBuckets) {
+        const layerSet = layersByBucket.get(b.id)!
+        const seen = new Set<string>()
+        for (const dk of descKeys) {
+          const [pid, lid] = dk.split('::')
+          if (!layerSet.has(lid)) continue
+          seen.add(pid)
+        }
+        counts[b.id] = seen.size
+      }
+      out.set(personId, counts)
+    }
+    return out
+  })()
+
   // Dynamic band height: fit all layers in the visible viewport under the
   // sticky toolbar. Never go below a sensible minimum (and if there are
   // many layers, fall back to min height so cards remain legible — the
@@ -1221,6 +1255,43 @@ export default function ShepherdTreeV2() {
     clusterBoxes.push(box)
     for (const k of members) cardToClusterBox.set(k, box)
   }
+
+  // ── Duplicate-person dashed links ──────────────────────────
+  // When the same person appears on multiple layers, draw a dashed line
+  // from each upper card down to its lower duplicates so the viewer can
+  // see they're the same person.
+  type DupeLink = { fromKey: string; toKey: string; fromLayerId: string; toLayerId: string }
+  const dupeLinks: DupeLink[] = (() => {
+    // Group all rendered card keys by personId.
+    const byPerson = new Map<string, { key: string; layerId: string; layerIdx: number }[]>()
+    for (const l of sortedLayers) {
+      for (const p of peopleByLayer.get(l.id) || []) {
+        if (!byPerson.has(p.personId)) byPerson.set(p.personId, [])
+        byPerson.get(p.personId)!.push({ key: p.key, layerId: l.id, layerIdx: layerIndex(l.id) })
+      }
+    }
+    const links: DupeLink[] = []
+    for (const [, cards] of byPerson) {
+      if (cards.length < 2) continue
+      // Sort by layer index (highest/top first).
+      cards.sort((a, b) => a.layerIdx - b.layerIdx)
+      // Link from the topmost card to every lower duplicate.
+      const top = cards[0]
+      for (let i = 1; i < cards.length; i++) {
+        // Only link across different layers (same-layer dupes are
+        // same-person-different-context, not "duplicates" in this sense).
+        if (cards[i].layerIdx !== top.layerIdx) {
+          links.push({
+            fromKey: top.key,
+            toKey: cards[i].key,
+            fromLayerId: top.layerId,
+            toLayerId: cards[i].layerId,
+          })
+        }
+      }
+    }
+    return links
+  })()
 
   // ── Connect / Disconnect actions ────────────────────────────
   // A "connection plan" is derived from the current selection when in
@@ -1723,6 +1794,27 @@ export default function ShepherdTreeV2() {
                   </g>
               )
             })}
+
+            {/* Dashed lines linking a person's upper-layer card to lower duplicates */}
+            {dupeLinks.map(dl => {
+              if (!layout.xUnit.has(dl.fromKey) || !layout.xUnit.has(dl.toKey)) return null
+              const fx = cardLeft(dl.fromKey) + CARD_WIDTH / 2
+              const fy = cardTopAbs(dl.fromLayerId) + CARD_HEIGHT
+              const tx = cardLeft(dl.toKey) + CARD_WIDTH / 2
+              const ty = cardTopAbs(dl.toLayerId)
+              const midY = (fy + ty) / 2
+              const d = `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`
+              return (
+                <path
+                  key={`dupe-${dl.fromKey}-${dl.toKey}`}
+                  d={d}
+                  stroke="rgba(0,0,0,0.18)"
+                  strokeWidth={1.2}
+                  strokeDasharray="6 4"
+                  fill="none"
+                />
+              )
+            })}
           </svg>
 
           {/* Custom tooltip for the hovered connection */}
@@ -1778,7 +1870,7 @@ export default function ShepherdTreeV2() {
             const people = peopleByLayer.get(layer.id) || []
             return people.map(person => {
               const k = person.key
-              const bucketCounts = bucketStatsByKey.get(k) || {}
+              const bucketCounts = globalBucketStatsByPerson.get(person.personId) || {}
               const total = metricBuckets.reduce((sum, b) => sum + (bucketCounts[b.id] || 0), 0)
               const isSelected = selected.has(k)
               const isExcluded = person.isExcluded
