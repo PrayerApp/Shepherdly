@@ -8,6 +8,7 @@ interface LayerItem {
   name: string
   color: { bg: string; label: string }
   category?: string
+  isLeader?: boolean
 }
 
 interface PcoList {
@@ -368,6 +369,7 @@ export default function ShepherdTreeV2() {
         name: l.name,
         color: colorForIndex(i),
         category: l.category,
+        isLeader: !l.is_congregational,
       }))
 
       if (dbLayers.length > 0) {
@@ -386,7 +388,7 @@ export default function ShepherdTreeV2() {
           const d2 = await res2.json()
           if (d2.layers) {
             setLayers(d2.layers.map((l: any, i: number) => ({
-              id: l.id, name: l.name, color: colorForIndex(i), category: l.category,
+              id: l.id, name: l.name, color: colorForIndex(i), category: l.category, isLeader: !l.is_congregational,
                   })))
           }
         }
@@ -726,7 +728,7 @@ export default function ShepherdTreeV2() {
             id: l.id.startsWith('local-') ? undefined : l.id,
             name: l.name,
             category: l.category || 'custom',
-            is_congregational: false,
+            is_congregational: !l.isLeader,
           })),
         }),
       })
@@ -749,6 +751,7 @@ export default function ShepherdTreeV2() {
       name: newName.trim(),
       color,
       category: 'custom',
+      isLeader: true,
     }])
     setNewName('')
   }
@@ -1275,8 +1278,11 @@ export default function ShepherdTreeV2() {
       if (cards.length < 2) continue
       // Sort by layer index (highest/top first).
       cards.sort((a, b) => a.layerIdx - b.layerIdx)
-      // Link from the topmost card to every lower duplicate.
+      // Link from the topmost card to every lower duplicate, but only
+      // when the topmost layer is marked as a LEADER layer.
       const top = cards[0]
+      const topLayer = layers.find(l => l.id === top.layerId)
+      if (!topLayer?.isLeader) continue
       for (let i = 1; i < cards.length; i++) {
         // Only link across different layers (same-layer dupes are
         // same-person-different-context, not "duplicates" in this sense).
@@ -1803,7 +1809,31 @@ export default function ShepherdTreeV2() {
               const tx = cardLeft(dl.toKey) + CARD_WIDTH / 2
               const ty = cardTopAbs(dl.toLayerId)
               const midY = (fy + ty) / 2
-              const d = `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`
+              const fromLayerIdx = layerIndex(dl.fromLayerId)
+              const lsTop = bandTop(fromLayerIdx + 1)
+              const lsY = lsTop + Math.min(CARD_TOP_OFFSET - 12, 20)
+
+              let d: string
+              if (lineStyle === 'straight') {
+                d = `M ${fx} ${fy} L ${tx} ${ty}`
+              } else if (lineStyle === 'elbow') {
+                d = `M ${fx} ${fy} V ${lsY} H ${tx} V ${ty}`
+              } else if (lineStyle === 'step') {
+                const r = 6
+                const dir = tx >= fx ? 1 : -1
+                if (Math.abs(tx - fx) < r * 2) {
+                  d = `M ${fx} ${fy} L ${tx} ${ty}`
+                } else {
+                  d = `M ${fx} ${fy}
+                       V ${lsY - r}
+                       Q ${fx} ${lsY}, ${fx + dir * r} ${lsY}
+                       H ${tx - dir * r}
+                       Q ${tx} ${lsY}, ${tx} ${lsY + r}
+                       V ${ty}`
+                }
+              } else {
+                d = `M ${fx} ${fy} C ${fx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`
+              }
               return (
                 <path
                   key={`dupe-${dl.fromKey}-${dl.toKey}`}
@@ -2532,6 +2562,33 @@ export default function ShepherdTreeV2() {
                       onBlur={e => { e.currentTarget.style.border = '1px solid transparent'; e.currentTarget.style.background = 'rgba(255,255,255,0.6)' }}
                     />
 
+                    {/* Leader toggle */}
+                    {(() => {
+                      const on = !!layer.isLeader
+                      return (
+                        <button
+                          onClick={e => {
+                            e.stopPropagation()
+                            setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isLeader: !l.isLeader } : l))
+                          }}
+                          title={on
+                            ? 'Leader layer — duplicate-person dashed lines originate here'
+                            : 'Not a leader layer — no dashed dupe lines'}
+                          className="sans"
+                          style={{
+                            fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                            padding: '4px 8px', borderRadius: 6,
+                            border: `1px solid ${on ? layer.color.label : layer.color.label + '40'}`,
+                            background: on ? layer.color.label : 'rgba(255,255,255,0.6)',
+                            color: on ? 'white' : layer.color.label,
+                            cursor: 'pointer', whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                          }}>
+                          {on ? '✓ LEAD' : 'LEAD'}
+                        </button>
+                      )
+                    })()}
+
                     {/* Delete */}
                     <button onClick={e => { e.stopPropagation(); removeDraftLayer(idx) }}
                       style={{ width: 24, height: 24, borderRadius: 4, border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: '#8a3a3a', opacity: 0.7, flexShrink: 0 }}
@@ -2846,6 +2903,16 @@ function MappingEditor({
     update({ itemIds: next })
   }
 
+  const toggleType = (type: string) => {
+    const typeItems = byType.get(type) || []
+    const allSelected = typeItems.every(it => draft.itemIds.has(it.id))
+    const next = new Set(draft.itemIds)
+    for (const it of typeItems) {
+      if (allSelected) next.delete(it.id); else next.add(it.id)
+    }
+    update({ itemIds: next })
+  }
+
   const selectAllFiltered = () => {
     const next = new Set(draft.itemIds)
     for (const it of filtered) next.add(it.id)
@@ -2967,10 +3034,19 @@ function MappingEditor({
             No matches.
           </p>
         ) : (
-          sortedTypes.map(type => (
+          sortedTypes.map(type => {
+            const typeItems = byType.get(type) || []
+            const allSel = typeItems.length > 0 && typeItems.every(it => draft.itemIds.has(it.id))
+            return (
             <div key={type}>
-              <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', padding: '8px 10px 4px', background: 'rgba(0,0,0,0.02)', textTransform: 'uppercase' }}>
-                {type}
+              <div className="sans" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', padding: '8px 10px 4px', background: 'rgba(0,0,0,0.02)', textTransform: 'uppercase' }}>
+                <span>{type}</span>
+                <button
+                  onClick={() => toggleType(type)}
+                  className="sans"
+                  style={{ fontSize: 9, fontWeight: 600, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--border)', background: allSel ? 'rgba(45,96,71,0.08)' : 'white', color: allSel ? 'var(--primary)' : 'var(--muted-foreground)', cursor: 'pointer', textTransform: 'none', letterSpacing: 0 }}>
+                  {allSel ? 'Deselect all' : 'Select all'}
+                </button>
               </div>
               {byType.get(type)!.map(it => {
                 const selected = draft.itemIds.has(it.id)
@@ -2998,7 +3074,7 @@ function MappingEditor({
                 )
               })}
             </div>
-          ))
+          ) })
         )}
       </div>
     </div>
