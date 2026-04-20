@@ -918,10 +918,13 @@ export default function ShepherdTreeV2() {
   const nodeKey = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
     `${personId}::${layerId}::${contextKey}`
 
-  const sortedLayers = layers.filter(l => !l.isHidden) // API already returns them in rank order
+  const allLayers = [...layers] // includes hidden — used for layout computation
+  const sortedLayers = layers.filter(l => !l.isHidden) // visible only — used for rendering
 
+  // Compute people for ALL layers (including hidden) so the layout
+  // algorithm can position parents based on children on hidden layers.
   const peopleByLayer = new Map<string, Card[]>()
-  for (const l of sortedLayers) peopleByLayer.set(l.id, getPeopleForLayer(l.id))
+  for (const l of allLayers) peopleByLayer.set(l.id, getPeopleForLayer(l.id))
 
   // Resolve the appropriate child cardKey for a given connection edge.
   // If the edge carries a context (auto-connect) and the child's layer has
@@ -959,7 +962,7 @@ export default function ShepherdTreeV2() {
     return any?.key ?? nodeKey(c.parentPersonId, c.parentLayerId, CONTEXT_PRIMARY)
   }
 
-  const layerIndex = (layerId: string): number => sortedLayers.findIndex(l => l.id === layerId)
+  const layerIndex = (layerId: string): number => allLayers.findIndex(l => l.id === layerId)
 
   const layout = (() => {
     const childrenMap = new Map<string, string[]>()
@@ -972,15 +975,17 @@ export default function ShepherdTreeV2() {
       if (!parentsMap.has(ck)) parentsMap.set(ck, [])
       parentsMap.get(ck)!.push(pk)
     }
+    // Use ALL layers (including hidden) for layout so parent positioning
+    // accounts for children on hidden layers.
     const renderable = new Set<string>()
-    for (const l of sortedLayers) {
+    for (const l of allLayers) {
       for (const p of peopleByLayer.get(l.id) || []) renderable.add(p.key)
     }
     // Build a key -> name lookup so we can sort children alphabetically
     // (by last name) before laying them out. This keeps tree branches in
     // a predictable left-to-right order.
     const nameForKey = new Map<string, string>()
-    for (const l of sortedLayers) {
+    for (const l of allLayers) {
       for (const p of peopleByLayer.get(l.id) || []) nameForKey.set(p.key, p.name)
     }
 
@@ -1127,8 +1132,8 @@ export default function ShepherdTreeV2() {
 
     const parkingStart = cursor
     const layerCursor = new Map<string, number>()
-    for (const l of sortedLayers) layerCursor.set(l.id, parkingStart)
-    for (const l of sortedLayers) {
+    for (const l of allLayers) layerCursor.set(l.id, parkingStart)
+    for (const l of allLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
         if (xUnit.has(p.key)) continue
         const c = layerCursor.get(l.id)!
@@ -1172,7 +1177,7 @@ export default function ShepherdTreeV2() {
     const layersByBucket = new Map<string, Set<string>>()
     for (const b of metricBuckets) layersByBucket.set(b.id, new Set(b.layerIds))
     const out = new Map<string, Record<string, number>>()
-    for (const l of sortedLayers) {
+    for (const l of allLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
         const k = p.key
         const desc = descendantsByKey.get(k) || new Set<string>()
@@ -1215,7 +1220,7 @@ export default function ShepherdTreeV2() {
     }
 
     const out = new Map<string, Record<string, number>>()
-    for (const l of sortedLayers) {
+    for (const l of allLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
         const cardCounts = bucketStatsByKey.get(p.key) || {}
         const clusterSize = clusterSizeByKey.get(p.key) || 1
@@ -1842,8 +1847,8 @@ export default function ShepherdTreeV2() {
               }
 
               // Resolve names for the hover tooltip.
-              const parentLayer = sortedLayers.find(l => l.id === c.parentLayerId)
-              const childLayer = sortedLayers.find(l => l.id === c.childLayerId)
+              const parentLayer = allLayers.find(l => l.id === c.parentLayerId)
+              const childLayer = allLayers.find(l => l.id === c.childLayerId)
               const parentName =
                 (peopleByLayer.get(c.parentLayerId) || []).find(p => p.personId === c.parentPersonId)?.name
                 || 'Unknown parent'
@@ -2292,7 +2297,7 @@ export default function ShepherdTreeV2() {
          ═══════════════════════════════════════════════════════════ */}
       {shepherdOverOpen && shepherdOverParent && (() => {
         const parentName = (() => {
-          for (const l of sortedLayers) {
+          for (const l of allLayers) {
             const p = (peopleByLayer.get(l.id) || []).find(c => c.personId === shepherdOverParent.personId)
             if (p) return p.name
           }

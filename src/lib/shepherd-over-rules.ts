@@ -67,22 +67,27 @@ export async function regenerateShepherdOverEdges(
 
   const leaderRe = /leader|co.?leader/i
 
-  // Paginated fetch helper
+  // Paginated fetch helper — batches both the IN clause (to avoid URL
+  // length limits) and the result rows (to handle large tables).
   const fetchAll = async (table: string, fk: string, itemIds: string[]) => {
     if (itemIds.length === 0) return []
     const rows: any[] = []
+    const IN_BATCH = 100  // keep IN clause well under URL limit
     const PAGE = 1000
-    for (let from = 0; ; from += PAGE) {
-      const { data: page } = await admin.from(table)
-        .select(`person_id, ${fk}, role, is_active`)
-        .eq('church_id', churchId)
-        .eq('is_active', true)
-        .in(fk, itemIds)
-        .order('id')
-        .range(from, from + PAGE - 1)
-      if (!page || page.length === 0) break
-      rows.push(...page)
-      if (page.length < PAGE) break
+    for (let b = 0; b < itemIds.length; b += IN_BATCH) {
+      const batch = itemIds.slice(b, b + IN_BATCH)
+      for (let from = 0; ; from += PAGE) {
+        const { data: page } = await admin.from(table)
+          .select(`person_id, ${fk}, role, is_active`)
+          .eq('church_id', churchId)
+          .eq('is_active', true)
+          .in(fk, batch)
+          .order('id')
+          .range(from, from + PAGE - 1)
+        if (!page || page.length === 0) break
+        rows.push(...page)
+        if (page.length < PAGE) break
+      }
     }
     return rows
   }
