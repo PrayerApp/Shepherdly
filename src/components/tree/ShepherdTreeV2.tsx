@@ -1111,10 +1111,8 @@ export default function ShepherdTreeV2() {
         return x
       }
 
-      // No new children to lay out. If we ARE a co-leader (our children
-      // — including those on hidden layers — were already positioned by
-      // a previously-processed leader), snap us to the shared subtree's
-      // centre + an offset so co-leaders sit adjacent to each other.
+      // No new children to lay out. Check if we're a co-leader whose
+      // siblings' children were already positioned (visible or hidden).
       const allKids = childrenMap.get(k) || []
       if (allKids.length > 0) {
         const knownXs = allKids
@@ -1130,29 +1128,29 @@ export default function ShepherdTreeV2() {
           if (x + 1 > cursor) cursor = Math.ceil(x + 1)
           return x
         }
-        // Children exist but none are positioned (all on hidden layers).
-        // If we're part of a co-leader cluster, snap adjacent to the
-        // first-placed cluster member instead of scattering.
-        const anchor = clusterAnchorOf(k)
-        if (anchor !== k || clusterPlacedCount.has(anchor)) {
-          // Another cluster member was already placed — sit next to them
-          const n = (clusterPlacedCount.get(anchor) || 0)
-          clusterPlacedCount.set(anchor, n + 1)
-          // Find the anchor's x (first member placed)
-          const anchorX = xUnit.get(anchor)
-          if (anchorX !== undefined) {
-            const x = anchorX + n
-            xUnit.set(k, x)
-            if (x + 1 > cursor) cursor = Math.ceil(x + 1)
-            return x
-          }
-        }
       }
 
-      // True leaf (or first co-leader in cluster with all-hidden children).
+      // Check if another member of our co-leader cluster was already
+      // placed (e.g. the first co-leader was a "true leaf" and we
+      // should sit adjacent to them).
       const anchor = clusterAnchorOf(k)
-      if (!clusterPlacedCount.has(anchor)) clusterPlacedCount.set(anchor, 0)
-      const x = cursor++
+      const anchorX = xUnit.get(anchor)
+      if (anchorX !== undefined && anchor !== k) {
+        const n = (clusterPlacedCount.get(anchor) || 0) + 1
+        clusterPlacedCount.set(anchor, n)
+        const x = anchorX + n
+        xUnit.set(k, x)
+        if (x + 1 > cursor) cursor = Math.ceil(x + 1)
+        return x
+      }
+
+      // True leaf or first co-leader placed. Record for cluster siblings.
+      const x = cursor
+      // If we're the first in a co-leader cluster, reserve space for
+      // the other members so subsequent cards don't overlap the box.
+      const clusterMembers = coLeaderClusters.get(find(k))
+      const clusterSize = clusterMembers ? clusterMembers.length : 1
+      cursor += clusterSize
       xUnit.set(k, x)
       return x
     }
