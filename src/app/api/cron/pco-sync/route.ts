@@ -160,6 +160,14 @@ export async function GET(request: NextRequest) {
       console.error('Cron: auto-connect refresh failed:', e)
     }
 
+    // Post-sync: regenerate shepherd-over rule edges
+    try {
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      await regenerateShepherdOverEdges(admin, churchId!)
+    } catch (e) {
+      console.error('Cron: shepherd-over rules refresh failed:', e)
+    }
+
     // Mark success
     await admin.from('pco_sync_log').update({
       status: 'success',

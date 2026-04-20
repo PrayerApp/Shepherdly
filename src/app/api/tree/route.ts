@@ -164,6 +164,7 @@ export async function GET() {
     { data: treeConnections },
     { data: metricBuckets },
     { data: metricBucketLayers },
+    { data: shepherdOverRules },
   ] = await Promise.all([
     admin.from('tree_layers').select('id, name, category, rank, is_congregational')
       .eq('church_id', churchId!).order('rank'),
@@ -207,7 +208,7 @@ export async function GET() {
     admin.from('tree_layer_inclusions').select('person_id, layer_id')
       .eq('church_id', churchId!),
     admin.from('group_team_layer_mappings')
-      .select('id, name, kind, leader_layer_id, member_layer_id, auto_connect')
+      .select('id, name, kind, leader_layer_id, member_layer_id, auto_connect, count_mode')
       .eq('church_id', churchId!),
     admin.from('group_team_layer_mapping_items')
       .select('mapping_id, item_id')
@@ -220,6 +221,9 @@ export async function GET() {
       .eq('church_id', churchId!).order('sort_order'),
     admin.from('tree_metric_bucket_layers')
       .select('bucket_id, layer_id')
+      .eq('church_id', churchId!),
+    admin.from('shepherd_over_rules')
+      .select('id, parent_person_id, parent_layer_id, rule_type, rule_value')
       .eq('church_id', churchId!),
   ])
 
@@ -1081,6 +1085,13 @@ export async function GET() {
     listLayerLinks: (pcoListLayerLinks || []).map(ll => ({ listId: ll.list_id, layerId: ll.layer_id })),
     departments: (departments || []).map(d => ({ id: d.id, name: d.name, color: d.color })),
     departmentMembers: departmentMembers || [],
+    shepherdOverRules: (shepherdOverRules || []).map((r: any) => ({
+      id: r.id,
+      parentPersonId: r.parent_person_id,
+      parentLayerId: r.parent_layer_id,
+      ruleType: r.rule_type,
+      ruleValue: r.rule_value,
+    })),
     unconnectedStaff,
     unlinkedGroupTypes,
     unlinkedServiceTypes,
@@ -1469,6 +1480,14 @@ export async function POST(request: Request) {
       console.error('Auto-connect regeneration failed after save:', e)
     }
 
+    // Re-evaluate shepherd-over rules (new mapping may expose leaders)
+    try {
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      await regenerateShepherdOverEdges(admin, churchId!)
+    } catch (e) {
+      console.error('Shepherd-over rule refresh failed after mapping save:', e)
+    }
+
     return NextResponse.json({ success: true, id: mappingId })
   }
 
@@ -1477,6 +1496,46 @@ export async function POST(request: Request) {
     const { id } = body
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
     await admin.from('group_team_layer_mappings').delete().eq('id', id).eq('church_id', churchId!)
+    // Re-evaluate shepherd-over rules
+    try {
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      await regenerateShepherdOverEdges(admin, churchId!)
+    } catch (e) {
+      console.error('Shepherd-over rule refresh failed after mapping delete:', e)
+    }
+    return NextResponse.json({ success: true })
+  }
+
+  // ── Save a shepherd-over rule ──────────────────────────────
+  if (body.action === 'save_shepherd_over_rule') {
+    const { parent_person_id, parent_layer_id, rule_type, rule_value } = body
+    if (!parent_person_id || !parent_layer_id || !rule_type || !rule_value) {
+      return NextResponse.json({ error: 'parent_person_id, parent_layer_id, rule_type, rule_value required' }, { status: 400 })
+    }
+    if (!['group', 'team', 'group_type', 'team_type', 'layer'].includes(rule_type)) {
+      return NextResponse.json({ error: 'invalid rule_type' }, { status: 400 })
+    }
+    const { data: rule, error } = await admin.from('shepherd_over_rules')
+      .insert({ church_id: churchId, parent_person_id, parent_layer_id, rule_type, rule_value })
+      .select().single()
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+    // Evaluate just this rule to create connections immediately
+    try {
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      await regenerateShepherdOverEdges(admin, churchId!, { onlyRuleId: rule.id })
+    } catch (e) {
+      console.error('Shepherd-over eval failed:', e)
+    }
+    return NextResponse.json({ success: true, id: rule.id })
+  }
+
+  // ── Delete a shepherd-over rule ────────────────────────────
+  if (body.action === 'delete_shepherd_over_rule') {
+    const { id } = body
+    if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+    // Deleting the rule cascades to tree_connections via source_rule_id FK
+    await admin.from('shepherd_over_rules').delete().eq('id', id).eq('church_id', churchId!)
     return NextResponse.json({ success: true })
   }
 
