@@ -166,7 +166,7 @@ export async function GET() {
     { data: metricBucketLayers },
     { data: shepherdOverRules },
   ] = await Promise.all([
-    admin.from('tree_layers').select('id, name, category, rank, is_congregational')
+    admin.from('tree_layers').select('id, name, category, rank, is_congregational, is_hidden')
       .eq('church_id', churchId!).order('rank'),
     admin.from('tree_assignments').select('id, person_id, layer_id, supervisor_person_id, sort_order, church_id')
       .eq('church_id', churchId!).order('sort_order'),
@@ -1701,21 +1701,22 @@ export async function POST(request: Request) {
     const categoryMap: Record<string, string> = {
       'Elder': 'elder', 'Staff': 'staff', 'Volunteer': 'volunteer', 'Congregation': 'people',
     }
-    const resultLayers: { id: string; name: string; rank: number; is_congregational: boolean }[] = []
+    const resultLayers: { id: string; name: string; rank: number; is_congregational: boolean; is_hidden: boolean }[] = []
     for (let i = 0; i < layerList.length; i++) {
       const l = layerList[i]
       const rank = i * 10
       const category = categoryMap[l.name] || l.category || 'custom'
       const isCong = !!l.is_congregational
+      const isHidden = !!l.is_hidden
       if (l.id && existingIds.has(l.id)) {
         await admin.from('tree_layers')
-          .update({ name: l.name, rank, category, is_congregational: isCong })
+          .update({ name: l.name, rank, category, is_congregational: isCong, is_hidden: isHidden })
           .eq('id', l.id)
-        resultLayers.push({ id: l.id, name: l.name, rank, is_congregational: isCong })
+        resultLayers.push({ id: l.id, name: l.name, rank, is_congregational: isCong, is_hidden: isHidden })
       } else {
         const { data: newLayer } = await admin.from('tree_layers')
-          .insert({ name: l.name, rank, category, is_congregational: isCong, church_id: churchId })
-          .select('id, name, rank, is_congregational')
+          .insert({ name: l.name, rank, category, is_congregational: isCong, is_hidden: isHidden, church_id: churchId })
+          .select('id, name, rank, is_congregational, is_hidden')
           .single()
         if (newLayer) resultLayers.push(newLayer)
       }

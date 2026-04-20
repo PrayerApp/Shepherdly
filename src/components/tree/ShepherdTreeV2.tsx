@@ -9,6 +9,7 @@ interface LayerItem {
   color: { bg: string; label: string }
   category?: string
   isLeader?: boolean
+  isHidden?: boolean
 }
 
 interface PcoList {
@@ -389,6 +390,7 @@ export default function ShepherdTreeV2() {
         color: colorForIndex(i),
         category: l.category,
         isLeader: !l.is_congregational,
+        isHidden: !!l.is_hidden,
       }))
 
       if (dbLayers.length > 0) {
@@ -407,7 +409,7 @@ export default function ShepherdTreeV2() {
           const d2 = await res2.json()
           if (d2.layers) {
             setLayers(d2.layers.map((l: any, i: number) => ({
-              id: l.id, name: l.name, color: colorForIndex(i), category: l.category, isLeader: !l.is_congregational,
+              id: l.id, name: l.name, color: colorForIndex(i), category: l.category, isLeader: !l.is_congregational, isHidden: !!l.is_hidden,
                   })))
           }
         }
@@ -761,6 +763,7 @@ export default function ShepherdTreeV2() {
             name: l.name,
             category: l.category || 'custom',
             is_congregational: !l.isLeader,
+            is_hidden: !!l.isHidden,
           })),
         }),
       })
@@ -907,7 +910,7 @@ export default function ShepherdTreeV2() {
   const nodeKey = (personId: string, layerId: string, contextKey: string = CONTEXT_PRIMARY) =>
     `${personId}::${layerId}::${contextKey}`
 
-  const sortedLayers = [...layers] // API already returns them in rank order
+  const sortedLayers = layers.filter(l => !l.isHidden) // API already returns them in rank order
 
   const peopleByLayer = new Map<string, Card[]>()
   for (const l of sortedLayers) peopleByLayer.set(l.id, getPeopleForLayer(l.id))
@@ -1153,6 +1156,28 @@ export default function ShepherdTreeV2() {
       const ck = resolveChildCardKey(c)
       if (!childrenAdj.has(pk)) childrenAdj.set(pk, [])
       childrenAdj.get(pk)!.push(ck)
+    }
+    // A person may have multiple card keys (one per context). Create
+    // synthetic edges so that any card key for a person inherits the
+    // children of every other card key for the same person. This ensures
+    // descendants propagate correctly up the tree regardless of which
+    // card key is resolved for each connection.
+    const keysByPerson = new Map<string, string[]>()
+    for (const k of childrenAdj.keys()) {
+      const pid = k.split('::')[0]
+      if (!keysByPerson.has(pid)) keysByPerson.set(pid, [])
+      keysByPerson.get(pid)!.push(k)
+    }
+    for (const [, keys] of keysByPerson) {
+      if (keys.length <= 1) continue
+      // Cross-link all keys for the same person so DFS can traverse
+      for (const a of keys) {
+        for (const b of keys) {
+          if (a === b) continue
+          if (!childrenAdj.has(a)) childrenAdj.set(a, [])
+          if (!childrenAdj.get(a)!.includes(b)) childrenAdj.get(a)!.push(b)
+        }
+      }
     }
     const dfs = (k: string, acc: Set<string>, stack: Set<string>) => {
       if (stack.has(k)) return
@@ -2673,10 +2698,11 @@ export default function ShepherdTreeV2() {
                       padding: '10px 12px',
                       margin: '0 0 4px',
                       borderRadius: 8,
-                      background: layer.color.bg,
+                      background: layer.isHidden ? '#f5f5f5' : layer.color.bg,
                       border: dragOverIdx === idx ? `2px dashed ${layer.color.label}` : '2px solid transparent',
                       cursor: 'grab',
                       userSelect: 'none',
+                      opacity: layer.isHidden ? 0.6 : 1,
                       transition: 'border-color 0.15s',
                     }}>
                     {/* Drag handle */}
@@ -2732,6 +2758,31 @@ export default function ShepherdTreeV2() {
                             flexShrink: 0,
                           }}>
                           {on ? '✓ LEAD' : 'LEAD'}
+                        </button>
+                      )
+                    })()}
+
+                    {/* Show/Hide toggle */}
+                    {(() => {
+                      const hidden = !!layer.isHidden
+                      return (
+                        <button
+                          onClick={e => {
+                            e.stopPropagation()
+                            setDraftLayers(prev => prev.map((l, i) => i === idx ? { ...l, isHidden: !l.isHidden } : l))
+                          }}
+                          title={hidden ? 'Layer is hidden — click to show' : 'Layer is visible — click to hide'}
+                          className="sans"
+                          style={{
+                            fontSize: 9, fontWeight: 700, letterSpacing: 0.5,
+                            padding: '4px 8px', borderRadius: 6,
+                            border: `1px solid ${hidden ? '#aaa' : layer.color.label + '40'}`,
+                            background: hidden ? '#f0f0f0' : 'rgba(255,255,255,0.6)',
+                            color: hidden ? '#888' : layer.color.label,
+                            cursor: 'pointer', whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                          }}>
+                          {hidden ? '👁 HIDE' : '👁 SHOW'}
                         </button>
                       )
                     })()}
