@@ -1515,27 +1515,37 @@ export async function POST(request: Request) {
     if (!['group', 'team', 'group_type', 'team_type', 'layer'].includes(rule_type)) {
       return NextResponse.json({ error: 'invalid rule_type' }, { status: 400 })
     }
-    const { data: rule, error } = await admin.from('shepherd_over_rules')
-      .insert({ church_id: churchId, parent_person_id, parent_layer_id, rule_type, rule_value })
-      .select().single()
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-    // Evaluate just this rule to create connections immediately
     try {
-      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
-      await regenerateShepherdOverEdges(admin, churchId!, { onlyRuleId: rule.id })
-    } catch (e) {
-      console.error('Shepherd-over eval failed:', e)
+      const { data: rule, error } = await admin.from('shepherd_over_rules')
+        .insert({ church_id: churchId, parent_person_id, parent_layer_id, rule_type, rule_value })
+        .select().single()
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+
+      // Evaluate just this rule to create connections immediately
+      try {
+        const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+        await regenerateShepherdOverEdges(admin, churchId!, { onlyRuleId: rule.id })
+      } catch (e) {
+        console.error('Shepherd-over eval failed:', e)
+      }
+      return NextResponse.json({ success: true, id: rule.id })
+    } catch (e: any) {
+      // Table may not exist if migration hasn't run yet
+      console.error('save_shepherd_over_rule error (migration pending?):', e?.message)
+      return NextResponse.json({ error: 'shepherd_over_rules table not found — please run the migration' }, { status: 500 })
     }
-    return NextResponse.json({ success: true, id: rule.id })
   }
 
   // ── Delete a shepherd-over rule ────────────────────────────
   if (body.action === 'delete_shepherd_over_rule') {
     const { id } = body
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
-    // Deleting the rule cascades to tree_connections via source_rule_id FK
-    await admin.from('shepherd_over_rules').delete().eq('id', id).eq('church_id', churchId!)
+    try {
+      // Deleting the rule cascades to tree_connections via source_rule_id FK
+      await admin.from('shepherd_over_rules').delete().eq('id', id).eq('church_id', churchId!)
+    } catch (e: any) {
+      console.error('delete_shepherd_over_rule error:', e?.message)
+    }
     return NextResponse.json({ success: true })
   }
 

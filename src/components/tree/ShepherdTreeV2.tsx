@@ -1442,8 +1442,13 @@ export default function ShepherdTreeV2() {
       clearSelection()
       await fetchData()
       setShepherdOverOpen(false)
-    } catch (err) {
-      console.error('Shepherd-over rule save error:', err)
+    } catch (err: any) {
+      const msg = err?.message || ''
+      if (msg.includes('migration')) {
+        alert('The shepherd_over_rules table hasn\'t been created yet. Please run the database migration first.')
+      } else {
+        console.error('Shepherd-over rule save error:', err)
+      }
     } finally {
       setShepherdOverBusy(false)
     }
