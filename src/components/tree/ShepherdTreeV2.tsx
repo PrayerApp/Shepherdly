@@ -920,6 +920,7 @@ export default function ShepherdTreeV2() {
 
   const allLayers = [...layers] // includes hidden — used for layout computation
   const sortedLayers = layers.filter(l => !l.isHidden) // visible only — used for rendering
+  const hiddenLayerIds = new Set(layers.filter(l => l.isHidden).map(l => l.id))
 
   // Compute people for ALL layers (including hidden) so the layout
   // algorithm can position parents based on children on hidden layers.
@@ -1804,6 +1805,8 @@ export default function ShepherdTreeV2() {
             }}
           >
             {connections.map(c => {
+              // Don't render lines to/from hidden layers
+              if (hiddenLayerIds.has(c.parentLayerId) || hiddenLayerIds.has(c.childLayerId)) return null
               const pk = resolveParentCardKey(c)
               const ck = resolveChildCardKey(c)
               if (!layout.xUnit.has(pk) || !layout.xUnit.has(ck)) return null
