@@ -1068,10 +1068,14 @@ export default function ShepherdTreeV2() {
       if (ca !== cb) return alphaCmp(ca, cb)
       return alphaCmp(a, b)
     }
+    // Keep full childrenMap (including hidden-layer children) so
+    // co-leader clustering can detect shared children. Build a
+    // visible-only version for actual layout traversal.
+    const visibleChildrenMap = new Map<string, string[]>()
     for (const [k, kids] of childrenMap) {
       const filtered = kids.filter(ck => visibleRenderable.has(ck))
       filtered.sort(childSortCmp)
-      childrenMap.set(k, filtered)
+      visibleChildrenMap.set(k, filtered)
     }
 
     const inGraph = new Set<string>()
@@ -1095,8 +1099,8 @@ export default function ShepherdTreeV2() {
       if (xUnit.has(k)) return xUnit.get(k)!
       if (visited.has(k)) return cursor
       visited.add(k)
-      const allKids = childrenMap.get(k) || []
-      const newKids = allKids.filter(ck => !visited.has(ck))
+      const visKids = visibleChildrenMap.get(k) || []
+      const newKids = visKids.filter(ck => !visited.has(ck))
 
       if (newKids.length > 0) {
         // Normal subtree: lay out the unvisited children and centre
@@ -1108,9 +1112,10 @@ export default function ShepherdTreeV2() {
       }
 
       // No new children to lay out. If we ARE a co-leader (our children
-      // were already positioned by a previously-processed leader), snap
-      // us to the shared subtree's centre + an offset so co-leaders sit
-      // adjacent to each other instead of landing at cursor++.
+      // — including those on hidden layers — were already positioned by
+      // a previously-processed leader), snap us to the shared subtree's
+      // centre + an offset so co-leaders sit adjacent to each other.
+      const allKids = childrenMap.get(k) || []
       if (allKids.length > 0) {
         const knownXs = allKids
           .map(ck => xUnit.get(ck))
@@ -1122,14 +1127,31 @@ export default function ShepherdTreeV2() {
           clusterPlacedCount.set(anchor, n)
           const x = center + n
           xUnit.set(k, x)
-          // Make sure the cluster row isn't stepped on by the next root's
-          // subtree — advance the global cursor past us if needed.
           if (x + 1 > cursor) cursor = Math.ceil(x + 1)
           return x
         }
+        // Children exist but none are positioned (all on hidden layers).
+        // If we're part of a co-leader cluster, snap adjacent to the
+        // first-placed cluster member instead of scattering.
+        const anchor = clusterAnchorOf(k)
+        if (anchor !== k || clusterPlacedCount.has(anchor)) {
+          // Another cluster member was already placed — sit next to them
+          const n = (clusterPlacedCount.get(anchor) || 0)
+          clusterPlacedCount.set(anchor, n + 1)
+          // Find the anchor's x (first member placed)
+          const anchorX = xUnit.get(anchor)
+          if (anchorX !== undefined) {
+            const x = anchorX + n
+            xUnit.set(k, x)
+            if (x + 1 > cursor) cursor = Math.ceil(x + 1)
+            return x
+          }
+        }
       }
 
-      // True leaf.
+      // True leaf (or first co-leader in cluster with all-hidden children).
+      const anchor = clusterAnchorOf(k)
+      if (!clusterPlacedCount.has(anchor)) clusterPlacedCount.set(anchor, 0)
       const x = cursor++
       xUnit.set(k, x)
       return x
