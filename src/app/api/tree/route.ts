@@ -243,6 +243,10 @@ export async function GET() {
   for (const inc of layerInclusions || []) {
     if (inc.person_id) neededPersonIds.add(inc.person_id)
   }
+  for (const tc of treeConnections || []) {
+    if (tc.parent_person_id) neededPersonIds.add(tc.parent_person_id)
+    if (tc.child_person_id) neededPersonIds.add(tc.child_person_id)
+  }
   if (currentUser?.person_id) neededPersonIds.add(currentUser.person_id)
 
   // Batch fetch people
@@ -983,6 +987,7 @@ export async function GET() {
       parentLayerId: c.parent_layer_id,
       childPersonId: c.child_person_id,
       childLayerId: c.child_layer_id,
+      childPersonName: personMap.get(c.child_person_id)?.name || 'Unknown',
       contextGroupId: c.context_group_id,
       contextTeamId: c.context_team_id,
     })),

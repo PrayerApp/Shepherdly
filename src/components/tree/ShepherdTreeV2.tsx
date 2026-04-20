@@ -86,6 +86,7 @@ interface TreeConnection {
   parentLayerId: string
   childPersonId: string
   childLayerId: string
+  childPersonName?: string
   contextGroupId?: string | null
   contextTeamId?: string | null
 }
@@ -526,6 +527,8 @@ export default function ShepherdTreeV2() {
     }
     // Manual inclusions — "primary" context
     for (const inc of inclusions) consider(inc.personId, inc.layerId, CONTEXT_PRIMARY)
+    // Connection-derived children
+    for (const c of connections) consider(c.childPersonId, c.childLayerId, CONTEXT_PRIMARY)
     return out
   })()
 
@@ -558,6 +561,17 @@ export default function ShepherdTreeV2() {
     for (const inc of inclusions) {
       if (inc.layerId !== layerId) continue
       appearances.push({ personId: inc.personId, name: inc.personName, contextKey: CONTEXT_PRIMARY })
+    }
+
+    // 4) Connection-derived: people who are the child target of a
+    //    tree_connection pointing to this layer but not already on it
+    //    via sources 1-3.
+    const alreadySeen = new Set(appearances.map(a => a.personId))
+    for (const c of connections) {
+      if (c.childLayerId !== layerId) continue
+      if (alreadySeen.has(c.childPersonId)) continue
+      alreadySeen.add(c.childPersonId)
+      appearances.push({ personId: c.childPersonId, name: c.childPersonName || 'Unknown', contextKey: CONTEXT_PRIMARY })
     }
 
     // Apply rules.
