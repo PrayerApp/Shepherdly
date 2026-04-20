@@ -1421,32 +1421,34 @@ export async function POST(request: Request) {
     }
 
     let mappingId = id as string | undefined
-    if (mappingId) {
-      const { error: uErr } = await admin.from('group_team_layer_mappings')
-        .update({
-          name, kind,
-          leader_layer_id: leader_layer_id || null,
-          member_layer_id: member_layer_id || null,
-          auto_connect: !!auto_connect,
-          count_mode: count_mode || 'all',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', mappingId).eq('church_id', churchId!)
-      if (uErr) return NextResponse.json({ error: uErr.message }, { status: 500 })
-    } else {
-      const { data: ins, error: iErr } = await admin.from('group_team_layer_mappings')
-        .insert({
-          name, kind,
-          leader_layer_id: leader_layer_id || null,
-          member_layer_id: member_layer_id || null,
-          auto_connect: !!auto_connect,
-          count_mode: count_mode || 'all',
-          church_id: churchId,
-        })
-        .select().single()
-      if (iErr) return NextResponse.json({ error: iErr.message }, { status: 500 })
-      mappingId = ins.id
+    const baseFields = {
+      name, kind,
+      leader_layer_id: leader_layer_id || null,
+      member_layer_id: member_layer_id || null,
+      auto_connect: !!auto_connect,
     }
+    // Try with count_mode first; if the column hasn't been migrated yet,
+    // retry without it so existing DBs don't break.
+    const tryWrite = async (extra: Record<string, unknown>) => {
+      if (mappingId) {
+        const { error } = await admin.from('group_team_layer_mappings')
+          .update({ ...baseFields, ...extra, updated_at: new Date().toISOString() })
+          .eq('id', mappingId).eq('church_id', churchId!)
+        return { data: { id: mappingId }, error }
+      } else {
+        const { data, error } = await admin.from('group_team_layer_mappings')
+          .insert({ ...baseFields, ...extra, church_id: churchId })
+          .select().single()
+        return { data, error }
+      }
+    }
+    let result = await tryWrite({ count_mode: count_mode || 'all' })
+    if (result.error) {
+      // Retry without count_mode in case column doesn't exist yet
+      result = await tryWrite({})
+    }
+    if (result.error) return NextResponse.json({ error: result.error.message }, { status: 500 })
+    if (!mappingId) mappingId = result.data?.id as string
 
     // Replace item_ids
     await admin.from('group_team_layer_mapping_items').delete().eq('mapping_id', mappingId!)
