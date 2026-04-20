@@ -985,11 +985,16 @@ export default function ShepherdTreeV2() {
       if (!parentsMap.has(ck)) parentsMap.set(ck, [])
       parentsMap.get(ck)!.push(pk)
     }
-    // Use ALL layers (including hidden) for layout so parent positioning
-    // accounts for children on hidden layers.
+    // renderable = all card keys (including hidden layers) for name lookups.
+    // visibleRenderable = only visible-layer cards — used for graph
+    // membership and layout so hidden layers don't create empty gaps.
     const renderable = new Set<string>()
+    const visibleRenderable = new Set<string>()
     for (const l of allLayers) {
-      for (const p of peopleByLayer.get(l.id) || []) renderable.add(p.key)
+      for (const p of peopleByLayer.get(l.id) || []) {
+        renderable.add(p.key)
+        if (!l.isHidden) visibleRenderable.add(p.key)
+      }
     }
     // Build a key -> name lookup so we can sort children alphabetically
     // (by last name) before laying them out. This keeps tree branches in
@@ -1064,7 +1069,7 @@ export default function ShepherdTreeV2() {
       return alphaCmp(a, b)
     }
     for (const [k, kids] of childrenMap) {
-      const filtered = kids.filter(ck => renderable.has(ck))
+      const filtered = kids.filter(ck => visibleRenderable.has(ck))
       filtered.sort(childSortCmp)
       childrenMap.set(k, filtered)
     }
@@ -1073,10 +1078,10 @@ export default function ShepherdTreeV2() {
     for (const c of connections) {
       const pk = resolveParentCardKey(c)
       const ck = resolveChildCardKey(c)
-      if (renderable.has(pk)) inGraph.add(pk)
-      if (renderable.has(ck)) inGraph.add(ck)
+      if (visibleRenderable.has(pk)) inGraph.add(pk)
+      if (visibleRenderable.has(ck)) inGraph.add(ck)
     }
-    const roots = [...inGraph].filter(k => !(parentsMap.get(k) || []).some(p => renderable.has(p)))
+    const roots = [...inGraph].filter(k => !(parentsMap.get(k) || []).some(p => visibleRenderable.has(p)))
 
     const xUnit = new Map<string, number>()
     const visited = new Set<string>()
@@ -1142,8 +1147,8 @@ export default function ShepherdTreeV2() {
 
     const parkingStart = cursor
     const layerCursor = new Map<string, number>()
-    for (const l of allLayers) layerCursor.set(l.id, parkingStart)
-    for (const l of allLayers) {
+    for (const l of sortedLayers) layerCursor.set(l.id, parkingStart)
+    for (const l of sortedLayers) {
       for (const p of peopleByLayer.get(l.id) || []) {
         if (xUnit.has(p.key)) continue
         const c = layerCursor.get(l.id)!
