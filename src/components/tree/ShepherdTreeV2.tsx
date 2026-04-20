@@ -2138,27 +2138,26 @@ export default function ShepherdTreeV2() {
                 </span>
               )}
               {selected.size < 2 && !connectionPlan && selectedInboundEdgeCount === 0 && (
-                <>
-                  <span style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '0 6px' }}>
-                    Select more cards to connect, or:
-                  </span>
-                  {selected.size === 1 && (
-                    <button
-                      onClick={() => {
-                        const key = [...selected][0]
-                        const [personId, layerId] = key.split('::')
-                        setShepherdOverParent({ personId, layerId })
-                        setShepherdOverOpen(true)
-                      }}
-                      style={{
-                        fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
-                        border: '1px solid #2a6a3a44', background: 'white', color: '#2a6a3a',
-                        cursor: 'pointer', whiteSpace: 'nowrap',
-                      }}>
-                      Shepherd Over…
-                    </button>
-                  )}
-                </>
+                <span style={{ fontSize: 11, color: 'var(--muted-foreground)', padding: '0 6px' }}>
+                  Select more cards to connect, or click a line to remove it.
+                </span>
+              )}
+              {/* Shepherd Over button: always available when exactly 1 card is selected */}
+              {selected.size === 1 && !connectionPlan && (
+                <button
+                  onClick={() => {
+                    const key = [...selected][0]
+                    const [personId, layerId] = key.split('::')
+                    setShepherdOverParent({ personId, layerId })
+                    setShepherdOverOpen(true)
+                  }}
+                  style={{
+                    fontSize: 12, fontWeight: 600, padding: '6px 12px', borderRadius: 8,
+                    border: '1px solid #2a6a3a44', background: 'white', color: '#2a6a3a',
+                    cursor: 'pointer', whiteSpace: 'nowrap',
+                  }}>
+                  Shepherd Over…
+                </button>
               )}
               {connectionPlan && connectionPlan.missing > 0 && (
                 <button
