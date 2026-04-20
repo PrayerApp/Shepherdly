@@ -213,9 +213,10 @@ export async function GET() {
     admin.from('group_team_layer_mapping_items')
       .select('mapping_id, item_id')
       .eq('church_id', churchId!),
-    admin.from('tree_connections')
-      .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id, context_group_id, context_team_id')
-      .eq('church_id', churchId!),
+    fetchAllPaged<{ id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string; context_group_id: string | null; context_team_id: string | null }>(
+      (from, to) => admin.from('tree_connections')
+        .select('id, parent_person_id, parent_layer_id, child_person_id, child_layer_id, context_group_id, context_team_id')
+        .eq('church_id', churchId!).order('id').range(from, to)),
     admin.from('tree_metric_buckets')
       .select('id, label, full_name, color, sort_order')
       .eq('church_id', churchId!).order('sort_order'),
