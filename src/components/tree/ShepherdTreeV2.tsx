@@ -1457,6 +1457,8 @@ export default function ShepherdTreeV2() {
   }
 
   const deleteShepherdOverRule = async (ruleId: string) => {
+    // Optimistic: remove from local state immediately
+    setShepherdOverRules(prev => prev.filter(r => r.id !== ruleId))
     try {
       const res = await fetch('/api/tree', {
         method: 'POST',
@@ -1470,6 +1472,8 @@ export default function ShepherdTreeV2() {
       await fetchData()
     } catch (err) {
       console.error('Delete shepherd-over rule error:', err)
+      // Revert on failure
+      await fetchData()
     }
   }
 
@@ -3655,8 +3659,8 @@ function ShepherdOverModal({
                 }}>
                   {ruleLabel(r)}
                   <button
-                    onClick={() => onDeleteRule(r.id)}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 13, lineHeight: 1, color: '#8a3a3a', padding: 0, marginLeft: 2 }}
+                    onClick={(e) => { e.stopPropagation(); onDeleteRule(r.id) }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, lineHeight: 1, color: '#8a3a3a', padding: '2px 4px', marginLeft: 2, borderRadius: 4 }}
                     title="Remove rule"
                   >×</button>
                 </span>

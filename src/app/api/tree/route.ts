@@ -1540,11 +1540,11 @@ export async function POST(request: Request) {
   if (body.action === 'delete_shepherd_over_rule') {
     const { id } = body
     if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
-    try {
-      // Deleting the rule cascades to tree_connections via source_rule_id FK
-      await admin.from('shepherd_over_rules').delete().eq('id', id).eq('church_id', churchId!)
-    } catch (e: any) {
-      console.error('delete_shepherd_over_rule error:', e?.message)
+    // Deleting the rule cascades to tree_connections via source_rule_id FK
+    const { error } = await admin.from('shepherd_over_rules').delete().eq('id', id).eq('church_id', churchId!)
+    if (error) {
+      console.error('delete_shepherd_over_rule error:', error.message)
+      return NextResponse.json({ error: error.message }, { status: 500 })
     }
     return NextResponse.json({ success: true })
   }
