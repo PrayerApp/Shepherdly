@@ -529,8 +529,12 @@ export default function ShepherdTreeV2() {
     }
     // Manual inclusions — "primary" context
     for (const inc of inclusions) consider(inc.personId, inc.layerId, CONTEXT_PRIMARY)
-    // Connection-derived children
-    for (const c of connections) consider(c.childPersonId, c.childLayerId, CONTEXT_PRIMARY)
+    // NOTE: Connection-derived children are intentionally excluded here.
+    // Connections explicitly place a person on a specific layer (the child
+    // layer of the connection). That placement must be honored even if the
+    // person also appears on a higher layer via another source. The
+    // highestLayer dedup would incorrectly cull them from the connection's
+    // target layer.
     return out
   })()
 
@@ -540,7 +544,7 @@ export default function ShepherdTreeV2() {
     )
 
     // Collect raw appearances on this layer, keeping context info.
-    type Appearance = { personId: string; name: string; contextKey: string }
+    type Appearance = { personId: string; name: string; contextKey: string; fromConnection?: boolean }
     const appearances: Appearance[] = []
 
     // 1) PCO list people — "primary" context
@@ -573,7 +577,7 @@ export default function ShepherdTreeV2() {
       if (c.childLayerId !== layerId) continue
       if (alreadySeen.has(c.childPersonId)) continue
       alreadySeen.add(c.childPersonId)
-      appearances.push({ personId: c.childPersonId, name: c.childPersonName || 'Unknown', contextKey: CONTEXT_PRIMARY })
+      appearances.push({ personId: c.childPersonId, name: c.childPersonName || 'Unknown', contextKey: CONTEXT_PRIMARY, fromConnection: true })
     }
 
     // Apply rules.
@@ -582,9 +586,13 @@ export default function ShepherdTreeV2() {
       // Cross-layer rule: keep only appearances whose (personId, contextKey)
       // highest layer matches THIS layer. Prevents the same person from
       // appearing on multiple layers for the same context.
-      const k = `${a.personId}::${a.contextKey}`
-      const highest = highestLayerByPersonCtx.get(k)
-      if (highest && highest !== layerId) continue
+      // Connection-derived appearances bypass this — connections explicitly
+      // place a person on a layer regardless of where else they appear.
+      if (!a.fromConnection) {
+        const k = `${a.personId}::${a.contextKey}`
+        const highest = highestLayerByPersonCtx.get(k)
+        if (highest && highest !== layerId) continue
+      }
       // Dedup: one card per (personId, contextKey).
       const dedupKey = cardKeyFor(a.personId, layerId, a.contextKey)
       if (byKey.has(dedupKey)) continue
