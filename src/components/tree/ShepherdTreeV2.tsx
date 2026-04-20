@@ -1420,25 +1420,27 @@ export default function ShepherdTreeV2() {
     }
   }
 
-  // ── "Shepherd Over" — save a persistent rule ─────────────────
-  // Creates a rule that generates (and auto-regenerates) connections
-  // from the parent to everyone matching the criteria.
-  const applyShepherdOver = async (ruleType: string, ruleValue: string) => {
-    if (!shepherdOverParent) return
+  // ── "Shepherd Over" — save persistent rules ──────────────────
+  // Creates one rule per value. For multi-select tabs (group_type,
+  // team_type) multiple values may be passed at once.
+  const applyShepherdOver = async (ruleType: string, ruleValues: string[]) => {
+    if (!shepherdOverParent || ruleValues.length === 0) return
     setShepherdOverBusy(true)
     try {
-      const res = await fetch('/api/tree', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'save_shepherd_over_rule',
-          parent_person_id: shepherdOverParent.personId,
-          parent_layer_id: shepherdOverParent.layerId,
-          rule_type: ruleType,
-          rule_value: ruleValue,
-        }),
-      })
-      if (!res.ok) throw new Error(await res.text())
+      for (const ruleValue of ruleValues) {
+        const res = await fetch('/api/tree', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'save_shepherd_over_rule',
+            parent_person_id: shepherdOverParent.personId,
+            parent_layer_id: shepherdOverParent.layerId,
+            rule_type: ruleType,
+            rule_value: ruleValue,
+          }),
+        })
+        if (!res.ok) throw new Error(await res.text())
+      }
       clearSelection()
       await fetchData()
       setShepherdOverOpen(false)
@@ -3447,29 +3449,36 @@ function ShepherdOverModal({
   peopleByLayer: Map<string, Card[]>
   busy: boolean
   existingRules: ShepherdOverRule[]
-  onApply: (ruleType: string, ruleValue: string) => void
+  onApply: (ruleType: string, ruleValues: string[]) => void
   onDeleteRule: (ruleId: string) => void
   onClose: () => void
 }) {
   const [tab, setTab] = useState<'groups' | 'teams' | 'group_type' | 'team_type' | 'layer'>('groups')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
 
+  const toggle = (id: string) => {
+    const next = new Set(selectedIds)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    setSelectedIds(next)
+  }
+
   // Reset selection when switching tabs
-  const switchTab = (t: typeof tab) => { setTab(t); setSelectedId(null); setSearch('') }
+  const switchTab = (t: typeof tab) => { setTab(t); setSelectedIds(new Set()); setSearch('') }
 
   // Get unique types
   const groupTypes = [...new Set(groupsList.map(g => g.groupTypeName || 'Other'))].sort()
   const teamTypes = [...new Set(teamsList.map(t => t.serviceTypeName || 'Other'))].sort()
 
-  // Check if the current selection already has a rule
-  const ruleExists = selectedId ? existingRules.some(r =>
-    r.ruleType === tab && r.ruleValue === selectedId
-  ) : false
+  // Filter out selections that already have a rule
+  const newSelections = [...selectedIds].filter(id =>
+    !existingRules.some(r => r.ruleType === tab && r.ruleValue === id)
+  )
+  const allAlreadyExist = selectedIds.size > 0 && newSelections.length === 0
 
   // Resolve targets (preview) from current selection
   const resolvedTargets = (() => {
-    if (!selectedId) return []
+    if (selectedIds.size === 0) return []
     const leaderRe = /leader|co.?leader/i
     const targets: { personId: string; layerId: string; name: string }[] = []
     const seen = new Set<string>()
@@ -3483,19 +3492,19 @@ function ShepherdOverModal({
 
     if (tab === 'groups') {
       for (const mp of mappingLayerPeople) {
-        if (mp.contextKind !== 'group' || mp.contextId !== selectedId) continue
+        if (mp.contextKind !== 'group' || !selectedIds.has(mp.contextId)) continue
         if (!leaderRe.test(mp.role)) continue
         add(mp.personId, mp.layerId, mp.personName)
       }
     } else if (tab === 'teams') {
       for (const mp of mappingLayerPeople) {
-        if (mp.contextKind !== 'team' || mp.contextId !== selectedId) continue
+        if (mp.contextKind !== 'team' || !selectedIds.has(mp.contextId)) continue
         if (!leaderRe.test(mp.role)) continue
         add(mp.personId, mp.layerId, mp.personName)
       }
     } else if (tab === 'group_type') {
       const groupIdsOfType = new Set(
-        groupsList.filter(g => (g.groupTypeName || 'Other') === selectedId).map(g => g.id)
+        groupsList.filter(g => selectedIds.has(g.groupTypeName || 'Other')).map(g => g.id)
       )
       for (const mp of mappingLayerPeople) {
         if (mp.contextKind !== 'group' || !groupIdsOfType.has(mp.contextId)) continue
@@ -3504,7 +3513,7 @@ function ShepherdOverModal({
       }
     } else if (tab === 'team_type') {
       const teamIdsOfType = new Set(
-        teamsList.filter(t => (t.serviceTypeName || 'Other') === selectedId).map(t => t.id)
+        teamsList.filter(t => selectedIds.has(t.serviceTypeName || 'Other')).map(t => t.id)
       )
       for (const mp of mappingLayerPeople) {
         if (mp.contextKind !== 'team' || !teamIdsOfType.has(mp.contextId)) continue
@@ -3512,8 +3521,10 @@ function ShepherdOverModal({
         add(mp.personId, mp.layerId, mp.personName)
       }
     } else if (tab === 'layer') {
-      for (const p of peopleByLayer.get(selectedId) || []) {
-        if (!p.isExcluded) add(p.personId, selectedId, p.name)
+      for (const lid of selectedIds) {
+        for (const p of peopleByLayer.get(lid) || []) {
+          if (!p.isExcluded) add(p.personId, lid, p.name)
+        }
       }
     }
     return targets
@@ -3541,15 +3552,19 @@ function ShepherdOverModal({
     return r.ruleValue
   }
 
-  // Render selectable items based on tab — single-select (radio style)
+  // Render selectable items — multi-select (checkbox) for all tabs
   const renderItems = () => {
-    const radio = (id: string, label: string, sublabel?: string) => (
-      <label key={id} className="sans" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12, borderTop: '1px solid rgba(0,0,0,0.04)', cursor: 'pointer', background: selectedId === id ? 'rgba(45,96,71,0.06)' : 'white' }}>
-        <input type="radio" name="shepherd-over-item" checked={selectedId === id} onChange={() => setSelectedId(id)} style={{ margin: 0 }} />
-        <span style={{ fontWeight: selectedId === id ? 600 : 400 }}>{label}</span>
-        {sublabel && <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted-foreground)' }}>{sublabel}</span>}
-      </label>
-    )
+    const alreadyRuleIds = new Set(existingRules.filter(r => r.ruleType === tab).map(r => r.ruleValue))
+    const check = (id: string, label: string) => {
+      const isExisting = alreadyRuleIds.has(id)
+      return (
+        <label key={id} className="sans" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12, borderTop: '1px solid rgba(0,0,0,0.04)', cursor: isExisting ? 'default' : 'pointer', background: selectedIds.has(id) ? 'rgba(45,96,71,0.06)' : isExisting ? 'rgba(0,0,0,0.02)' : 'white', opacity: isExisting ? 0.5 : 1 }}>
+          <input type="checkbox" checked={selectedIds.has(id) || isExisting} disabled={isExisting} onChange={() => toggle(id)} style={{ margin: 0 }} />
+          <span style={{ fontWeight: selectedIds.has(id) ? 600 : 400 }}>{label}</span>
+          {isExisting && <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted-foreground)' }}>active</span>}
+        </label>
+      )
+    }
 
     if (tab === 'groups') {
       const filtered = groupsList.filter(g => !q || g.name.toLowerCase().includes(q) || (g.groupTypeName || '').toLowerCase().includes(q))
@@ -3564,7 +3579,7 @@ function ShepherdOverModal({
           <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', padding: '8px 10px 4px', background: 'rgba(0,0,0,0.02)', textTransform: 'uppercase' }}>
             {type}
           </div>
-          {byType.get(type)!.map(g => radio(g.id, g.name))}
+          {byType.get(type)!.map(g => check(g.id, g.name))}
         </div>
       ))
     }
@@ -3581,16 +3596,16 @@ function ShepherdOverModal({
           <div className="sans" style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: 'var(--muted-foreground)', padding: '8px 10px 4px', background: 'rgba(0,0,0,0.02)', textTransform: 'uppercase' }}>
             {type}
           </div>
-          {byType.get(type)!.map(t => radio(t.id, t.name))}
+          {byType.get(type)!.map(t => check(t.id, t.name))}
         </div>
       ))
     }
-    if (tab === 'group_type') return groupTypes.map(type => radio(type, type))
-    if (tab === 'team_type') return teamTypes.map(type => radio(type, type))
+    if (tab === 'group_type') return groupTypes.map(type => check(type, type))
+    if (tab === 'team_type') return teamTypes.map(type => check(type, type))
     // tab === 'layer'
     return layers
       .filter((_, i) => i > parentLayerIdx)
-      .map(l => radio(l.id, l.name))
+      .map(l => check(l.id, l.name))
   }
 
   const tabs: { key: typeof tab; label: string }[] = [
@@ -3692,13 +3707,13 @@ function ShepherdOverModal({
         {/* Preview + Apply */}
         <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
           <div className="sans" style={{ fontSize: 11, color: 'var(--muted-foreground)', marginBottom: 8 }}>
-            {!selectedId
-              ? 'Select an item above to create a rule.'
-              : ruleExists
-                ? 'This rule already exists.'
+            {selectedIds.size === 0
+              ? 'Select items above to create rules.'
+              : allAlreadyExist
+                ? 'All selected rules already exist.'
                 : resolvedTargets.length === 0
-                  ? `Rule will connect to leaders when data becomes available.`
-                  : `Currently matches ${resolvedTargets.length} ${resolvedTargets.length === 1 ? 'person' : 'people'}`}
+                  ? `${newSelections.length} new ${newSelections.length === 1 ? 'rule' : 'rules'} — will connect to leaders when data becomes available.`
+                  : `${newSelections.length} new ${newSelections.length === 1 ? 'rule' : 'rules'}, currently matching ${resolvedTargets.length} ${resolvedTargets.length === 1 ? 'person' : 'people'}`}
           </div>
           {resolvedTargets.length > 0 && resolvedTargets.length <= 12 && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
@@ -3716,16 +3731,16 @@ function ShepherdOverModal({
               Cancel
             </button>
             <button
-              onClick={() => { if (selectedId) onApply(tab, selectedId) }}
-              disabled={!selectedId || ruleExists || busy}
+              onClick={() => { if (newSelections.length > 0) onApply(tab, newSelections) }}
+              disabled={newSelections.length === 0 || busy}
               className="sans"
               style={{
                 fontSize: 12, fontWeight: 600, padding: '8px 16px', borderRadius: 8,
                 border: '1px solid #2a6a3a', background: '#2a6a3a', color: 'white',
-                cursor: !selectedId || ruleExists || busy ? 'not-allowed' : 'pointer',
-                opacity: !selectedId || ruleExists || busy ? 0.5 : 1,
+                cursor: newSelections.length === 0 || busy ? 'not-allowed' : 'pointer',
+                opacity: newSelections.length === 0 || busy ? 0.5 : 1,
               }}>
-              {busy ? 'Saving…' : ruleExists ? 'Already added' : resolvedTargets.length > 0 ? `Save rule (${resolvedTargets.length} now)` : 'Save rule'}
+              {busy ? 'Saving…' : allAlreadyExist ? 'Already added' : `Save ${newSelections.length} ${newSelections.length === 1 ? 'rule' : 'rules'}${resolvedTargets.length > 0 ? ` (${resolvedTargets.length} now)` : ''}`}
             </button>
           </div>
         </div>
