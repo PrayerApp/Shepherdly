@@ -65,11 +65,9 @@ export async function regenerateShepherdOverEdges(
     itemsByMapping.get(it.mapping_id)!.push(it.item_id)
   }
 
-  // Build: for each group/team, find the leader layer from its mapping
-  // and the leaders (from membership data).
   const leaderRe = /leader|co.?leader/i
 
-  // Fetch all group + team memberships (paginated)
+  // Paginated fetch helper
   const fetchAll = async (table: string, fk: string, itemIds: string[]) => {
     if (itemIds.length === 0) return []
     const rows: any[] = []
@@ -89,51 +87,107 @@ export async function regenerateShepherdOverEdges(
     return rows
   }
 
-  // Collect all group/team IDs that are in any mapping
-  const allGroupIds = new Set<string>()
-  const allTeamIds = new Set<string>()
-  for (const m of (mappings || []) as any[]) {
-    const items = itemsByMapping.get(m.id) || []
-    if (m.kind === 'groups') items.forEach((id: string) => allGroupIds.add(id))
-    else items.forEach((id: string) => allTeamIds.add(id))
-  }
+  // ── Fetch memberships for ALL groups and teams, not just mapped ones ──
+  const allGroupIds = [...groupTypeByGroupId.keys()]
+  const allTeamIds = [...serviceTypeByTeamId.keys()]
 
   const [groupMemberships, teamMemberships] = await Promise.all([
-    fetchAll('group_memberships', 'group_id', [...allGroupIds]),
-    fetchAll('team_memberships', 'team_id', [...allTeamIds]),
+    fetchAll('group_memberships', 'group_id', allGroupIds),
+    fetchAll('team_memberships', 'team_id', allTeamIds),
   ])
 
-  // Build: group/team id -> { leaders: [{personId, layerId}] }
-  type LeaderInfo = { personId: string; layerId: string }
-  const leadersByGroupId = new Map<string, LeaderInfo[]>()
-  const leadersByTeamId = new Map<string, LeaderInfo[]>()
+  // ── Build leader layer lookup ──────────────────────────────────
+  // For each group/team, determine which layer its leaders belong on.
+  // Priority: explicit mapping > any mapping covering the same type > rule's parent layer.
 
+  // Step 1: Build group/team -> leader_layer_id from explicit mappings
+  const mappedGroupLeaderLayer = new Map<string, string>()
+  const mappedTeamLeaderLayer = new Map<string, string>()
   for (const m of (mappings || []) as any[]) {
     if (!m.leader_layer_id) continue
     const items = itemsByMapping.get(m.id) || []
-    const memberships = m.kind === 'groups' ? groupMemberships : teamMemberships
-    const fk = m.kind === 'groups' ? 'group_id' : 'team_id'
-    const targetMap = m.kind === 'groups' ? leadersByGroupId : leadersByTeamId
+    if (m.kind === 'groups') {
+      for (const iid of items) mappedGroupLeaderLayer.set(iid, m.leader_layer_id)
+    } else {
+      for (const iid of items) mappedTeamLeaderLayer.set(iid, m.leader_layer_id)
+    }
+  }
 
-    for (const iid of items) {
-      const members = memberships.filter((mm: any) => mm[fk] === iid)
-      const leaders = members
-        .filter((mm: any) => leaderRe.test(mm.role || ''))
-        .map((mm: any) => ({ personId: mm.person_id as string, layerId: m.leader_layer_id as string }))
-      if (leaders.length > 0) {
-        if (!targetMap.has(iid)) targetMap.set(iid, [])
-        targetMap.get(iid)!.push(...leaders)
+  // Step 2: Build group_type_name -> leader_layer_id (from any mapping of that type)
+  const groupTypeLeaderLayer = new Map<string, string>()
+  const teamTypeLeaderLayer = new Map<string, string>()
+  for (const m of (mappings || []) as any[]) {
+    if (!m.leader_layer_id) continue
+    const items = itemsByMapping.get(m.id) || []
+    if (m.kind === 'groups') {
+      for (const iid of items) {
+        const typeName = groupTypeByGroupId.get(iid)
+        if (typeName && !groupTypeLeaderLayer.has(typeName)) {
+          groupTypeLeaderLayer.set(typeName, m.leader_layer_id)
+        }
+      }
+    } else {
+      for (const iid of items) {
+        const typeName = serviceTypeByTeamId.get(iid)
+        if (typeName && !teamTypeLeaderLayer.has(typeName)) {
+          teamTypeLeaderLayer.set(typeName, m.leader_layer_id)
+        }
       }
     }
   }
 
-  // People by layer (for 'layer' rule type) — fetch from tree_layer_inclusions
-  // plus mapping-derived + list-derived. Simplified: just get all card keys from
-  // the connections + inclusions. Actually, the simplest: use the same peopleByLayer
-  // that the tree GET endpoint builds. But we don't have that here. Instead, let's
-  // gather people per layer from the available data sources.
-  // For the 'layer' rule type, we'll collect all people who would appear on that layer.
+  // Resolve leader layer for a group
+  const resolveGroupLeaderLayer = (groupId: string, fallbackLayerId: string): string => {
+    // 1) Explicit mapping for this group
+    const explicit = mappedGroupLeaderLayer.get(groupId)
+    if (explicit) return explicit
+    // 2) Any mapping for groups of the same type
+    const typeName = groupTypeByGroupId.get(groupId)
+    if (typeName) {
+      const typeLayer = groupTypeLeaderLayer.get(typeName)
+      if (typeLayer) return typeLayer
+    }
+    // 3) Fallback
+    return fallbackLayerId
+  }
 
+  const resolveTeamLeaderLayer = (teamId: string, fallbackLayerId: string): string => {
+    const explicit = mappedTeamLeaderLayer.get(teamId)
+    if (explicit) return explicit
+    const typeName = serviceTypeByTeamId.get(teamId)
+    if (typeName) {
+      const typeLayer = teamTypeLeaderLayer.get(typeName)
+      if (typeLayer) return typeLayer
+    }
+    return fallbackLayerId
+  }
+
+  // ── Build leaders by group/team (ALL groups/teams) ─────────────
+  type LeaderInfo = { personId: string; layerId: string }
+  const buildLeaders = (
+    memberships: any[],
+    fk: string,
+    itemIds: string[],
+    resolveLayer: (itemId: string, fallback: string) => string,
+    fallbackLayerId: string,
+  ) => {
+    const result = new Map<string, LeaderInfo[]>()
+    for (const iid of itemIds) {
+      const members = memberships.filter((mm: any) => mm[fk] === iid)
+      const leaders = members
+        .filter((mm: any) => leaderRe.test(mm.role || ''))
+        .map((mm: any) => ({
+          personId: mm.person_id as string,
+          layerId: resolveLayer(iid, fallbackLayerId),
+        }))
+      if (leaders.length > 0) {
+        result.set(iid, leaders)
+      }
+    }
+    return result
+  }
+
+  // ── Evaluate each rule ─────────────────────────────────────────
   let totalEdges = 0
   for (const rule of rules as any[]) {
     // Wipe rule-owned edges first
@@ -150,26 +204,43 @@ export async function regenerateShepherdOverEdges(
     }
 
     if (rule.rule_type === 'group') {
-      const leaders = leadersByGroupId.get(rule.rule_value) || []
-      for (const l of leaders) add(l.personId, l.layerId)
+      // Leaders of a specific group
+      const leadersByGroup = buildLeaders(
+        groupMemberships, 'group_id', [rule.rule_value],
+        resolveGroupLeaderLayer, rule.parent_layer_id,
+      )
+      for (const l of leadersByGroup.get(rule.rule_value) || []) add(l.personId, l.layerId)
+
     } else if (rule.rule_type === 'team') {
-      const leaders = leadersByTeamId.get(rule.rule_value) || []
-      for (const l of leaders) add(l.personId, l.layerId)
+      // Leaders of a specific team
+      const leadersByTeam = buildLeaders(
+        teamMemberships, 'team_id', [rule.rule_value],
+        resolveTeamLeaderLayer, rule.parent_layer_id,
+      )
+      for (const l of leadersByTeam.get(rule.rule_value) || []) add(l.personId, l.layerId)
+
     } else if (rule.rule_type === 'group_type') {
-      // Find all groups of this type, then their leaders
-      for (const [gid, typeName] of groupTypeByGroupId) {
-        if (typeName === rule.rule_value) {
-          const leaders = leadersByGroupId.get(gid) || []
-          for (const l of leaders) add(l.personId, l.layerId)
-        }
+      // Leaders of ALL groups of this type
+      const groupIdsOfType = allGroupIds.filter(gid => groupTypeByGroupId.get(gid) === rule.rule_value)
+      const leadersByGroup = buildLeaders(
+        groupMemberships, 'group_id', groupIdsOfType,
+        resolveGroupLeaderLayer, rule.parent_layer_id,
+      )
+      for (const [, leaders] of leadersByGroup) {
+        for (const l of leaders) add(l.personId, l.layerId)
       }
+
     } else if (rule.rule_type === 'team_type') {
-      for (const [tid, typeName] of serviceTypeByTeamId) {
-        if (typeName === rule.rule_value) {
-          const leaders = leadersByTeamId.get(tid) || []
-          for (const l of leaders) add(l.personId, l.layerId)
-        }
+      // Leaders of ALL teams of this type
+      const teamIdsOfType = allTeamIds.filter(tid => serviceTypeByTeamId.get(tid) === rule.rule_value)
+      const leadersByTeam = buildLeaders(
+        teamMemberships, 'team_id', teamIdsOfType,
+        resolveTeamLeaderLayer, rule.parent_layer_id,
+      )
+      for (const [, leaders] of leadersByTeam) {
+        for (const l of leaders) add(l.personId, l.layerId)
       }
+
     } else if (rule.rule_type === 'layer') {
       // Connect to everyone on the target layer. Gather from:
       // 1) mapping-derived people on that layer

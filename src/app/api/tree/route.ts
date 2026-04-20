@@ -1549,6 +1549,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true })
   }
 
+  // ── Regenerate all shepherd-over rule edges ────────────────
+  if (body.action === 'regenerate_shepherd_rules') {
+    try {
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      const result = await regenerateShepherdOverEdges(admin, churchId!)
+      return NextResponse.json({ success: true, ...result })
+    } catch (e: any) {
+      console.error('regenerate_shepherd_rules error:', e?.message)
+      return NextResponse.json({ error: e?.message }, { status: 500 })
+    }
+  }
+
   // ── Remove a person from a layer, smart:
   //   - if they were manually added (tree_layer_inclusions), delete that row
   //     (they disappear entirely; there's nothing to "restore")
