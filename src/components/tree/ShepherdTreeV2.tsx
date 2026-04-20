@@ -1147,53 +1147,14 @@ export default function ShepherdTreeV2() {
     return BAND_PADDING_LEFT + u * UNIT
   }
 
-  // ── Descendants via connections (transitive) ─────────────────
+  // ── Direct children via connections (non-transitive) ─────────
   const descendantsByKey = (() => {
     const out = new Map<string, Set<string>>()
-    const childrenAdj = new Map<string, string[]>()
     for (const c of connections) {
       const pk = resolveParentCardKey(c)
       const ck = resolveChildCardKey(c)
-      if (!childrenAdj.has(pk)) childrenAdj.set(pk, [])
-      childrenAdj.get(pk)!.push(ck)
-    }
-    // A person may have multiple card keys (one per context). Create
-    // synthetic edges so that any card key for a person inherits the
-    // children of every other card key for the same person. This ensures
-    // descendants propagate correctly up the tree regardless of which
-    // card key is resolved for each connection.
-    const keysByPerson = new Map<string, string[]>()
-    for (const k of childrenAdj.keys()) {
-      const pid = k.split('::')[0]
-      if (!keysByPerson.has(pid)) keysByPerson.set(pid, [])
-      keysByPerson.get(pid)!.push(k)
-    }
-    for (const [, keys] of keysByPerson) {
-      if (keys.length <= 1) continue
-      // Cross-link all keys for the same person so DFS can traverse
-      for (const a of keys) {
-        for (const b of keys) {
-          if (a === b) continue
-          if (!childrenAdj.has(a)) childrenAdj.set(a, [])
-          if (!childrenAdj.get(a)!.includes(b)) childrenAdj.get(a)!.push(b)
-        }
-      }
-    }
-    const dfs = (k: string, acc: Set<string>, stack: Set<string>) => {
-      if (stack.has(k)) return
-      stack.add(k)
-      for (const ck of childrenAdj.get(k) || []) {
-        if (!acc.has(ck)) {
-          acc.add(ck)
-          dfs(ck, acc, stack)
-        }
-      }
-      stack.delete(k)
-    }
-    for (const k of childrenAdj.keys()) {
-      const acc = new Set<string>()
-      dfs(k, acc, new Set())
-      out.set(k, acc)
+      if (!out.has(pk)) out.set(pk, new Set())
+      out.get(pk)!.add(ck)
     }
     return out
   })()
