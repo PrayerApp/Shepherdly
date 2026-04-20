@@ -570,13 +570,15 @@ export default function ShepherdTreeV2() {
     }
 
     // 4) Connection-derived: people who are the child target of a
-    //    tree_connection pointing to this layer but not already on it
-    //    via sources 1-3.
-    const alreadySeen = new Set(appearances.map(a => a.personId))
+    //    tree_connection pointing to this layer. These are appended
+    //    without an alreadySeen gate because source 1-3 appearances may
+    //    later be filtered by the highest-layer rule. The dedup at the
+    //    card-key level (below) prevents actual duplicates.
+    const connSeen = new Set<string>()
     for (const c of connections) {
       if (c.childLayerId !== layerId) continue
-      if (alreadySeen.has(c.childPersonId)) continue
-      alreadySeen.add(c.childPersonId)
+      if (connSeen.has(c.childPersonId)) continue
+      connSeen.add(c.childPersonId)
       appearances.push({ personId: c.childPersonId, name: c.childPersonName || 'Unknown', contextKey: CONTEXT_PRIMARY, fromConnection: true })
     }
 
@@ -964,6 +966,7 @@ export default function ShepherdTreeV2() {
   }
 
   const layerIndex = (layerId: string): number => allLayers.findIndex(l => l.id === layerId)
+  const visibleLayerIndex = (layerId: string): number => sortedLayers.findIndex(l => l.id === layerId)
 
   const layout = (() => {
     const childrenMap = new Map<string, string[]>()
@@ -1258,7 +1261,7 @@ export default function ShepherdTreeV2() {
   const CARD_TOP_OFFSET = Math.max(0, Math.floor((BAND_HEIGHT - CARD_HEIGHT) / 2))
 
   const bandTop = (layerIdx: number): number => layerIdx * BAND_HEIGHT
-  const cardTopAbs = (layerId: string): number => bandTop(layerIndex(layerId)) + CARD_TOP_OFFSET
+  const cardTopAbs = (layerId: string): number => bandTop(visibleLayerIndex(layerId)) + CARD_TOP_OFFSET
   const totalTreeWidth = BAND_PADDING_LEFT + (layout.maxUnit + 2) * UNIT + 32
   const totalTreeHeight = sortedLayers.length * BAND_HEIGHT
 
