@@ -1566,6 +1566,20 @@ export async function POST(request: Request) {
     }
   }
 
+  // Regenerate ALL connection types: auto-connect (mapping-owned) + shepherd-over rules
+  if (body.action === 'regenerate_all_connections') {
+    try {
+      const { regenerateAutoConnectEdgesForChurch } = await import('@/lib/tree-auto-connect')
+      const { regenerateShepherdOverEdges } = await import('@/lib/shepherd-over-rules')
+      const ac = await regenerateAutoConnectEdgesForChurch(admin, churchId!)
+      const so = await regenerateShepherdOverEdges(admin, churchId!)
+      return NextResponse.json({ success: true, autoConnect: ac, shepherdOver: so })
+    } catch (e: any) {
+      console.error('regenerate_all_connections error:', e?.message)
+      return NextResponse.json({ error: e?.message }, { status: 500 })
+    }
+  }
+
   // ── Remove a person from a layer, smart:
   //   - if they were manually added (tree_layer_inclusions), delete that row
   //     (they disappear entirely; there's nothing to "restore")

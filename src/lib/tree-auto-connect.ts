@@ -49,21 +49,25 @@ export async function regenerateAutoConnectEdgesForChurch(
 
     const table = m.kind === 'groups' ? 'group_memberships' : 'team_memberships'
     const fk = m.kind === 'groups' ? 'group_id' : 'team_id'
-    // Paginate — PostgREST caps single responses well below our needs for
-    // large groups/teams, and .range() alone doesn't raise that ceiling.
+    // Paginate both the IN clause (to avoid PostgREST URL length limits)
+    // and the result rows.
     const memberships: any[] = []
+    const IN_BATCH = 100
     const PAGE = 1000
-    for (let from = 0; ; from += PAGE) {
-      const { data: page } = await admin.from(table)
-        .select(`person_id, ${fk}, role, is_active`)
-        .eq('church_id', churchId)
-        .eq('is_active', true)
-        .in(fk, itemIds)
-        .order('id')
-        .range(from, from + PAGE - 1)
-      if (!page || page.length === 0) break
-      memberships.push(...page)
-      if (page.length < PAGE) break
+    for (let b = 0; b < itemIds.length; b += IN_BATCH) {
+      const batch = itemIds.slice(b, b + IN_BATCH)
+      for (let from = 0; ; from += PAGE) {
+        const { data: page } = await admin.from(table)
+          .select(`person_id, ${fk}, role, is_active`)
+          .eq('church_id', churchId)
+          .eq('is_active', true)
+          .in(fk, batch)
+          .order('id')
+          .range(from, from + PAGE - 1)
+        if (!page || page.length === 0) break
+        memberships.push(...page)
+        if (page.length < PAGE) break
+      }
     }
 
     const byItem = new Map<string, { person_id: string; role: string | null }[]>()

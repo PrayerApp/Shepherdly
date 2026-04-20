@@ -569,32 +569,15 @@ export default function ShepherdTreeV2() {
       appearances.push({ personId: inc.personId, name: inc.personName, contextKey: CONTEXT_PRIMARY })
     }
 
-    // 4) Connection-derived: people who are the child target of a
-    //    tree_connection pointing to this layer. These are appended
-    //    without an alreadySeen gate because source 1-3 appearances may
-    //    later be filtered by the highest-layer rule. The dedup at the
-    //    card-key level (below) prevents actual duplicates.
-    const connSeen = new Set<string>()
-    for (const c of connections) {
-      if (c.childLayerId !== layerId) continue
-      if (connSeen.has(c.childPersonId)) continue
-      connSeen.add(c.childPersonId)
-      appearances.push({ personId: c.childPersonId, name: c.childPersonName || 'Unknown', contextKey: CONTEXT_PRIMARY, fromConnection: true })
-    }
-
     // Apply rules.
     const byKey = new Map<string, Card>()
     for (const a of appearances) {
       // Cross-layer rule: keep only appearances whose (personId, contextKey)
       // highest layer matches THIS layer. Prevents the same person from
       // appearing on multiple layers for the same context.
-      // Connection-derived appearances bypass this — connections explicitly
-      // place a person on a layer regardless of where else they appear.
-      if (!a.fromConnection) {
-        const k = `${a.personId}::${a.contextKey}`
-        const highest = highestLayerByPersonCtx.get(k)
-        if (highest && highest !== layerId) continue
-      }
+      const k = `${a.personId}::${a.contextKey}`
+      const highest = highestLayerByPersonCtx.get(k)
+      if (highest && highest !== layerId) continue
       // Dedup: one card per (personId, contextKey).
       const dedupKey = cardKeyFor(a.personId, layerId, a.contextKey)
       if (byKey.has(dedupKey)) continue
@@ -604,6 +587,29 @@ export default function ShepherdTreeV2() {
         name: a.name,
         isExcluded: excluded.has(a.personId),
         contextKey: a.contextKey,
+      })
+    }
+
+    // 4) Connection-derived: people who are the child target of a
+    //    tree_connection pointing to this layer. Only add a CONTEXT_PRIMARY
+    //    card when the person doesn't already have ANY card on this layer
+    //    from sources 1-3 (prevents duplicates when a mapping already
+    //    placed them here with a context-specific key).
+    const personIdsOnLayer = new Set([...byKey.values()].map(c => c.personId))
+    const connSeen = new Set<string>()
+    for (const c of connections) {
+      if (c.childLayerId !== layerId) continue
+      if (personIdsOnLayer.has(c.childPersonId)) continue
+      if (connSeen.has(c.childPersonId)) continue
+      connSeen.add(c.childPersonId)
+      const dedupKey = cardKeyFor(c.childPersonId, layerId, CONTEXT_PRIMARY)
+      if (byKey.has(dedupKey)) continue
+      byKey.set(dedupKey, {
+        key: dedupKey,
+        personId: c.childPersonId,
+        name: c.childPersonName || 'Unknown',
+        isExcluded: excluded.has(c.childPersonId),
+        contextKey: CONTEXT_PRIMARY,
       })
     }
 
