@@ -1120,28 +1120,32 @@ export default function ShepherdTreeV2() {
           .filter((x): x is number => x !== undefined)
         if (knownXs.length > 0) {
           const center = (Math.min(...knownXs) + Math.max(...knownXs)) / 2
-          const anchor = clusterAnchorOf(k)
-          const n = (clusterPlacedCount.get(anchor) || 0) + 1
-          clusterPlacedCount.set(anchor, n)
-          const x = center + n
+          const anchorK = clusterAnchorOf(k)
+          const alreadyPlaced = (clusterPlacedCount.get(anchorK) || 0)
+          clusterPlacedCount.set(anchorK, alreadyPlaced + 1)
+          const x = center + alreadyPlaced
           xUnit.set(k, x)
           if (x + 1 > cursor) cursor = Math.ceil(x + 1)
           return x
         }
       }
 
-      // Check if another member of our co-leader cluster was already
-      // placed (e.g. the first co-leader was a "true leaf" and we
-      // should sit adjacent to them).
+      // Check if ANY member of our co-leader cluster was already
+      // placed — not just the anchor. When co-leaders have different
+      // parents, a non-anchor member may be laid out first.
       const anchor = clusterAnchorOf(k)
-      const anchorX = xUnit.get(anchor)
-      if (anchorX !== undefined && anchor !== k) {
-        const n = (clusterPlacedCount.get(anchor) || 0) + 1
-        clusterPlacedCount.set(anchor, n)
-        const x = anchorX + n
-        xUnit.set(k, x)
-        if (x + 1 > cursor) cursor = Math.ceil(x + 1)
-        return x
+      const clusterRoot = find(k)
+      const clusterMems = coLeaderClusters.get(clusterRoot)
+      if (clusterMems && clusterMems.length > 1) {
+        const placedPeer = clusterMems.find(m => m !== k && xUnit.has(m))
+        if (placedPeer) {
+          const baseX = xUnit.get(placedPeer)!
+          const alreadyPlaced = clusterMems.filter(m => xUnit.has(m)).length
+          const x = baseX + alreadyPlaced
+          xUnit.set(k, x)
+          if (x + 1 > cursor) cursor = Math.ceil(x + 1)
+          return x
+        }
       }
 
       // True leaf or first co-leader placed. Record for cluster siblings.
