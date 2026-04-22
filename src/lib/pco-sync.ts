@@ -922,6 +922,63 @@ export const PCO_TABLES = [
   'people',
 ]
 
+// ── Orphan detection (membership departures) ───────────────
+//
+// PCO's group/team memberships API exposes joined_at + role but has
+// NO `left_at`, `archived`, or `status` attribute — when someone is
+// removed from a group, the membership simply vanishes from the API
+// response. Without explicit orphan handling, our DB keeps the old
+// row forever with is_active = true, so "exited" counts in stats
+// come back as 0 even when memberships have clearly ended.
+//
+// The cron walks every group/team during sync, so by the time the
+// resource loop finishes we've seen the complete set of live
+// memberships. Anything in the DB that's still is_active = true but
+// NOT in that seen set is a departure: mark it is_active = false and
+// set left_at to the sync timestamp.
+
+export async function markDepartedMemberships(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  admin: any,
+  table: 'group_memberships' | 'team_memberships',
+  churchId: string,
+  seenPcoIds: Set<string>,
+  departedAt: string = new Date().toISOString(),
+): Promise<number> {
+  // Fetch all currently-active memberships for this church in
+  // manageable batches (Postgres has no practical limit but keeping
+  // the payload small avoids surprises).
+  const PAGE = 1000
+  const orphanIds: string[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data } = await admin
+      .from(table)
+      .select('id, pco_id')
+      .eq('church_id', churchId)
+      .eq('is_active', true)
+      .range(from, from + PAGE - 1)
+    if (!data || data.length === 0) break
+    for (const row of data) {
+      if (row.pco_id && !seenPcoIds.has(row.pco_id)) orphanIds.push(row.id)
+    }
+    if (data.length < PAGE) break
+  }
+  if (orphanIds.length === 0) return 0
+
+  // Update in chunks — .in() with huge arrays blows URL length.
+  const CHUNK = 500
+  let updated = 0
+  for (let i = 0; i < orphanIds.length; i += CHUNK) {
+    const chunk = orphanIds.slice(i, i + CHUNK)
+    const { error } = await admin
+      .from(table)
+      .update({ is_active: false, left_at: departedAt })
+      .in('id', chunk)
+    if (!error) updated += chunk.length
+  }
+  return updated
+}
+
 // ── Forms sync ──────────────────────────────────────────────
 //
 // Forms are config-driven (pco_form_sync_config), so they don't fit the

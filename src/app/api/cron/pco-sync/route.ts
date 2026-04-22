@@ -6,6 +6,7 @@ import {
   getNestedResourceInfo, fetchNestedPage,
   resolvePcoIds, linkForeignKeys,
   syncConfiguredForms,
+  markDepartedMemberships,
 } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -64,6 +65,15 @@ export async function GET(request: NextRequest) {
 
   let totalSynced = 0
 
+  // Track every pco_id we successfully pulled this run for tables
+  // where "not seen" means "membership ended." Used below to close
+  // out departures (see markDepartedMemberships).
+  const seenPcoIdsByTable: Record<string, Set<string>> = {
+    group_memberships: new Set(),
+    team_memberships: new Set(),
+  }
+  const syncStartedAt = new Date().toISOString()
+
   try {
     for (const resource of SYNC_RESOURCES) {
       if (resource.isNested) {
@@ -96,6 +106,12 @@ export async function GET(request: NextRequest) {
                 await admin.from(resource.table).upsert(rowsWithChurch, { onConflict: resource.onConflict })
               }
               totalSynced += rowsWithChurch.length
+              const seen = seenPcoIdsByTable[resource.table]
+              if (seen) {
+                for (const r of rowsWithChurch as Array<{ pco_id?: string }>) {
+                  if (r.pco_id) seen.add(r.pco_id)
+                }
+              }
             }
           }
 
@@ -137,6 +153,20 @@ export async function GET(request: NextRequest) {
           offset += 100
         }
       }
+    }
+
+    // Post-sync: close out any group/team memberships that disappeared
+    // from PCO this run. PCO doesn't expose a left_at attribute, so
+    // "not returned in this sync" is the signal. Skip if we saw zero
+    // memberships total — that's a sync failure, not an empty church.
+    try {
+      for (const table of ['group_memberships', 'team_memberships'] as const) {
+        const seen = seenPcoIdsByTable[table]
+        if (seen.size === 0) continue
+        await markDepartedMemberships(admin, table, churchId!, seen, syncStartedAt)
+      }
+    } catch (e) {
+      console.error('Cron: orphan membership cleanup failed:', e)
     }
 
     // Post-sync: link FK columns

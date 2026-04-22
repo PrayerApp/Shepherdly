@@ -7,6 +7,7 @@ import {
   getResourceCount, fetchResourcePage,
   getNestedResourceInfo, fetchNestedPage,
   resolvePcoIds, linkForeignKeys,
+  syncConfiguredForms,
 } from '@/lib/pco-sync'
 import type { NestedCursor } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
@@ -461,6 +462,27 @@ export async function POST(request: NextRequest) {
         } catch (e) {
           console.error('Post-sync auto-connect refresh failed:', e)
         }
+
+        // Post-sync: pull configured PCO form submissions. Lives outside
+        // the chunked sync_page flow because forms are config-driven and
+        // relatively small (1-2 forms, thousands of submissions max).
+        try {
+          if (credentials?.app_id && credentials?.app_secret) {
+            const client = createPcoClient(credentials.app_id, credentials.app_secret)
+            await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+          }
+        } catch (e) {
+          console.error('Post-sync form submissions failed:', e)
+        }
+
+        // Post-sync: close out memberships that disappeared from PCO.
+        // Cron handles this per-resource via the seen-ids set, but the
+        // chunked /api/pco flow doesn't track that across sync_page
+        // calls. Approximation: any is_active membership whose
+        // joined_at is older than 90 days and wasn't touched in this
+        // sync would be a candidate — but without per-run tracking we
+        // can't safely mark them here. Leaving this as a gap; the
+        // daily cron's orphan pass is the authoritative cleanup.
       }
       return NextResponse.json({ success: true })
     }

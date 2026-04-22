@@ -50,6 +50,7 @@ type TypeStat = {
   typeId: string
   typeName: string
   contexts: number           // distinct group/team count under this type (tracked)
+  staff: number              // people on staff-category layer shepherding members of this type
   members: number
   leaders: number
   joinedRecent: number       // joined in last MEASUREMENT_DAYS
@@ -68,6 +69,10 @@ function aggregateByType(
   entityField: 'group_id' | 'team_id',
   types: TypeRow[],
   now: Date,
+  // Staff-layer people who shepherd members of each type. Keyed by
+  // typeId → set of person_ids on a tree_layer with category='staff'
+  // whose tree_connections reach any current member of this type.
+  staffByType: Map<string, Set<string>>,
 ): TypeStat[] {
   const nowMs = now.getTime()
   const cutoffMs = nowMs - MEASUREMENT_DAYS * 86400000
@@ -128,6 +133,7 @@ function aggregateByType(
       typeId: t.id,
       typeName: t.name,
       contexts,
+      staff: (staffByType.get(t.id) || new Set()).size,
       members,
       leaders,
       joinedRecent,
@@ -158,7 +164,41 @@ export async function GET() {
   const churchId = appUser.church_id as string
 
   const now = new Date()
-  const cutoffMs = now.getTime() - MEASUREMENT_DAYS * 86400000
+  const twelveMoAgoIso = new Date(now.getTime() - 365 * 86400000).toISOString()
+
+  // Membership-type rules (see user spec):
+  //   - Excluded outright (not counted as either Active or Shepherded).
+  //     Status='inactive' already gets filtered separately; these are
+  //     system/legacy rows that clutter totals.
+  //   - Outreach Partner counts as Shepherded even without a group/
+  //     team membership — it's a formal pastoral relationship.
+  //   - The four "limited engagement" types count as Active: they're
+  //     not in any shepherding context but represent a real touchpoint
+  //     with the church.
+  const EXCLUDED_MTYPES = new Set(['SYSTEM USE - Do Not Delete', 'Former Member'])
+  const SHEPHERDED_MTYPES = new Set(['Outreach Partner'])
+  const ACTIVE_MTYPES = new Set([
+    'Benevolence Only', 'Activity Only', 'Parent Only', 'Online Submission Only',
+  ])
+
+  // Paginate people — PostgREST caps at 1000 rows per response.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function fetchAllPeopleLite(): Promise<{ id: string; membership_type: string | null }[]> {
+    const out: { id: string; membership_type: string | null }[] = []
+    const PAGE = 1000
+    for (let from = 0; ; from += PAGE) {
+      const { data } = await supabase
+        .from('people')
+        .select('id, membership_type')
+        .eq('church_id', churchId)
+        .eq('status', 'active')
+        .range(from, from + PAGE - 1)
+      if (!data || data.length === 0) break
+      out.push(...data)
+      if (data.length < PAGE) break
+    }
+    return out
+  }
 
   // Fetch everything we need in parallel. All tables scoped to church.
   const [
@@ -168,8 +208,14 @@ export async function GET() {
     { data: teams },
     { data: groupMemberships },
     { data: teamMemberships },
-    { count: peopleTotal },
+    peopleLite,
     { data: peopleAnalytics },
+    { data: registrationAttendees },
+    { data: prayerSubmissions },
+    { data: recentCheckins },
+    { data: treeLayers },
+    { data: allPlacements },
+    { data: treeConnections },
   ] = await Promise.all([
     supabase.from('group_types').select('id, name, is_tracked').eq('church_id', churchId).eq('is_tracked', true),
     supabase.from('service_types').select('id, name, is_tracked').eq('church_id', churchId).eq('is_tracked', true),
@@ -177,8 +223,32 @@ export async function GET() {
     supabase.from('teams').select('id, service_type_id').eq('church_id', churchId),
     supabase.from('group_memberships').select('person_id, group_id, role, joined_at, left_at, is_active').eq('church_id', churchId),
     supabase.from('team_memberships').select('person_id, team_id, role, joined_at, left_at, is_active').eq('church_id', churchId),
-    supabase.from('people').select('id', { count: 'exact', head: true }).eq('church_id', churchId).eq('status', 'active'),
+    fetchAllPeopleLite(),
     supabase.from('person_analytics').select('person_id, engagement_score, total_contexts, group_attendance_rate, last_attended_at').eq('church_id', churchId),
+    // Active signals — all time-windowed to the last 12 months so
+    // long-dormant touches don't keep someone "Active" forever.
+    supabase.from('pco_signup_attendees')
+      .select('person_id, registered_at, active, waitlisted, canceled')
+      .eq('church_id', churchId)
+      .gte('registered_at', twelveMoAgoIso),
+    supabase.from('pco_form_submissions')
+      .select('person_id, submitted_at')
+      .eq('church_id', churchId)
+      .eq('form_pco_id', '144568')
+      .gte('submitted_at', twelveMoAgoIso),
+    supabase.from('attendance_records')
+      .select('person_id, checked_in_at')
+      .eq('church_id', churchId)
+      .gte('checked_in_at', twelveMoAgoIso),
+    supabase.from('tree_layers')
+      .select('id, category')
+      .eq('church_id', churchId),
+    supabase.from('shepherding_connections')
+      .select('person_id, layer_id')
+      .eq('church_id', churchId),
+    supabase.from('tree_connections')
+      .select('parent_person_id, child_person_id')
+      .eq('church_id', churchId),
   ])
 
   const groupTypeMap = new Map<string, string>()
@@ -190,12 +260,74 @@ export async function GET() {
     if (t.service_type_id) teamTypeMap.set(t.id, t.service_type_id)
   }
 
+  // Build staff-by-type maps. For each group_type (and team_type),
+  // find the set of staff-layer people who shepherd any active
+  // member of that type via tree_connections. This captures both
+  // auto-connect edges and shepherd-over rule-generated edges —
+  // both land in tree_connections regardless of origin.
+  const staffLayerIds = new Set<string>(
+    ((treeLayers || []) as { id: string; category: string }[])
+      .filter(l => l.category === 'staff')
+      .map(l => l.id),
+  )
+  const staffPersonIds = new Set<string>()
+  for (const p of (allPlacements || []) as { person_id: string; layer_id: string }[]) {
+    if (staffLayerIds.has(p.layer_id)) staffPersonIds.add(p.person_id)
+  }
+  // childPersonId → set of parent_person_ids
+  const parentsByChild = new Map<string, Set<string>>()
+  for (const c of (treeConnections || []) as { parent_person_id: string; child_person_id: string }[]) {
+    if (!parentsByChild.has(c.child_person_id)) parentsByChild.set(c.child_person_id, new Set())
+    parentsByChild.get(c.child_person_id)!.add(c.parent_person_id)
+  }
+  // Active member person_ids grouped by group_type / service_type.
+  const memberPersonIdsByGroupType = new Map<string, Set<string>>()
+  for (const m of (groupMemberships || []) as Membership[] & { group_id?: string }[]) {
+    if (!m.is_active) continue
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gid = (m as any).group_id as string | undefined
+    if (!gid) continue
+    const tid = groupTypeMap.get(gid)
+    if (!tid) continue
+    if (!memberPersonIdsByGroupType.has(tid)) memberPersonIdsByGroupType.set(tid, new Set())
+    memberPersonIdsByGroupType.get(tid)!.add(m.person_id)
+  }
+  const memberPersonIdsByTeamType = new Map<string, Set<string>>()
+  for (const m of (teamMemberships || []) as Membership[] & { team_id?: string }[]) {
+    if (!m.is_active) continue
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tidRaw = (m as any).team_id as string | undefined
+    if (!tidRaw) continue
+    const stid = teamTypeMap.get(tidRaw)
+    if (!stid) continue
+    if (!memberPersonIdsByTeamType.has(stid)) memberPersonIdsByTeamType.set(stid, new Set())
+    memberPersonIdsByTeamType.get(stid)!.add(m.person_id)
+  }
+  const buildStaffByType = (memberSetByType: Map<string, Set<string>>): Map<string, Set<string>> => {
+    const out = new Map<string, Set<string>>()
+    for (const [typeId, memberSet] of memberSetByType) {
+      const staff = new Set<string>()
+      for (const memberId of memberSet) {
+        const parents = parentsByChild.get(memberId)
+        if (!parents) continue
+        for (const pid of parents) {
+          if (staffPersonIds.has(pid)) staff.add(pid)
+        }
+      }
+      out.set(typeId, staff)
+    }
+    return out
+  }
+  const staffByGroupType = buildStaffByType(memberPersonIdsByGroupType)
+  const staffByTeamType = buildStaffByType(memberPersonIdsByTeamType)
+
   const groupStats = aggregateByType(
     (groupMemberships || []) as Membership[],
     groupTypeMap,
     'group_id',
     (groupTypes || []) as TypeRow[],
     now,
+    staffByGroupType,
   )
   const teamStats = aggregateByType(
     (teamMemberships || []) as Membership[],
@@ -203,28 +335,69 @@ export async function GET() {
     'team_id',
     (serviceTypes || []) as TypeRow[],
     now,
+    staffByTeamType,
   )
 
   // Categories of People.
-  // Shepherded = anyone with an active group OR team membership.
-  const shepherdedIds = new Set<string>()
-  for (const m of groupMemberships || []) if (m.is_active) shepherdedIds.add(m.person_id)
-  for (const m of teamMemberships || []) if (m.is_active) shepherdedIds.add(m.person_id)
+  // Walk every active person exactly once and bucket them:
+  //   • Excluded (SYSTEM / Former Member → treated as inactive)
+  //   • Shepherded — in any group/team OR an Outreach Partner
+  //   • Active    — non-shepherded but had a real touchpoint in the
+  //                 last 12 months (registration, prayer form,
+  //                 check-in) OR carries a "limited engagement"
+  //                 membership type
+  //   • Present   — everyone else with an active PCO record
+  const shepherdedFromMemberships = new Set<string>()
+  for (const m of groupMemberships || []) if (m.is_active) shepherdedFromMemberships.add(m.person_id)
+  for (const m of teamMemberships || []) if (m.is_active) shepherdedFromMemberships.add(m.person_id)
 
-  // Active (non-shepherded) = has engagement signal in person_analytics.
-  // engagement_score > 0 or last_attended_at within 12 months serves as
-  // the current proxy — richer signals (events registered, donations,
-  // emails opened) live outside this DB and would require their own
-  // tables to include.
-  const twelveMoAgoMs = now.getTime() - 365 * 86400000
-  const activeIds = new Set<string>()
-  for (const a of peopleAnalytics || []) {
-    if (shepherdedIds.has(a.person_id)) continue
-    const hasScore = (a.engagement_score ?? 0) > 0
-    const recentAttend = a.last_attended_at && new Date(a.last_attended_at).getTime() >= twelveMoAgoMs
-    if (hasScore || recentAttend) activeIds.add(a.person_id)
+  const recentRegistration = new Set<string>()
+  for (const r of (registrationAttendees || []) as { person_id: string | null; active?: boolean; waitlisted?: boolean; canceled?: boolean }[]) {
+    if (!r.person_id) continue
+    if (r.canceled) continue // canceled attendees aren't a live signal
+    if (r.active || r.waitlisted) recentRegistration.add(r.person_id)
   }
-  const presentCount = Math.max(0, (peopleTotal ?? 0) - shepherdedIds.size - activeIds.size)
+  const recentPrayer = new Set<string>()
+  for (const r of (prayerSubmissions || []) as { person_id: string | null }[]) {
+    if (r.person_id) recentPrayer.add(r.person_id)
+  }
+  // Placeholder for "checked in a kid": PCO's check-ins API exposes
+  // `checked_in_by` on each record but our sync doesn't capture it
+  // yet, so we proxy with any recent attendance record. Improve this
+  // once we capture checked_in_by (followup).
+  const recentCheckin = new Set<string>()
+  for (const r of (recentCheckins || []) as { person_id: string | null }[]) {
+    if (r.person_id) recentCheckin.add(r.person_id)
+  }
+
+  let excludedCount = 0
+  const shepherdedIds = new Set<string>()
+  const activeIds = new Set<string>()
+  let presentCount = 0
+  for (const p of peopleLite) {
+    const mt = p.membership_type || ''
+    if (EXCLUDED_MTYPES.has(mt)) { excludedCount++; continue }
+
+    const inShepherdingCtx = shepherdedFromMemberships.has(p.id)
+    const isOutreachPartner = SHEPHERDED_MTYPES.has(mt)
+    if (inShepherdingCtx || isOutreachPartner) {
+      shepherdedIds.add(p.id)
+      continue
+    }
+
+    const hasActiveSignal =
+      recentRegistration.has(p.id) ||
+      recentPrayer.has(p.id) ||
+      recentCheckin.has(p.id) ||
+      ACTIVE_MTYPES.has(mt)
+    if (hasActiveSignal) {
+      activeIds.add(p.id)
+      continue
+    }
+
+    presentCount++
+  }
+  const peopleTotal = shepherdedIds.size + activeIds.size + presentCount
 
   // Per-person averages from analytics.
   let sumContexts = 0, cContexts = 0
@@ -234,10 +407,17 @@ export async function GET() {
     if (a.group_attendance_rate != null) { sumAttendRate += a.group_attendance_rate; cAttendRate++ }
   }
 
-  // Totals across all contexts.
+  // Totals across all contexts. Staff is deduped across types — a
+  // staff person overseeing multiple group_types counts once.
+  const allStaffForGroups = new Set<string>()
+  for (const set of staffByGroupType.values()) for (const pid of set) allStaffForGroups.add(pid)
+  const allStaffForTeams = new Set<string>()
+  for (const set of staffByTeamType.values()) for (const pid of set) allStaffForTeams.add(pid)
+
   const totals = {
     groups: {
       contexts: groupStats.reduce((s, g) => s + g.contexts, 0),
+      staff: allStaffForGroups.size,
       members: groupStats.reduce((s, g) => s + g.members, 0),
       leaders: groupStats.reduce((s, g) => s + g.leaders, 0),
       joinedRecent: groupStats.reduce((s, g) => s + g.joinedRecent, 0),
@@ -245,6 +425,7 @@ export async function GET() {
     },
     teams: {
       contexts: teamStats.reduce((s, t) => s + t.contexts, 0),
+      staff: allStaffForTeams.size,
       members: teamStats.reduce((s, t) => s + t.members, 0),
       leaders: teamStats.reduce((s, t) => s + t.leaders, 0),
       joinedRecent: teamStats.reduce((s, t) => s + t.joinedRecent, 0),
@@ -257,10 +438,11 @@ export async function GET() {
     snapshotPoints: SNAPSHOT_POINTS,
     generatedAt: now.toISOString(),
     categories: {
-      total: peopleTotal ?? 0,
+      total: peopleTotal,
       shepherded: shepherdedIds.size,
       active: activeIds.size,
       present: presentCount,
+      excluded: excludedCount,
     },
     groupsByType: groupStats,
     teamsByType: teamStats,
@@ -282,6 +464,10 @@ export async function GET() {
       groupMembershipRows: (groupMemberships || []).length,
       teamMembershipRows: (teamMemberships || []).length,
       analyticsRows: (peopleAnalytics || []).length,
+      peopleRows: peopleLite.length,
+      registrationSignalRows: (registrationAttendees || []).length,
+      prayerSignalRows: (prayerSubmissions || []).length,
+      checkinSignalRows: (recentCheckins || []).length,
     },
   })
 }
