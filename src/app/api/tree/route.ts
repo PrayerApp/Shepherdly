@@ -985,6 +985,7 @@ export async function GET() {
     connections: (treeConnections || []).map((c: { id: string; parent_person_id: string; parent_layer_id: string; child_person_id: string; child_layer_id: string; context_group_id: string | null; context_team_id: string | null }) => ({
       id: c.id,
       parentPersonId: c.parent_person_id,
+      parentPersonName: personMap.get(c.parent_person_id)?.name || 'Unknown',
       parentLayerId: c.parent_layer_id,
       childPersonId: c.child_person_id,
       childLayerId: c.child_layer_id,

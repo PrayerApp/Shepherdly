@@ -84,6 +84,7 @@ interface LayerInclusion {
 interface TreeConnection {
   id: string
   parentPersonId: string
+  parentPersonName?: string
   parentLayerId: string
   childPersonId: string
   childLayerId: string
@@ -590,27 +591,37 @@ export default function ShepherdTreeV2() {
       })
     }
 
-    // 4) Connection-derived: people who are the child target of a
-    //    tree_connection pointing to this layer. Only add a CONTEXT_PRIMARY
-    //    card when the person doesn't already have ANY card on this layer
-    //    from sources 1-3 (prevents duplicates when a mapping already
-    //    placed them here with a context-specific key).
+    // 4) Connection-derived: people who participate in a tree_connection
+    //    anchored on this layer (as child OR parent). Only add a
+    //    CONTEXT_PRIMARY card when the person doesn't already have ANY
+    //    card on this layer from sources 1-3 — prevents duplicates when
+    //    a mapping already placed them with a context-specific key.
+    //
+    //    The parent pass is load-bearing for shepherd-over rules: a rule
+    //    saying "Dan shepherds everyone in group type X" creates many
+    //    connections with parent_person_id=Dan on Dan's layer, but Dan
+    //    himself might not be in any PCO list, mapping, or inclusion for
+    //    that layer. Without this pass, his connections point to ghost
+    //    cards and he doesn't render at all.
     const personIdsOnLayer = new Set([...byKey.values()].map(c => c.personId))
     const connSeen = new Set<string>()
-    for (const c of connections) {
-      if (c.childLayerId !== layerId) continue
-      if (personIdsOnLayer.has(c.childPersonId)) continue
-      if (connSeen.has(c.childPersonId)) continue
-      connSeen.add(c.childPersonId)
-      const dedupKey = cardKeyFor(c.childPersonId, layerId, CONTEXT_PRIMARY)
-      if (byKey.has(dedupKey)) continue
+    const addFromConn = (personId: string, name: string | undefined) => {
+      if (personIdsOnLayer.has(personId)) return
+      if (connSeen.has(personId)) return
+      connSeen.add(personId)
+      const dedupKey = cardKeyFor(personId, layerId, CONTEXT_PRIMARY)
+      if (byKey.has(dedupKey)) return
       byKey.set(dedupKey, {
         key: dedupKey,
-        personId: c.childPersonId,
-        name: c.childPersonName || 'Unknown',
-        isExcluded: excluded.has(c.childPersonId),
+        personId,
+        name: name || 'Unknown',
+        isExcluded: excluded.has(personId),
         contextKey: CONTEXT_PRIMARY,
       })
+    }
+    for (const c of connections) {
+      if (c.childLayerId === layerId) addFromConn(c.childPersonId, c.childPersonName)
+      if (c.parentLayerId === layerId) addFromConn(c.parentPersonId, c.parentPersonName)
     }
 
     return [...byKey.values()]
@@ -1005,10 +1016,12 @@ export default function ShepherdTreeV2() {
     }
 
     // ── Co-leader clustering ──────────────────────────────────
-    // When two leaders co-lead the same group/team (share at least one
-    // child card), they should be rendered adjacent to each other —
-    // alphabetical order is ignored inside the cluster. Use union-find
-    // keyed on card keys. If two parents share a child, they're unioned.
+    // Two leaders co-lead the same group/team when they both have
+    // connections to the same child WITH THE SAME context (group or
+    // team id). Connections with no context (e.g. shepherd-over rules)
+    // do NOT establish co-leadership — a rule placing many people
+    // under one shepherd shouldn't merge that shepherd with every
+    // other shepherd who happens to share any of those people.
     const parent = new Map<string, string>()
     const find = (x: string): string => {
       if (!parent.has(x)) parent.set(x, x)
@@ -1023,8 +1036,24 @@ export default function ShepherdTreeV2() {
       const ra = find(a), rb = find(b)
       if (ra !== rb) parent.set(ra, rb)
     }
-    for (const [, ps] of parentsMap) {
-      for (let i = 1; i < ps.length; i++) union(ps[0], ps[i])
+    const parentsByChildContext = new Map<string, Set<string>>()
+    for (const c of connections) {
+      const ctx = c.contextGroupId
+        ? `g-${c.contextGroupId}`
+        : c.contextTeamId
+          ? `t-${c.contextTeamId}`
+          : null
+      if (!ctx) continue
+      const pk = resolveParentCardKey(c)
+      const ck = resolveChildCardKey(c)
+      const key = `${ck}::${ctx}`
+      if (!parentsByChildContext.has(key)) parentsByChildContext.set(key, new Set())
+      parentsByChildContext.get(key)!.add(pk)
+    }
+    for (const parents of parentsByChildContext.values()) {
+      if (parents.size < 2) continue
+      const arr = [...parents]
+      for (let i = 1; i < arr.length; i++) union(arr[0], arr[i])
     }
 
     // The cluster "anchor" is the alphabetically-first member of each
@@ -1090,10 +1119,17 @@ export default function ShepherdTreeV2() {
     const xUnit = new Map<string, number>()
     const visited = new Set<string>()
     let cursor = 0
-    // Tracks how many co-leaders of a cluster we've already placed. The
-    // n-th co-leader lands at center + n so they line up adjacent to the
-    // cluster's shared children.
-    const clusterPlacedCount = new Map<string, number>()
+
+    // Count of cluster peers (excluding k itself) that already have a
+    // position. Used as the offset so the n-th co-leader lands adjacent
+    // to the first — regardless of which layout path placed the first.
+    const placedPeersOf = (k: string): number => {
+      const mems = coLeaderClusters.get(find(k))
+      if (!mems || mems.length < 2) return 0
+      let n = 0
+      for (const m of mems) if (m !== k && xUnit.has(m)) n++
+      return n
+    }
 
     const layoutNode = (k: string): number => {
       if (xUnit.has(k)) return xUnit.get(k)!
@@ -1101,6 +1137,26 @@ export default function ShepherdTreeV2() {
       visited.add(k)
       const visKids = visibleChildrenMap.get(k) || []
       const newKids = visKids.filter(ck => !visited.has(ck))
+
+      // If a cluster peer was already placed, snap adjacent to it —
+      // even if we have our own children to lay out. Keeping co-leaders
+      // visually adjacent takes priority over centering over our own
+      // subtree; otherwise two peers with different child sets end up
+      // far apart with unrelated cards between them.
+      const clusterMems = coLeaderClusters.get(find(k))
+      if (clusterMems && clusterMems.length > 1) {
+        const placedPeer = clusterMems.find(m => m !== k && xUnit.has(m))
+        if (placedPeer) {
+          // Still lay out any unvisited children so they get positioned,
+          // but don't use them to decide our own x — use the peer.
+          for (const ck of newKids) layoutNode(ck)
+          const baseX = xUnit.get(placedPeer)!
+          const x = baseX + placedPeersOf(k)
+          xUnit.set(k, x)
+          if (x + 1 > cursor) cursor = Math.ceil(x + 1)
+          return x
+        }
+      }
 
       if (newKids.length > 0) {
         // Normal subtree: lay out the unvisited children and centre
@@ -1111,8 +1167,9 @@ export default function ShepherdTreeV2() {
         return x
       }
 
-      // No new children to lay out. Check if we're a co-leader whose
-      // siblings' children were already positioned (visible or hidden).
+      // No new children to lay out. Check if our siblings' children
+      // were already positioned (visible or hidden) so we can centre
+      // over them.
       const allKids = childrenMap.get(k) || []
       if (allKids.length > 0) {
         const knownXs = allKids
@@ -1120,40 +1177,17 @@ export default function ShepherdTreeV2() {
           .filter((x): x is number => x !== undefined)
         if (knownXs.length > 0) {
           const center = (Math.min(...knownXs) + Math.max(...knownXs)) / 2
-          const anchorK = clusterAnchorOf(k)
-          const alreadyPlaced = (clusterPlacedCount.get(anchorK) || 0)
-          clusterPlacedCount.set(anchorK, alreadyPlaced + 1)
-          const x = center + alreadyPlaced
+          const x = center + placedPeersOf(k)
           xUnit.set(k, x)
           if (x + 1 > cursor) cursor = Math.ceil(x + 1)
           return x
         }
       }
 
-      // Check if ANY member of our co-leader cluster was already
-      // placed — not just the anchor. When co-leaders have different
-      // parents, a non-anchor member may be laid out first.
-      const anchor = clusterAnchorOf(k)
-      const clusterRoot = find(k)
-      const clusterMems = coLeaderClusters.get(clusterRoot)
-      if (clusterMems && clusterMems.length > 1) {
-        const placedPeer = clusterMems.find(m => m !== k && xUnit.has(m))
-        if (placedPeer) {
-          const baseX = xUnit.get(placedPeer)!
-          const alreadyPlaced = clusterMems.filter(m => xUnit.has(m)).length
-          const x = baseX + alreadyPlaced
-          xUnit.set(k, x)
-          if (x + 1 > cursor) cursor = Math.ceil(x + 1)
-          return x
-        }
-      }
-
-      // True leaf or first co-leader placed. Record for cluster siblings.
+      // True leaf or first cluster member placed. Reserve cursor space
+      // for the other cluster members so later cards don't overlap.
       const x = cursor
-      // If we're the first in a co-leader cluster, reserve space for
-      // the other members so subsequent cards don't overlap the box.
-      const clusterMembers = coLeaderClusters.get(find(k))
-      const clusterSize = clusterMembers ? clusterMembers.length : 1
+      const clusterSize = clusterMems ? clusterMems.length : 1
       cursor += clusterSize
       xUnit.set(k, x)
       return x
