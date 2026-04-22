@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { LineChart, Line, ResponsiveContainer, Tooltip } from 'recharts'
 
 interface TypeStat {
   typeId: string
   typeName: string
   contexts: number
+  staff: number
   members: number
   leaders: number
   joinedRecent: number
@@ -17,19 +18,44 @@ interface TypeStat {
   avgTenureExitedDays: number | null
 }
 
+interface Totals {
+  contexts: number
+  staff: number
+  members: number
+  leaders: number
+  joinedRecent: number
+  exitedRecent: number
+}
+
 interface StatsPayload {
   measurementDays: number
   snapshotPoints: number
   generatedAt: string
-  categories: { total: number; shepherded: number; active: number; present: number }
+  categories: { total: number; shepherded: number; active: number; present: number; excluded: number }
   groupsByType: TypeStat[]
   teamsByType: TypeStat[]
-  totals: {
-    groups: { contexts: number; members: number; leaders: number; joinedRecent: number; exitedRecent: number }
-    teams: { contexts: number; members: number; leaders: number; joinedRecent: number; exitedRecent: number }
-  }
+  totals: { groups: Totals; teams: Totals }
   ratios: { groupLeaderToMember: number | null; teamLeaderToMember: number | null }
   perPerson: { avgContexts: number | null; avgGroupAttendanceRate: number | null }
+}
+
+const STORAGE_KEY = 'shepherdly.stats.excluded.v1'
+
+type ExcludedConfig = { groupTypes: string[]; teamTypes: string[] }
+
+function loadExcluded(): ExcludedConfig {
+  if (typeof window === 'undefined') return { groupTypes: [], teamTypes: [] }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return { groupTypes: [], teamTypes: [] }
+    const parsed = JSON.parse(raw)
+    return {
+      groupTypes: Array.isArray(parsed?.groupTypes) ? parsed.groupTypes : [],
+      teamTypes: Array.isArray(parsed?.teamTypes) ? parsed.teamTypes : [],
+    }
+  } catch {
+    return { groupTypes: [], teamTypes: [] }
+  }
 }
 
 function fmtNum(n: number | null | undefined): string {
@@ -52,7 +78,6 @@ function deltaColor(n: number): string {
 }
 
 function Sparkline({ series }: { series: TypeStat['series'] }) {
-  // Reverse so oldest → newest left-to-right.
   const data = [...series].reverse().map((s, i) => ({ i, total: s.members + s.leaders }))
   return (
     <div style={{ width: 100, height: 30 }}>
@@ -87,12 +112,100 @@ function CategoryCard({ label, value, total, color }: { label: string; value: nu
   )
 }
 
-function TypeTable({ title, rows, totals, showTenure }: {
+function KeyMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border p-4" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
+      <div className="text-xs font-medium sans uppercase tracking-wider" style={{ color: 'var(--foreground-muted)' }}>{label}</div>
+      <div className="mt-1.5 text-2xl font-serif" style={{ color: 'var(--foreground)' }}>{value}</div>
+    </div>
+  )
+}
+
+type SortDir = 'asc' | 'desc'
+type SortKey =
+  | 'typeName' | 'contexts' | 'staff' | 'leaders' | 'members' | 'ratio'
+  | 'joinedRecent' | 'exitedRecent' | 'delta' | 'tenureActive' | 'tenureExited'
+
+type ColumnDef = {
+  key: SortKey
+  label: string
+  align: 'left' | 'right'
+  numeric: boolean
+  accessor: (r: TypeStat) => number | string | null
+  // Color for numeric display, optional.
+  format?: (r: TypeStat) => React.ReactNode
+}
+
+function formatRatio(r: TypeStat): string {
+  if (r.members <= 0) return '—'
+  const ratio = r.leaders / r.members
+  if (ratio <= 0) return '—'
+  return `1 : ${Math.round(1 / ratio)}`
+}
+
+function ratioNumeric(r: TypeStat): number {
+  if (r.members <= 0) return 0
+  const ratio = r.leaders / r.members
+  if (ratio <= 0) return 0
+  // Sort by "people per leader" so fewer-people-per-leader sorts higher.
+  return Math.round(1 / ratio)
+}
+
+const COLUMNS: ColumnDef[] = [
+  { key: 'typeName', label: 'Type', align: 'left', numeric: false, accessor: r => r.typeName },
+  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, accessor: r => r.contexts },
+  { key: 'staff', label: 'Staff', align: 'right', numeric: true, accessor: r => r.staff },
+  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, accessor: r => r.leaders },
+  { key: 'members', label: 'Members', align: 'right', numeric: true, accessor: r => r.members },
+  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, accessor: ratioNumeric, format: r => formatRatio(r) },
+  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, accessor: r => r.joinedRecent },
+  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, accessor: r => r.exitedRecent },
+  { key: 'delta', label: 'Δ', align: 'right', numeric: true, accessor: r => r.delta },
+  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, accessor: r => r.avgTenureActiveDays ?? -1 },
+  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, accessor: r => r.avgTenureExitedDays ?? -1 },
+]
+
+function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
   title: string
   rows: TypeStat[]
-  totals: StatsPayload['totals']['groups']
-  showTenure: boolean
+  excluded: Set<string>
+  onToggleExclude: (typeId: string) => void
+  sort: { key: SortKey; dir: SortDir }
+  onSort: (key: SortKey) => void
 }) {
+  const visibleRows = useMemo(() => rows.filter(r => !excluded.has(r.typeId)), [rows, excluded])
+
+  const sortedRows = useMemo(() => {
+    const col = COLUMNS.find(c => c.key === sort.key)
+    if (!col) return visibleRows
+    const sorted = [...visibleRows].sort((a, b) => {
+      const av = col.accessor(a)
+      const bv = col.accessor(b)
+      if (typeof av === 'string' || typeof bv === 'string') {
+        return String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' })
+      }
+      return (av as number) - (bv as number)
+    })
+    return sort.dir === 'desc' ? sorted.reverse() : sorted
+  }, [visibleRows, sort])
+
+  // Totals recomputed from visible-only rows so the footer matches what's
+  // on screen. Staff is summed naively here; it may overcount a staff
+  // person who shepherds multiple visible types. The dedup happens
+  // server-side for the top-line Totals object — this footer is a
+  // within-table summary.
+  const totals: Totals = useMemo(() => visibleRows.reduce((acc, r) => ({
+    contexts: acc.contexts + r.contexts,
+    staff: acc.staff + r.staff,
+    members: acc.members + r.members,
+    leaders: acc.leaders + r.leaders,
+    joinedRecent: acc.joinedRecent + r.joinedRecent,
+    exitedRecent: acc.exitedRecent + r.exitedRecent,
+  }), { contexts: 0, staff: 0, members: 0, leaders: 0, joinedRecent: 0, exitedRecent: 0 }), [visibleRows])
+  const totalDelta = totals.joinedRecent - totals.exitedRecent
+
+  const allExcluded = rows.length > 0 && rows.every(r => excluded.has(r.typeId))
+
   return (
     <section className="mb-10">
       <h2 className="text-lg font-serif mb-3" style={{ color: 'var(--foreground)' }}>{title}</h2>
@@ -100,76 +213,172 @@ function TypeTable({ title, rows, totals, showTenure }: {
         <table className="w-full text-sm sans">
           <thead>
             <tr style={{ background: 'var(--muted)' }}>
-              <th className="text-left px-4 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Type</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Contexts</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Members</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Leaders</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Ratio</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Joined 3mo</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Exited 3mo</th>
-              <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Δ</th>
-              {showTenure && (
-                <>
-                  <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Avg tenure (active)</th>
-                  <th className="text-right px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Avg tenure (exited)</th>
-                </>
-              )}
+              <th className="w-6 px-2 py-2.5"></th>
+              {COLUMNS.map(c => (
+                <th key={c.key}
+                  className={`px-3 py-2.5 font-medium select-none cursor-pointer hover:opacity-80 ${c.align === 'right' ? 'text-right' : 'text-left'}`}
+                  style={{ color: 'var(--foreground-muted)' }}
+                  onClick={() => onSort(c.key)}
+                  title="Click to sort">
+                  {c.label}
+                  {sort.key === c.key && (
+                    <span className="ml-1 text-[10px]">{sort.dir === 'asc' ? '▲' : '▼'}</span>
+                  )}
+                </th>
+              ))}
               <th className="text-left px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Trend</th>
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 ? (
+            {allExcluded ? (
               <tr>
-                <td colSpan={showTenure ? 11 : 9} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={COLUMNS.length + 2} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                  All types excluded. Open settings to include some.
+                </td>
+              </tr>
+            ) : sortedRows.length === 0 ? (
+              <tr>
+                <td colSpan={COLUMNS.length + 2} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   No tracked types yet.
                 </td>
               </tr>
-            ) : rows.map(r => {
-              const ratio = r.members > 0 ? (r.leaders / r.members) : null
-              return (
-                <tr key={r.typeId} className="border-t" style={{ borderColor: 'var(--border)' }}>
-                  <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.leaders)}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>
-                    {ratio != null ? `1 : ${Math.round(1 / ratio)}` : '—'}
-                  </td>
-                  <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(r.joinedRecent)}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(r.exitedRecent)}</td>
-                  <td className="text-right px-3 py-2.5" style={{ color: deltaColor(r.delta) }}>
-                    {r.delta > 0 ? `+${r.delta}` : r.delta}
-                  </td>
-                  {showTenure && (
-                    <>
-                      <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(r.avgTenureActiveDays)}</td>
-                      <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{fmtDays(r.avgTenureExitedDays)}</td>
-                    </>
-                  )}
-                  <td className="px-3 py-2.5"><Sparkline series={r.series} /></td>
-                </tr>
-              )
-            })}
+            ) : sortedRows.map(r => (
+              <tr key={r.typeId} className="border-t" style={{ borderColor: 'var(--border)' }}>
+                <td className="px-2 py-2.5 text-center">
+                  <input type="checkbox" checked={!excluded.has(r.typeId)}
+                    onChange={() => onToggleExclude(r.typeId)}
+                    title={excluded.has(r.typeId) ? 'Include' : 'Exclude'} />
+                </td>
+                <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.leaders)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{formatRatio(r)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(r.joinedRecent)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(r.exitedRecent)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(r.delta) }}>
+                  {r.delta > 0 ? `+${r.delta}` : r.delta}
+                </td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(r.avgTenureActiveDays)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{fmtDays(r.avgTenureExitedDays)}</td>
+                <td className="px-3 py-2.5"><Sparkline series={r.series} /></td>
+              </tr>
+            ))}
           </tbody>
-          <tfoot>
-            <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
-              <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total</td>
-              <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
-              <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
-              <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
-              <td></td>
-              <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(totals.joinedRecent)}</td>
-              <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(totals.exitedRecent)}</td>
-              <td className="text-right px-3 py-2.5" style={{ color: deltaColor(totals.joinedRecent - totals.exitedRecent) }}>
-                {(() => { const d = totals.joinedRecent - totals.exitedRecent; return d > 0 ? `+${d}` : d })()}
-              </td>
-              {showTenure && (<><td></td><td></td></>)}
-              <td></td>
-            </tr>
-          </tfoot>
+          {sortedRows.length > 0 && (
+            <tfoot>
+              <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
+                <td></td>
+                <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total (visible)</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
+                <td></td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(totals.joinedRecent)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(totals.exitedRecent)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(totalDelta) }}>
+                  {totalDelta > 0 ? `+${totalDelta}` : totalDelta}
+                </td>
+                <td></td>
+                <td></td>
+                <td></td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </section>
+  )
+}
+
+function SettingsModal({ open, onClose, groupTypes, teamTypes, excluded, setExcluded }: {
+  open: boolean
+  onClose: () => void
+  groupTypes: TypeStat[]
+  teamTypes: TypeStat[]
+  excluded: ExcludedConfig
+  setExcluded: (e: ExcludedConfig) => void
+}) {
+  if (!open) return null
+  const toggle = (kind: 'groupTypes' | 'teamTypes', id: string) => {
+    const set = new Set(excluded[kind])
+    if (set.has(id)) set.delete(id); else set.add(id)
+    setExcluded({ ...excluded, [kind]: [...set] })
+  }
+  const setAllForKind = (kind: 'groupTypes' | 'teamTypes', typeIds: string[], exclude: boolean) => {
+    setExcluded({ ...excluded, [kind]: exclude ? typeIds : [] })
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.4)' }} onClick={onClose}>
+      <div className="rounded-xl border shadow-lg max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col"
+        style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
+        onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
+          <h3 className="text-lg font-serif" style={{ color: 'var(--foreground)' }}>Statistics settings</h3>
+          <button onClick={onClose} className="text-sm sans" style={{ color: 'var(--foreground-muted)' }}>Close</button>
+        </div>
+        <div className="overflow-y-auto px-5 py-4 space-y-6">
+          <p className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
+            Unchecked types are hidden from the tables and totals on this page. Settings are saved in your browser only.
+          </p>
+
+          {[
+            { title: 'Group types', kind: 'groupTypes' as const, types: groupTypes },
+            { title: 'Team service types', kind: 'teamTypes' as const, types: teamTypes },
+          ].map(section => {
+            const allIds = section.types.map(t => t.typeId)
+            const excludedSet = new Set(excluded[section.kind])
+            const allExcluded = allIds.length > 0 && allIds.every(id => excludedSet.has(id))
+            return (
+              <div key={section.kind}>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-sm font-medium sans" style={{ color: 'var(--foreground)' }}>{section.title}</h4>
+                  <div className="text-xs sans space-x-2">
+                    <button className="underline" style={{ color: 'var(--primary)' }}
+                      onClick={() => setAllForKind(section.kind, allIds, false)}>Include all</button>
+                    <button className="underline" style={{ color: 'var(--danger)' }}
+                      onClick={() => setAllForKind(section.kind, allIds, true)}>Exclude all</button>
+                  </div>
+                </div>
+                {section.types.length === 0 ? (
+                  <p className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>No types tracked.</p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
+                    {section.types.map(t => (
+                      <label key={t.typeId} className="flex items-center gap-2 text-sm sans py-1 cursor-pointer">
+                        <input type="checkbox"
+                          checked={!excludedSet.has(t.typeId)}
+                          onChange={() => toggle(section.kind, t.typeId)} />
+                        <span style={{ color: 'var(--foreground)' }}>{t.typeName}</span>
+                        <span className="text-xs" style={{ color: 'var(--foreground-muted)' }}>
+                          ({t.contexts} contexts, {t.members + t.leaders} ppl)
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {allExcluded && section.types.length > 0 && (
+                  <p className="text-xs sans mt-2" style={{ color: 'var(--danger)' }}>
+                    All {section.title.toLowerCase()} excluded.
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
   )
 }
 
@@ -177,6 +386,20 @@ export default function StatisticsPage() {
   const [data, setData] = useState<StatsPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [excluded, setExcludedState] = useState<ExcludedConfig>({ groupTypes: [], teamTypes: [] })
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [groupSort, setGroupSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'members', dir: 'desc' })
+  const [teamSort, setTeamSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'members', dir: 'desc' })
+
+  // Load persisted excluded types once.
+  useEffect(() => { setExcludedState(loadExcluded()) }, [])
+
+  const setExcluded = (next: ExcludedConfig) => {
+    setExcludedState(next)
+    if (typeof window !== 'undefined') {
+      try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next)) } catch { /* ignore quota */ }
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -187,17 +410,36 @@ export default function StatisticsPage() {
     return () => { cancelled = true }
   }, [])
 
+  const toggleSort = (setter: typeof setGroupSort) => (key: SortKey) => {
+    setter(cur => cur.key === key
+      ? { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: key === 'typeName' ? 'asc' : 'desc' })
+  }
+
+  const excludedGroupSet = useMemo(() => new Set(excluded.groupTypes), [excluded.groupTypes])
+  const excludedTeamSet = useMemo(() => new Set(excluded.teamTypes), [excluded.teamTypes])
+
   if (loading) return <div className="p-8 sans text-sm" style={{ color: 'var(--foreground-muted)' }}>Loading statistics…</div>
   if (error) return <div className="p-8 sans text-sm" style={{ color: '#8a3a3a' }}>Failed to load: {error}</div>
   if (!data) return null
 
   return (
     <div className="p-8 max-w-7xl">
-      <div className="mb-8">
-        <h1 className="text-3xl font-serif" style={{ color: 'var(--foreground)' }}>Statistics</h1>
-        <p className="mt-1 sans text-sm" style={{ color: 'var(--foreground-muted)' }}>
-          Measurement threshold: {data.measurementDays} days · Trend shows {data.snapshotPoints} snapshots at {data.measurementDays}-day intervals (oldest left).
-        </p>
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-serif" style={{ color: 'var(--foreground)' }}>Statistics</h1>
+          <p className="mt-1 sans text-sm" style={{ color: 'var(--foreground-muted)' }}>
+            Measurement threshold: {data.measurementDays} days · Trend shows {data.snapshotPoints} snapshots at {data.measurementDays}-day intervals (oldest left).
+          </p>
+        </div>
+        <button
+          onClick={() => setSettingsOpen(true)}
+          className="rounded-lg border px-3 py-2 text-sm sans flex items-center gap-2 hover:opacity-80"
+          style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)', background: 'var(--card)' }}
+          title="Statistics settings">
+          <GearIcon />
+          <span>Settings</span>
+        </button>
       </div>
 
       {/* Categories of People */}
@@ -210,7 +452,10 @@ export default function StatisticsPage() {
           <CategoryCard label="Present" value={data.categories.present} total={data.categories.total} color="var(--foreground-muted)" />
         </div>
         <p className="mt-3 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-          Shepherded: in at least one group or team. Active: not shepherded but has an engagement signal in the last year. Present: every other active PCO record.
+          Shepherded: in a group/team or carrying an Outreach Partner membership type.
+          Active: non-shepherded with a registration, prayer submission, or recent check-in in the last 12 months — plus limited-engagement membership types (Benevolence / Activity / Parent / Online Submission Only).
+          Present: other active PCO records.
+          {data.categories.excluded > 0 ? ` ${data.categories.excluded} excluded (SYSTEM / Former Member, treated as inactive).` : ''}
         </p>
       </section>
 
@@ -224,21 +469,46 @@ export default function StatisticsPage() {
         </div>
       </section>
 
-      <TypeTable title="Groups by type" rows={data.groupsByType} totals={data.totals.groups} showTenure />
-      <TypeTable title="Teams by service type" rows={data.teamsByType} totals={data.totals.teams} showTenure />
+      <TypeTable
+        title="Groups by type"
+        rows={data.groupsByType}
+        excluded={excludedGroupSet}
+        onToggleExclude={(id) => {
+          const next = new Set(excluded.groupTypes)
+          if (next.has(id)) next.delete(id); else next.add(id)
+          setExcluded({ ...excluded, groupTypes: [...next] })
+        }}
+        sort={groupSort}
+        onSort={toggleSort(setGroupSort)}
+      />
+      <TypeTable
+        title="Teams by service type"
+        rows={data.teamsByType}
+        excluded={excludedTeamSet}
+        onToggleExclude={(id) => {
+          const next = new Set(excluded.teamTypes)
+          if (next.has(id)) next.delete(id); else next.add(id)
+          setExcluded({ ...excluded, teamTypes: [...next] })
+        }}
+        sort={teamSort}
+        onSort={toggleSort(setTeamSort)}
+      />
 
       <p className="text-xs sans mt-6" style={{ color: 'var(--foreground-muted)' }}>
         Generated {new Date(data.generatedAt).toLocaleString()}.
+        {(excluded.groupTypes.length + excluded.teamTypes.length) > 0 && (
+          <> · Excluding {excluded.groupTypes.length + excluded.teamTypes.length} type(s) from tables below (categories above still reflect the full dataset — see followup).</>
+        )}
       </p>
-    </div>
-  )
-}
 
-function KeyMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border p-4" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
-      <div className="text-xs font-medium sans uppercase tracking-wider" style={{ color: 'var(--foreground-muted)' }}>{label}</div>
-      <div className="mt-1.5 text-2xl font-serif" style={{ color: 'var(--foreground)' }}>{value}</div>
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        groupTypes={data.groupsByType}
+        teamTypes={data.teamsByType}
+        excluded={excluded}
+        setExcluded={setExcluded}
+      />
     </div>
   )
 }
