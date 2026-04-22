@@ -5,6 +5,7 @@ import {
   getResourceCount, fetchResourcePage,
   getNestedResourceInfo, fetchNestedPage,
   resolvePcoIds, linkForeignKeys,
+  syncConfiguredForms,
 } from '@/lib/pco-sync'
 import { NextRequest, NextResponse } from 'next/server'
 
@@ -166,6 +167,16 @@ export async function GET(request: NextRequest) {
       await regenerateShepherdOverEdges(admin, churchId!)
     } catch (e) {
       console.error('Cron: shepherd-over rules refresh failed:', e)
+    }
+
+    // Post-sync: pull configured PCO form submissions. Separate from
+    // SYNC_RESOURCES because forms are config-driven (pco_form_sync_config)
+    // and their answer extraction is form-specific.
+    try {
+      const formCount = await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+      totalSynced += formCount
+    } catch (e) {
+      console.error('Cron: form submissions sync failed:', e)
     }
 
     // Mark success

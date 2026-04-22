@@ -65,6 +65,8 @@ export const SYNC_CATEGORIES = [
   { key: 'checkins', label: 'Check-ins' },
   { key: 'teams', label: 'Teams' },
   { key: 'lists', label: 'Lists' },
+  { key: 'registrations', label: 'Registrations' },
+  { key: 'forms', label: 'Forms' },
 ] as const
 
 // ── Resource Definitions ────────────────────────────────────
@@ -455,6 +457,69 @@ export const SYNC_RESOURCES: SyncResource[] = [
     ],
   },
 
+  // ── 15. PCO Signups (Registrations "events") ──────────────────
+  // PCO renamed these from "events" to "signups" in Registrations v2.
+  // API supports filter=archived/unarchived but NOT updated_at
+  // filtering (checked via probe) — we do a full fetch each sync.
+  // 880 rows for Faith Church — ~9 pages at 100/page. Cheap.
+  {
+    key: 'pco_signups',
+    label: 'Registration Signups',
+    category: 'registrations',
+    table: 'pco_signups',
+    endpoint: '/registrations/v2/signups',
+    supportsUpdatedSince: false,
+    syncStrategy: 'upsert',
+    onConflict: 'pco_id',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mapRow: (s: any) => ({
+      pco_id: s.id,
+      name: s.attributes.name || null,
+      description: s.attributes.description || null,
+      archived: s.attributes.archived ?? false,
+      open_at: s.attributes.open_at || null,
+      close_at: s.attributes.close_at || null,
+      new_registration_url: s.attributes.new_registration_url || null,
+      pco_created_at: s.attributes.created_at || null,
+      pco_updated_at: s.attributes.updated_at || null,
+    }),
+  },
+
+  // ── 16. PCO Signup Attendees (nested per signup) ──────────────
+  // One row per registered person per signup. Canceled/waitlisted
+  // attendees are kept so we can measure funnel drop-off.
+  {
+    key: 'pco_signup_attendees',
+    label: 'Signup Attendees',
+    category: 'registrations',
+    table: 'pco_signup_attendees',
+    endpoint: '',
+    supportsUpdatedSince: false,
+    syncStrategy: 'upsert',
+    onConflict: 'pco_id',
+    isNested: true,
+    nestedParentTable: 'pco_signups',
+    nestedEndpointTemplate: '/registrations/v2/signups/{parentId}/attendees',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mapRow: (a: any) => ({
+      pco_id: a.id,
+      _pco_signup_id: a.attributes?._parentPcoId || null,
+      _pco_person_id: a.relationships?.person?.data?.id || null,
+      pco_signup_id: a.attributes?._parentPcoId || null,
+      pco_person_id: a.relationships?.person?.data?.id || null,
+      active: a.attributes.active ?? true,
+      canceled: a.attributes.canceled ?? false,
+      waitlisted: a.attributes.waitlisted ?? false,
+      waitlisted_at: a.attributes.waitlisted_at || null,
+      registered_at: a.attributes.created_at || null,
+      pco_updated_at: a.attributes.updated_at || null,
+    }),
+    idMappings: [
+      { field: 'signup_id', pcoField: '_pco_signup_id', table: 'pco_signups' },
+      { field: 'person_id', pcoField: '_pco_person_id', table: 'people' },
+    ],
+  },
+
 ]
 
 // ── Flat Resource Helpers ───────────────────────────────────
@@ -834,6 +899,9 @@ export async function linkForeignKeys(admin: any, churchId: string) {
  *  NOTE: shepherding_relationships is NOT in this list — it's user-curated
  *  (manual assignments + bulk assigns), not PCO-synced data. */
 export const PCO_TABLES = [
+  'pco_form_submissions',
+  'pco_signup_attendees',
+  'pco_signups',
   'pco_list_people',
   'pco_list_layer_links',
   'pco_lists',
@@ -853,3 +921,174 @@ export const PCO_TABLES = [
   'service_types',
   'people',
 ]
+
+// ── Forms sync ──────────────────────────────────────────────
+//
+// Forms are config-driven (pco_form_sync_config), so they don't fit the
+// standard SYNC_RESOURCES shape — each configured form has its own
+// endpoint and its own answer-extraction policy. The helper below is
+// called after the main SYNC_RESOURCES loop finishes.
+//
+// Refresh strategy: for each form, query submissions with
+// where[updated_at][gte] = last_synced_at - 3mo (falls back to "all"
+// on first run). PCO's Forms API supports that filter natively.
+// 3-month buffer catches late edits without refetching everything.
+
+const MS_90_DAYS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * Fetch form fields once and return a Map of field_id → label.
+ * Cached per form; the labels don't change during a sync.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchFormFieldLabels(client: PcoClient, formPcoId: string): Promise<Map<string, string>> {
+  const labels = new Map<string, string>()
+  const first = await client.get(`/people/v2/forms/${formPcoId}/fields`, { per_page: '100' })
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const f of (first.data || []) as any[]) {
+    labels.set(f.id, f.attributes?.label || '')
+  }
+  // Most forms fit in one page; paginate just in case.
+  let offset = 100
+  while (first.meta?.total_count && offset < first.meta.total_count) {
+    const more = await client.get(`/people/v2/forms/${formPcoId}/fields`, { per_page: '100', offset: String(offset) })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const f of (more.data || []) as any[]) {
+      labels.set(f.id, f.attributes?.label || '')
+    }
+    if (!more.data || more.data.length === 0) break
+    offset += 100
+  }
+  return labels
+}
+
+type FormConfigRow = {
+  id: string
+  form_pco_id: string
+  label: string
+  extract_mode: 'none' | 'labels'
+  church_id: string
+  is_active: boolean
+}
+
+/**
+ * Sync every active form configured in pco_form_sync_config for the
+ * given church. Upserts into pco_form_submissions. Returns count of
+ * submissions synced.
+ */
+export async function syncConfiguredForms(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  admin: any,
+  client: PcoClient,
+  churchId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  lastSyncedAt?: string | null,
+): Promise<number> {
+  const { data: configs } = await admin
+    .from('pco_form_sync_config')
+    .select('*')
+    .eq('church_id', churchId)
+    .eq('is_active', true)
+  if (!configs || configs.length === 0) return 0
+
+  // Incremental cutoff: last_synced_at minus 3 months. PCO's Forms API
+  // supports updated_at filtering, so we avoid refetching everything.
+  let since: string | null = null
+  if (lastSyncedAt) {
+    const ts = new Date(lastSyncedAt).getTime() - MS_90_DAYS
+    since = new Date(ts).toISOString()
+  }
+
+  let totalSynced = 0
+  for (const cfg of configs as FormConfigRow[]) {
+    const labels = cfg.extract_mode === 'labels'
+      ? await fetchFormFieldLabels(client, cfg.form_pco_id)
+      : null
+
+    const params: Record<string, string> = { per_page: '100' }
+    if (cfg.extract_mode === 'labels') {
+      params['include'] = 'form_submission_values'
+    }
+    if (since) {
+      params['where[updated_at][gte]'] = since
+    }
+
+    let offset = 0
+    while (true) {
+      const page = await client.get(
+        `/people/v2/forms/${cfg.form_pco_id}/form_submissions`,
+        { ...params, offset: String(offset) },
+      )
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const subs = (page.data || []) as any[]
+      if (subs.length === 0) break
+
+      // Index included FormSubmissionValue rows by submission id for lookup.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const included: any[] = page.included || []
+      const valuesBySubmission = new Map<string, { fieldId: string; displayValue: string }[]>()
+      if (cfg.extract_mode === 'labels') {
+        for (const v of included) {
+          if (v.type !== 'FormSubmissionValue') continue
+          const subId = v.relationships?.form_submission?.data?.id
+          const fieldId = v.relationships?.form_field?.data?.id
+          if (!subId || !fieldId) continue
+          if (!valuesBySubmission.has(subId)) valuesBySubmission.set(subId, [])
+          valuesBySubmission.get(subId)!.push({
+            fieldId,
+            displayValue: v.attributes?.display_value ?? '',
+          })
+        }
+      }
+
+      // Resolve PCO person_id → internal people.id. Batch lookup.
+      const pcoPersonIds = Array.from(new Set(
+        subs.map(s => s.relationships?.person?.data?.id).filter(Boolean),
+      ))
+      const personIdMap = new Map<string, string>()
+      if (pcoPersonIds.length > 0) {
+        const { data: peopleRows } = await admin
+          .from('people')
+          .select('id, pco_id')
+          .eq('church_id', churchId)
+          .in('pco_id', pcoPersonIds)
+        for (const p of peopleRows || []) personIdMap.set(p.pco_id, p.id)
+      }
+
+      const rows = subs.map(s => {
+        const pcoPersonId = s.relationships?.person?.data?.id || null
+        let answers: Record<string, string> | null = null
+        if (cfg.extract_mode === 'labels' && labels) {
+          const vals = valuesBySubmission.get(s.id) || []
+          answers = {}
+          for (const v of vals) {
+            const label = labels.get(v.fieldId) || v.fieldId
+            answers[label] = v.displayValue
+          }
+        }
+        return {
+          pco_id: s.id,
+          form_pco_id: cfg.form_pco_id,
+          form_name: cfg.label,
+          person_id: pcoPersonId ? personIdMap.get(pcoPersonId) || null : null,
+          pco_person_id: pcoPersonId,
+          submitted_at: s.attributes?.created_at || null,
+          verified: s.attributes?.verified ?? false,
+          answers,
+          pco_updated_at: s.attributes?.updated_at || null,
+          church_id: churchId,
+        }
+      })
+
+      if (rows.length > 0) {
+        await admin.from('pco_form_submissions').upsert(rows, { onConflict: 'pco_id' })
+        totalSynced += rows.length
+      }
+
+      if (subs.length < 100) break
+      offset += subs.length
+    }
+  }
+
+  return totalSynced
+}
