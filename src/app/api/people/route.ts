@@ -113,7 +113,7 @@ export async function GET(request: NextRequest) {
 
   const { data: appUser } = await supabase
     .from('users')
-    .select('id, role, name, church_id')
+    .select('id, role, name, church_id, person_id')
     .eq('user_id', user.id)
     .single()
 
@@ -139,31 +139,53 @@ export async function GET(request: NextRequest) {
     .neq('membership_type', 'SYSTEM USE - Do Not Delete')
 
   if (!showAll) {
-    // Find current user's people record
-    const { data: myPerson } = await supabase
-      .from('people')
-      .select('id')
-      .eq('is_leader', true)
-      .eq('church_id', appUser.church_id!)
-      .ilike('name', appUser.name || '')
-      .limit(1)
-      .single()
+    // Resolve the user's person record. `users.person_id` is the
+    // authoritative link (set during invite/onboarding). Fall back to
+    // a case-insensitive name match only if that FK isn't set — name
+    // matching breaks the moment the user changes their display name
+    // (e.g. sets it to "Admin" like our seed data does).
+    let myPersonId: string | null = appUser.person_id || null
+    if (!myPersonId) {
+      const { data: myPerson } = await supabase
+        .from('people')
+        .select('id')
+        .eq('is_leader', true)
+        .eq('church_id', appUser.church_id!)
+        .ilike('name', appUser.name || '')
+        .limit(1)
+        .maybeSingle()
+      myPersonId = myPerson?.id || null
+    }
 
-    if (myPerson) {
-      // Get person IDs this user shepherds
+    if (myPersonId) {
+      // People this user shepherds via direct 1:1 assignments.
       const { data: relationships } = await supabase
         .from('shepherding_relationships')
         .select('person_id')
-        .eq('shepherd_id', myPerson.id)
+        .eq('shepherd_id', myPersonId)
         .eq('is_active', true)
+      const directFlock = new Set((relationships || []).map(r => r.person_id))
 
-      const personIds = relationships?.map(r => r.person_id) || []
+      // People this user shepherds via tree_connections (shepherd-over
+      // rules, auto-connect from group/team mappings, and manual edges).
+      // Without this union, flock members who are only linked through
+      // the tree don't show up here even though the tree clearly says
+      // they're under this person's care.
+      const { data: childConns } = await supabase
+        .from('tree_connections')
+        .select('child_person_id')
+        .eq('church_id', appUser.church_id!)
+        .eq('parent_person_id', myPersonId)
+      for (const c of childConns || []) directFlock.add(c.child_person_id)
+      directFlock.delete(myPersonId)
+
+      const personIds = [...directFlock]
       if (personIds.length === 0) {
-        return NextResponse.json({ people: [], myPersonId: myPerson.id })
+        return NextResponse.json({ people: [], myPersonId, layers: [] })
       }
       query = query.in('id', personIds)
     } else {
-      return NextResponse.json({ people: [], myPersonId: null })
+      return NextResponse.json({ people: [], myPersonId: null, layers: [] })
     }
   }
 
