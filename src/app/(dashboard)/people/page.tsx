@@ -18,10 +18,20 @@ interface PersonRow {
   membership_type: string
   status: string
   is_leader: boolean
+  layerId: string | null
   analytics: PersonAnalytics[] | null
   groups: { group_id: string; role: string; groups: { id: string; name: string } | null }[]
   teams: { team_id: string; role: string; teams: { id: string; name: string } | null }[]
 }
+
+interface LayerLite {
+  id: string
+  name: string
+  rank: number
+  color: string | null
+}
+
+const UNASSIGNED_LAYER_ID = '__unassigned__'
 
 function getAnalytics(person: PersonRow): PersonAnalytics {
   return person.analytics?.[0] || {
@@ -50,6 +60,7 @@ function relativeDate(date: string | null): string {
 
 export default function PeoplePage() {
   const [people, setPeople] = useState<PersonRow[]>([])
+  const [layers, setLayers] = useState<LayerLite[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState('name')
@@ -64,6 +75,7 @@ export default function PeoplePage() {
     const res = await fetch(`/api/people?${params}`)
     const data = await res.json()
     setPeople(data.people || [])
+    setLayers(data.layers || [])
     setLoading(false)
   }, [search, sort, showAll])
 
@@ -103,8 +115,36 @@ export default function PeoplePage() {
           No people found. {!showAll ? 'You may not have anyone assigned to your flock yet.' : 'Sync from PCO to import people.'}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {people.map(person => {
+        (() => {
+          const byLayer = new Map<string, PersonRow[]>()
+          for (const p of people) {
+            const key = p.layerId || UNASSIGNED_LAYER_ID
+            if (!byLayer.has(key)) byLayer.set(key, [])
+            byLayer.get(key)!.push(p)
+          }
+          const orderedLayers = [...layers].sort((a, b) => a.rank - b.rank)
+          const sections: { id: string; name: string; color: string | null; people: PersonRow[] }[] = []
+          for (const l of orderedLayers) {
+            const ps = byLayer.get(l.id)
+            if (ps && ps.length > 0) sections.push({ id: l.id, name: l.name, color: l.color, people: ps })
+          }
+          const unassigned = byLayer.get(UNASSIGNED_LAYER_ID)
+          if (unassigned && unassigned.length > 0) {
+            sections.push({ id: UNASSIGNED_LAYER_ID, name: 'Unassigned', color: null, people: unassigned })
+          }
+          return sections.map(section => (
+            <div key={section.id} className="mb-10">
+              <div className="flex items-baseline gap-3 mb-4 pb-2 border-b"
+                style={{ borderColor: 'var(--border)' }}>
+                <h2 className="text-lg font-serif" style={{ color: section.color || 'var(--foreground)' }}>
+                  {section.name}
+                </h2>
+                <span className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
+                  {section.people.length} {section.people.length === 1 ? 'person' : 'people'}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {section.people.map(person => {
             const a = getAnalytics(person)
             return (
               <div key={person.id}
@@ -190,6 +230,9 @@ export default function PeoplePage() {
             )
           })}
         </div>
+            </div>
+          ))
+        })()
       )}
     </div>
   )
