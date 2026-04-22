@@ -154,9 +154,12 @@ const COLOR_PALETTE = [
 const BAND_HEIGHT_FALLBACK = 120
 const BAND_HEIGHT_MIN = 110
 const TOOLBAR_H = 56 // approximate sticky toolbar height (~48) + small buffer
-const CARD_WIDTH = 210
-const CARD_HEIGHT = 96
-const CARD_GAP = 8
+// Card gap needs to exceed 2 * BOX_PAD (see clusterBoxes below) so that
+// when two adjacent people both belong to co-leader clusters, their
+// bounding boxes don't collide. 20 - 2*6 = 8px breathing room.
+const CARD_WIDTH = 190
+const CARD_HEIGHT = 86
+const CARD_GAP = 20
 const UNIT = CARD_WIDTH + CARD_GAP
 // Reserves a narrow column on the left of each band for the vertical
 // multiline layer label; cards start after this padding.
