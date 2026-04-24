@@ -340,12 +340,16 @@ export async function GET() {
 
   // Categories of People.
   // Walk every active person exactly once and bucket them:
-  //   • Excluded (SYSTEM / Former Member → treated as inactive)
-  //   • Shepherded — in any group/team OR an Outreach Partner
+  //   • Excluded  — SYSTEM / Former Member rows, treated as inactive
+  //   • Shepherded — in any group/team, an Outreach Partner, OR has
+  //                  recent check-in records. The check-in signal is
+  //                  almost entirely children's ministry sign-ins:
+  //                  kids who are being actively cared for in a
+  //                  ministry context count as shepherded even if
+  //                  they don't have a group/team membership yet.
   //   • Active    — non-shepherded but had a real touchpoint in the
-  //                 last 12 months (registration, prayer form,
-  //                 check-in) OR carries a "limited engagement"
-  //                 membership type
+  //                 last 12 months (registration, prayer form) or
+  //                 carries a "limited engagement" membership type
   //   • Present   — everyone else with an active PCO record
   const shepherdedFromMemberships = new Set<string>()
   for (const m of groupMemberships || []) if (m.is_active) shepherdedFromMemberships.add(m.person_id)
@@ -361,10 +365,6 @@ export async function GET() {
   for (const r of (prayerSubmissions || []) as { person_id: string | null }[]) {
     if (r.person_id) recentPrayer.add(r.person_id)
   }
-  // Placeholder for "checked in a kid": PCO's check-ins API exposes
-  // `checked_in_by` on each record but our sync doesn't capture it
-  // yet, so we proxy with any recent attendance record. Improve this
-  // once we capture checked_in_by (followup).
   const recentCheckin = new Set<string>()
   for (const r of (recentCheckins || []) as { person_id: string | null }[]) {
     if (r.person_id) recentCheckin.add(r.person_id)
@@ -380,7 +380,8 @@ export async function GET() {
 
     const inShepherdingCtx = shepherdedFromMemberships.has(p.id)
     const isOutreachPartner = SHEPHERDED_MTYPES.has(mt)
-    if (inShepherdingCtx || isOutreachPartner) {
+    const isCheckedIn = recentCheckin.has(p.id)
+    if (inShepherdingCtx || isOutreachPartner || isCheckedIn) {
       shepherdedIds.add(p.id)
       continue
     }
@@ -388,7 +389,6 @@ export async function GET() {
     const hasActiveSignal =
       recentRegistration.has(p.id) ||
       recentPrayer.has(p.id) ||
-      recentCheckin.has(p.id) ||
       ACTIVE_MTYPES.has(mt)
     if (hasActiveSignal) {
       activeIds.add(p.id)

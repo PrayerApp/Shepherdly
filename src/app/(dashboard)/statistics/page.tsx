@@ -165,11 +165,10 @@ const COLUMNS: ColumnDef[] = [
   { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, accessor: r => r.avgTenureExitedDays ?? -1 },
 ]
 
-function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
+function TypeTable({ title, rows, excluded, sort, onSort }: {
   title: string
   rows: TypeStat[]
   excluded: Set<string>
-  onToggleExclude: (typeId: string) => void
   sort: { key: SortKey; dir: SortDir }
   onSort: (key: SortKey) => void
 }) {
@@ -189,20 +188,35 @@ function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
     return sort.dir === 'desc' ? sorted.reverse() : sorted
   }, [visibleRows, sort])
 
-  // Totals recomputed from visible-only rows so the footer matches what's
-  // on screen. Staff is summed naively here; it may overcount a staff
-  // person who shepherds multiple visible types. The dedup happens
-  // server-side for the top-line Totals object — this footer is a
-  // within-table summary.
-  const totals: Totals = useMemo(() => visibleRows.reduce((acc, r) => ({
-    contexts: acc.contexts + r.contexts,
-    staff: acc.staff + r.staff,
-    members: acc.members + r.members,
-    leaders: acc.leaders + r.leaders,
-    joinedRecent: acc.joinedRecent + r.joinedRecent,
-    exitedRecent: acc.exitedRecent + r.exitedRecent,
-  }), { contexts: 0, staff: 0, members: 0, leaders: 0, joinedRecent: 0, exitedRecent: 0 }), [visibleRows])
-  const totalDelta = totals.joinedRecent - totals.exitedRecent
+  // Totals recomputed from visible-only rows so the footer matches
+  // what's on screen. Staff here is a simple sum across types, so a
+  // staff person who shepherds multiple visible types is counted
+  // once per type — the page-level Totals object is the deduped
+  // figure. Avg-tenure rolls up via a weighted average using
+  // (members + leaders) as the weight, which approximates the true
+  // average tenure across visible memberships without requiring raw
+  // membership rows on the client.
+  const totals = useMemo(() => {
+    let contexts = 0, staff = 0, members = 0, leaders = 0
+    let joined = 0, exited = 0
+    let tenureActiveWeighted = 0, tenureActiveWeight = 0
+    for (const r of visibleRows) {
+      contexts += r.contexts
+      staff += r.staff
+      members += r.members
+      leaders += r.leaders
+      joined += r.joinedRecent
+      exited += r.exitedRecent
+      const w = r.members + r.leaders
+      if (r.avgTenureActiveDays != null && w > 0) {
+        tenureActiveWeighted += r.avgTenureActiveDays * w
+        tenureActiveWeight += w
+      }
+    }
+    const avgTenureActive = tenureActiveWeight > 0 ? Math.round(tenureActiveWeighted / tenureActiveWeight) : null
+    return { contexts, staff, members, leaders, joined, exited, avgTenureActive }
+  }, [visibleRows])
+  const totalDelta = totals.joined - totals.exited
 
   const allExcluded = rows.length > 0 && rows.every(r => excluded.has(r.typeId))
 
@@ -213,7 +227,6 @@ function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
         <table className="w-full text-sm sans">
           <thead>
             <tr style={{ background: 'var(--muted)' }}>
-              <th className="w-6 px-2 py-2.5"></th>
               {COLUMNS.map(c => (
                 <th key={c.key}
                   className={`px-3 py-2.5 font-medium select-none cursor-pointer hover:opacity-80 ${c.align === 'right' ? 'text-right' : 'text-left'}`}
@@ -232,23 +245,18 @@ function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
           <tbody>
             {allExcluded ? (
               <tr>
-                <td colSpan={COLUMNS.length + 2} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   All types excluded. Open settings to include some.
                 </td>
               </tr>
             ) : sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={COLUMNS.length + 2} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   No tracked types yet.
                 </td>
               </tr>
             ) : sortedRows.map(r => (
               <tr key={r.typeId} className="border-t" style={{ borderColor: 'var(--border)' }}>
-                <td className="px-2 py-2.5 text-center">
-                  <input type="checkbox" checked={!excluded.has(r.typeId)}
-                    onChange={() => onToggleExclude(r.typeId)}
-                    title={excluded.has(r.typeId) ? 'Include' : 'Exclude'} />
-                </td>
                 <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
@@ -269,19 +277,18 @@ function TypeTable({ title, rows, excluded, onToggleExclude, sort, onSort }: {
           {sortedRows.length > 0 && (
             <tfoot>
               <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
-                <td></td>
                 <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total (visible)</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
                 <td></td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(totals.joinedRecent)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(totals.exitedRecent)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(totals.joined)}</td>
+                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(totals.exited)}</td>
                 <td className="text-right px-3 py-2.5" style={{ color: deltaColor(totalDelta) }}>
                   {totalDelta > 0 ? `+${totalDelta}` : totalDelta}
                 </td>
-                <td></td>
+                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(totals.avgTenureActive)}</td>
                 <td></td>
                 <td></td>
               </tr>
@@ -452,8 +459,8 @@ export default function StatisticsPage() {
           <CategoryCard label="Present" value={data.categories.present} total={data.categories.total} color="var(--foreground-muted)" />
         </div>
         <p className="mt-3 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-          Shepherded: in a group/team or carrying an Outreach Partner membership type.
-          Active: non-shepherded with a registration, prayer submission, or recent check-in in the last 12 months — plus limited-engagement membership types (Benevolence / Activity / Parent / Online Submission Only).
+          Shepherded: in a group/team, carrying an Outreach Partner membership type, or checked in through a kids/ministry context in the last 12 months.
+          Active: non-shepherded with a registration or prayer submission in the last 12 months, plus limited-engagement membership types (Benevolence / Activity / Parent / Online Submission Only).
           Present: other active PCO records.
           {data.categories.excluded > 0 ? ` ${data.categories.excluded} excluded (SYSTEM / Former Member, treated as inactive).` : ''}
         </p>
@@ -473,11 +480,6 @@ export default function StatisticsPage() {
         title="Groups by type"
         rows={data.groupsByType}
         excluded={excludedGroupSet}
-        onToggleExclude={(id) => {
-          const next = new Set(excluded.groupTypes)
-          if (next.has(id)) next.delete(id); else next.add(id)
-          setExcluded({ ...excluded, groupTypes: [...next] })
-        }}
         sort={groupSort}
         onSort={toggleSort(setGroupSort)}
       />
@@ -485,11 +487,6 @@ export default function StatisticsPage() {
         title="Teams by service type"
         rows={data.teamsByType}
         excluded={excludedTeamSet}
-        onToggleExclude={(id) => {
-          const next = new Set(excluded.teamTypes)
-          if (next.has(id)) next.delete(id); else next.add(id)
-          setExcluded({ ...excluded, teamTypes: [...next] })
-        }}
         sort={teamSort}
         onSort={toggleSort(setTeamSort)}
       />
