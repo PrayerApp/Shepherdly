@@ -74,84 +74,154 @@ export async function GET(request: NextRequest) {
   }
   const syncStartedAt = new Date().toISOString()
 
+  /*
+   * Per-resource log helper. One row per (run × resource) so we can see
+   * timing and silent FK skips at a glance instead of just a single
+   * top-line total. Keep the helper local — every call site is in this
+   * function and inlining the insert calls would double the noise.
+   */
+  const startResourceLog = async (table: string) => {
+    const startedAt = new Date().toISOString()
+    const startTs = Date.now()
+    const { data } = await admin
+      .from('pco_sync_resource_log')
+      .insert({
+        sync_log_id: syncLog!.id,
+        resource_table: table,
+        started_at: startedAt,
+        status: 'running',
+        church_id: churchId,
+      })
+      .select('id')
+      .single()
+    return { id: data?.id as string | undefined, startedAt, startTs }
+  }
+
+  const finishResourceLog = async (
+    logId: string | undefined,
+    startTs: number,
+    stats: { rowsSeen: number; rowsUpserted: number; rowsSkipped: number },
+    error?: string,
+  ) => {
+    if (!logId) return
+    if (stats.rowsSkipped > 0) {
+      console.warn(
+        `Cron: ${stats.rowsSkipped} row(s) dropped during sync due to unresolvable foreign keys (resource log ${logId})`
+      )
+    }
+    await admin
+      .from('pco_sync_resource_log')
+      .update({
+        finished_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTs,
+        rows_seen: stats.rowsSeen,
+        rows_upserted: stats.rowsUpserted,
+        rows_skipped_unresolvable_fk: stats.rowsSkipped,
+        status: error ? 'failed' : 'success',
+        error_message: error ?? null,
+      })
+      .eq('id', logId)
+  }
+
   try {
     for (const resource of SYNC_RESOURCES) {
-      if (resource.isNested) {
-        // ── Nested resources: iterate parents ──────────────────
-        const { cursor } = await getNestedResourceInfo(client, resource, admin, churchId!)
-        if (cursor.parents.length === 0) continue
+      const log = await startResourceLog(resource.table)
+      const stats = { rowsSeen: 0, rowsUpserted: 0, rowsSkipped: 0 }
+      try {
+        if (resource.isNested) {
+          // ── Nested resources: iterate parents ──────────────────
+          const { cursor } = await getNestedResourceInfo(client, resource, admin, churchId!)
+          if (cursor.parents.length === 0) {
+            await finishResourceLog(log.id, log.startTs, stats)
+            continue
+          }
 
-        // For replace strategy, delete existing
-        if (resource.syncStrategy === 'replace') {
-          await admin.from(resource.table).delete().eq('church_id', churchId!)
-        }
+          if (resource.syncStrategy === 'replace') {
+            await admin.from(resource.table).delete().eq('church_id', churchId!)
+          }
 
-        let currentCursor = cursor
-        while (true) {
-          const { rows, hasMore, nextCursor } = await fetchNestedPage(
-            client, resource, currentCursor, 100
-          )
+          let currentCursor = cursor
+          while (true) {
+            const { rows, hasMore, nextCursor } = await fetchNestedPage(
+              client, resource, currentCursor, 100
+            )
+            stats.rowsSeen += rows.length
 
-          if (rows.length > 0) {
-            let resolvedRows = rows
-            if (resource.idMappings && resource.idMappings.length > 0) {
-              resolvedRows = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
-            }
-
-            const rowsWithChurch = resolvedRows.map(r => ({ ...r, church_id: churchId }))
-            if (rowsWithChurch.length > 0) {
-              if (resource.syncStrategy === 'replace') {
-                await admin.from(resource.table).insert(rowsWithChurch)
-              } else {
-                await admin.from(resource.table).upsert(rowsWithChurch, { onConflict: resource.onConflict })
+            if (rows.length > 0) {
+              let resolvedRows = rows
+              if (resource.idMappings && resource.idMappings.length > 0) {
+                const result = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+                resolvedRows = result.resolved
+                stats.rowsSkipped += result.skipped
               }
-              totalSynced += rowsWithChurch.length
-              const seen = seenPcoIdsByTable[resource.table]
-              if (seen) {
-                for (const r of rowsWithChurch as Array<{ pco_id?: string }>) {
-                  if (r.pco_id) seen.add(r.pco_id)
+
+              const rowsWithChurch = resolvedRows.map(r => ({ ...r, church_id: churchId }))
+              if (rowsWithChurch.length > 0) {
+                if (resource.syncStrategy === 'replace') {
+                  await admin.from(resource.table).insert(rowsWithChurch)
+                } else {
+                  await admin.from(resource.table).upsert(rowsWithChurch, { onConflict: resource.onConflict })
+                }
+                stats.rowsUpserted += rowsWithChurch.length
+                totalSynced += rowsWithChurch.length
+                const seen = seenPcoIdsByTable[resource.table]
+                if (seen) {
+                  for (const r of rowsWithChurch as Array<{ pco_id?: string }>) {
+                    if (r.pco_id) seen.add(r.pco_id)
+                  }
                 }
               }
             }
+
+            if (!hasMore || !nextCursor) break
+            currentCursor = nextCursor
+          }
+        } else {
+          // ── Flat resources ─────────────────────────────────────
+          const pcoCount = await getResourceCount(client, resource)
+          if (pcoCount === 0) {
+            await finishResourceLog(log.id, log.startTs, stats)
+            continue
           }
 
-          if (!hasMore || !nextCursor) break
-          currentCursor = nextCursor
-        }
-      } else {
-        // ── Flat resources ─────────────────────────────────────
-        const pcoCount = await getResourceCount(client, resource)
-        if (pcoCount === 0) continue
+          if (resource.syncStrategy === 'replace') {
+            await admin.from(resource.table).delete().eq('church_id', churchId!)
+          }
 
-        if (resource.syncStrategy === 'replace') {
-          await admin.from(resource.table).delete().eq('church_id', churchId!)
-        }
+          let offset = 0
+          let hasMore = true
+          while (hasMore) {
+            const { rows, hasMore: more } = await fetchResourcePage(client, resource, offset, 100)
+            stats.rowsSeen += rows.length
 
-        let offset = 0
-        let hasMore = true
-        while (hasMore) {
-          const { rows, hasMore: more } = await fetchResourcePage(client, resource, offset, 100)
-
-          if (rows.length > 0) {
-            let resolvedRows = rows
-            if (resource.idMappings && resource.idMappings.length > 0) {
-              resolvedRows = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
-            }
-
-            const rowsWithChurch = resolvedRows.map(r => ({ ...r, church_id: churchId }))
-            if (rowsWithChurch.length > 0) {
-              if (resource.syncStrategy === 'replace') {
-                await admin.from(resource.table).insert(rowsWithChurch)
-              } else {
-                await admin.from(resource.table).upsert(rowsWithChurch, { onConflict: resource.onConflict })
+            if (rows.length > 0) {
+              let resolvedRows = rows
+              if (resource.idMappings && resource.idMappings.length > 0) {
+                const result = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+                resolvedRows = result.resolved
+                stats.rowsSkipped += result.skipped
               }
-              totalSynced += rowsWithChurch.length
-            }
-          }
 
-          hasMore = more
-          offset += 100
+              const rowsWithChurch = resolvedRows.map(r => ({ ...r, church_id: churchId }))
+              if (rowsWithChurch.length > 0) {
+                if (resource.syncStrategy === 'replace') {
+                  await admin.from(resource.table).insert(rowsWithChurch)
+                } else {
+                  await admin.from(resource.table).upsert(rowsWithChurch, { onConflict: resource.onConflict })
+                }
+                stats.rowsUpserted += rowsWithChurch.length
+                totalSynced += rowsWithChurch.length
+              }
+            }
+
+            hasMore = more
+            offset += 100
+          }
         }
+        await finishResourceLog(log.id, log.startTs, stats)
+      } catch (err: any) {
+        await finishResourceLog(log.id, log.startTs, stats, err?.message?.substring(0, 500) ?? String(err).substring(0, 500))
+        throw err
       }
     }
 
@@ -207,6 +277,15 @@ export async function GET(request: NextRequest) {
       totalSynced += formCount
     } catch (e) {
       console.error('Cron: form submissions sync failed:', e)
+    }
+
+    // Post-sync: refresh materialized analytics views. Cheap because the
+    // view definitions are aggregations over already-loaded tables; doing
+    // it here means the dashboard reads from prebuilt rows.
+    try {
+      await admin.rpc('refresh_analytics_views')
+    } catch (e) {
+      console.error('Cron: analytics view refresh failed:', e)
     }
 
     // Mark success

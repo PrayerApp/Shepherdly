@@ -378,11 +378,19 @@ export async function POST(request: NextRequest) {
       }
 
       let upserted = 0
+      let skippedFk = 0
       if (rows.length > 0) {
         // Resolve PCO IDs to UUIDs if mappings exist
         let resolvedRows = rows
         if (resource.idMappings && resource.idMappings.length > 0) {
-          resolvedRows = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+          const result = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+          resolvedRows = result.resolved
+          skippedFk = result.skipped
+          if (skippedFk > 0) {
+            console.warn(
+              `Manual sync: ${skippedFk} ${resource.table} row(s) dropped due to unresolvable foreign keys`
+            )
+          }
         }
 
         // Add church_id to all rows

@@ -1,4 +1,36 @@
 import { PcoClient } from './pco'
+import { SCHEMAS_BY_TABLE, type PcoTableName } from './pco/schemas'
+
+/*
+ * Validate a PCO list response against the schema registered for this
+ * resource's table. We validate but do NOT throw on failure — a single
+ * field-shape drift from PCO shouldn't take down a nightly sync. Instead
+ * we log a warning and let the sync continue with the unchecked payload;
+ * the per-resource log shows whether validation is succeeding.
+ *
+ * Returns a count of validation issues so the caller can fold it into
+ * its observability output.
+ */
+function validatePcoResponse(
+  table: string,
+  response: { data?: unknown[] } | undefined | null,
+): number {
+  if (!response) return 0
+  const schema = SCHEMAS_BY_TABLE[table as PcoTableName]
+  if (!schema) return 0
+  const result = schema.safeParse(response)
+  if (result.success) return 0
+  const issueCount = result.error.issues.length
+  console.warn(
+    `PCO response failed validation for table '${table}' (${issueCount} issues): ${
+      result.error.issues
+        .slice(0, 3)
+        .map(i => `${i.path.join('.') || '<root>'}: ${i.message}`)
+        .join('; ')
+    }`,
+  )
+  return issueCount
+}
 
 /**
  * PCO Sync resource definitions.
@@ -571,6 +603,7 @@ export async function fetchResourcePage(
   }
 
   const result = await client.get(resource.endpoint, params)
+  validatePcoResponse(resource.table, result)
   const data = result.data || []
   const included = result.included || []
   const filtered = resource.filterRow ? data.filter(resource.filterRow) : data
@@ -672,6 +705,7 @@ export async function fetchNestedPage(
       ...(resource.queryParams || {}),
     })
 
+    validatePcoResponse(resource.table, result)
     const data = result.data || []
     const included = result.included || []
     // Inject parent PCO ID into each row so mapRow can use it
@@ -745,6 +779,7 @@ async function fetchDoublyNestedPage(
       ...(resource.queryParams || {}),
     })
 
+    validatePcoResponse(resource.table, result)
     const data = result.data || []
     const included = result.included || []
     const rows = data.map((item: any) => {
@@ -792,13 +827,18 @@ async function fetchDoublyNestedPage(
  * Resolve PCO IDs to DB UUIDs for all configured mappings.
  * Drops rows where any required FK can't be resolved.
  */
+export interface ResolveResult {
+  resolved: Record<string, any>[]
+  skipped: number
+}
+
 export async function resolvePcoIds(
   admin: any,
   rows: Record<string, any>[],
   mappings: IdMapping[],
   churchId: string,
-): Promise<Record<string, any>[]> {
-  if (mappings.length === 0 || rows.length === 0) return rows
+): Promise<ResolveResult> {
+  if (mappings.length === 0 || rows.length === 0) return { resolved: rows, skipped: 0 }
 
   // Build lookup maps for each mapping
   const lookupMaps: Map<string, Map<string, string>> = new Map()
@@ -831,26 +871,32 @@ export async function resolvePcoIds(
     )
   }
 
-  // Map rows, resolving IDs and dropping unresolvable ones
-  return rows
+  // Map rows, resolving IDs and counting unresolvable ones
+  let skipped = 0
+  const resolved = rows
     .map(row => {
-      const resolved = { ...row }
+      const out = { ...row }
       for (const mapping of mappings) {
         const map = lookupMaps.get(mapping.pcoField)!
         const pcoVal = row[mapping.pcoField]
         if (pcoVal) {
           const uuid = map.get(pcoVal)
-          if (!uuid) return null // can't resolve — drop row
-          resolved[mapping.field] = uuid
+          if (!uuid) {
+            skipped++
+            return null
+          }
+          out[mapping.field] = uuid
         }
         // Remove the temp pco field if it starts with _
         if (mapping.pcoField.startsWith('_')) {
-          delete resolved[mapping.pcoField]
+          delete out[mapping.pcoField]
         }
       }
-      return resolved
+      return out
     })
     .filter(Boolean) as Record<string, any>[]
+
+  return { resolved, skipped }
 }
 
 // ── Post-sync FK linking ────────────────────────────────────
@@ -1076,6 +1122,7 @@ export async function syncConfiguredForms(
         `/people/v2/forms/${cfg.form_pco_id}/form_submissions`,
         { ...params, offset: String(offset) },
       )
+      validatePcoResponse('pco_form_submissions', page)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const subs = (page.data || []) as any[]
       if (subs.length === 0) break

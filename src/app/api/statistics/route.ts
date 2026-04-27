@@ -200,6 +200,18 @@ export async function GET() {
     return out
   }
 
+  // Resolve which PCO form IDs are tagged for this dashboard signal. A
+  // church may have one or more forms tagged 'prayer'; we aggregate over
+  // all of them. Falls back to the empty set, in which case the prayer
+  // signal contributes zero — better than crashing.
+  const { data: prayerForms } = await supabase
+    .from('pco_form_sync_config')
+    .select('form_pco_id')
+    .eq('church_id', churchId)
+    .eq('purpose', 'prayer')
+    .eq('is_active', true)
+  const prayerFormIds = (prayerForms ?? []).map(f => f.form_pco_id as string)
+
   // Fetch everything we need in parallel. All tables scoped to church.
   const [
     { data: groupTypes },
@@ -231,11 +243,13 @@ export async function GET() {
       .select('person_id, registered_at, active, waitlisted, canceled')
       .eq('church_id', churchId)
       .gte('registered_at', twelveMoAgoIso),
-    supabase.from('pco_form_submissions')
-      .select('person_id, submitted_at')
-      .eq('church_id', churchId)
-      .eq('form_pco_id', '144568')
-      .gte('submitted_at', twelveMoAgoIso),
+    prayerFormIds.length > 0
+      ? supabase.from('pco_form_submissions')
+          .select('person_id, submitted_at')
+          .eq('church_id', churchId)
+          .in('form_pco_id', prayerFormIds)
+          .gte('submitted_at', twelveMoAgoIso)
+      : Promise.resolve({ data: [] as { person_id: string; submitted_at: string }[] }),
     supabase.from('attendance_records')
       .select('person_id, checked_in_at')
       .eq('church_id', churchId)
