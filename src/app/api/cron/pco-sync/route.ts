@@ -49,19 +49,64 @@ export async function GET(request: NextRequest) {
   const client = createPcoClient(credentials.app_id, credentials.app_secret)
   const churchId = credentials.church_id
 
-  // Create sync log
-  const { data: syncLog } = await admin
+  /*
+   * Resource-level resumability. If the previous cron run's pco_sync_log
+   * row is in 'running' or 'failed' state (i.e. crashed mid-sync), we
+   * adopt that run instead of starting fresh and skip resources whose
+   * pco_sync_resource_log row says 'success'.
+   *
+   * Mid-resource cursors aren't persisted — that's harder and the marginal
+   * value is small for a daily cron. Resource-level skip alone means a
+   * crash at "resource 8 of 16" means the next run does resources 9-16
+   * instead of starting over.
+   *
+   * Stale 'running' rows older than 6 hours are treated as crashed.
+   */
+  const STALE_RUN_HOURS = 6
+  const { data: prevRun } = await admin
     .from('pco_sync_log')
-    .insert({
-      sync_type: 'auto',
-      status: 'running',
-      started_at: new Date().toISOString(),
-      records_synced: 0,
-      credential_id: credentials.id,
-      church_id: churchId,
-    })
-    .select()
-    .single()
+    .select('id, status, started_at')
+    .eq('church_id', churchId)
+    .in('status', ['running', 'failed'])
+    .order('started_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  const prevAge = prevRun?.started_at
+    ? (Date.now() - new Date(prevRun.started_at).getTime()) / 3600000
+    : Infinity
+  const adoptPreviousRun = !!prevRun && prevAge < STALE_RUN_HOURS
+
+  let syncLog: { id: string } | null = null
+  const completedTables = new Set<string>()
+  if (adoptPreviousRun && prevRun) {
+    syncLog = { id: prevRun.id }
+    const { data: priorResources } = await admin
+      .from('pco_sync_resource_log')
+      .select('resource_table, status')
+      .eq('sync_log_id', prevRun.id)
+      .eq('status', 'success')
+    for (const r of (priorResources ?? []) as { resource_table: string }[]) {
+      completedTables.add(r.resource_table)
+    }
+    console.log(
+      `Cron: resuming previous sync run ${prevRun.id} (${completedTables.size} resource(s) already complete)`
+    )
+  } else {
+    const { data: newLog } = await admin
+      .from('pco_sync_log')
+      .insert({
+        sync_type: 'auto',
+        status: 'running',
+        started_at: new Date().toISOString(),
+        records_synced: 0,
+        credential_id: credentials.id,
+        church_id: churchId,
+      })
+      .select('id')
+      .single()
+    syncLog = newLog
+  }
 
   let totalSynced = 0
 
@@ -125,6 +170,10 @@ export async function GET(request: NextRequest) {
 
   try {
     for (const resource of SYNC_RESOURCES) {
+      if (completedTables.has(resource.table)) {
+        // Already finished in the run we're resuming.
+        continue
+      }
       const log = await startResourceLog(resource.table)
       const stats = { rowsSeen: 0, rowsUpserted: 0, rowsSkipped: 0 }
       try {
@@ -229,14 +278,21 @@ export async function GET(request: NextRequest) {
     // from PCO this run. PCO doesn't expose a left_at attribute, so
     // "not returned in this sync" is the signal. Skip if we saw zero
     // memberships total — that's a sync failure, not an empty church.
-    try {
-      for (const table of ['group_memberships', 'team_memberships'] as const) {
-        const seen = seenPcoIdsByTable[table]
-        if (seen.size === 0) continue
-        await markDepartedMemberships(admin, table, churchId!, seen, syncStartedAt)
+    //
+    // On a resumed run we skip this entirely: the seen-set is local to
+    // this cron invocation, so for membership tables that completed in
+    // the prior run the seen-set is empty and we'd incorrectly mark
+    // valid rows as departed. The next full run picks up real departures.
+    if (!adoptPreviousRun) {
+      try {
+        for (const table of ['group_memberships', 'team_memberships'] as const) {
+          const seen = seenPcoIdsByTable[table]
+          if (seen.size === 0) continue
+          await markDepartedMemberships(admin, table, churchId!, seen, syncStartedAt)
+        }
+      } catch (e) {
+        console.error('Cron: orphan membership cleanup failed:', e)
       }
-    } catch (e) {
-      console.error('Cron: orphan membership cleanup failed:', e)
     }
 
     // Post-sync: link FK columns
@@ -269,12 +325,53 @@ export async function GET(request: NextRequest) {
       console.error('Cron: shepherd-over rules refresh failed:', e)
     }
 
-    // Post-sync: pull configured PCO form submissions. Separate from
-    // SYNC_RESOURCES because forms are config-driven (pco_form_sync_config)
-    // and their answer extraction is form-specific.
+    // Post-sync: pull configured PCO form submissions. Forms are
+    // config-driven (pco_form_sync_config) and their answer extraction
+    // is form-specific, so they don't fit the declarative SYNC_RESOURCES
+    // shape — but we still log each form individually in
+    // pco_sync_resource_log under "pco_form_submissions:<form_pco_id>"
+    // so they show up alongside everything else and benefit from the
+    // same resumability skip on the next run.
     try {
-      const formCount = await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
-      totalSynced += formCount
+      const formStats = await syncConfiguredForms(
+        admin,
+        client,
+        churchId!,
+        credentials.last_synced_at,
+        { skipForms: completedTables },
+      )
+      for (const fs of formStats) {
+        const startedAt = new Date().toISOString()
+        const { data: logRow } = await admin
+          .from('pco_sync_resource_log')
+          .insert({
+            sync_log_id: syncLog!.id,
+            resource_table: `pco_form_submissions:${fs.formPcoId}`,
+            started_at: startedAt,
+            status: 'running',
+            church_id: churchId,
+          })
+          .select('id')
+          .single()
+        if (fs.rowsSkipped > 0) {
+          console.warn(
+            `Cron: ${fs.rowsSkipped} ${fs.formLabel} submission(s) dropped (PCO person not yet synced)`
+          )
+        }
+        await admin
+          .from('pco_sync_resource_log')
+          .update({
+            finished_at: new Date().toISOString(),
+            duration_ms: 0,
+            rows_seen: fs.rowsSeen,
+            rows_upserted: fs.rowsUpserted,
+            rows_skipped_unresolvable_fk: fs.rowsSkipped,
+            status: fs.error ? 'failed' : 'success',
+            error_message: fs.error ?? null,
+          })
+          .eq('id', logRow?.id ?? '')
+        totalSynced += fs.rowsUpserted
+      }
     } catch (e) {
       console.error('Cron: form submissions sync failed:', e)
     }

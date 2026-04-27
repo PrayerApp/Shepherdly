@@ -477,7 +477,14 @@ export async function POST(request: NextRequest) {
         try {
           if (credentials?.app_id && credentials?.app_secret) {
             const client = createPcoClient(credentials.app_id, credentials.app_secret)
-            await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+            const formStats = await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+            for (const fs of formStats) {
+              if (fs.error) {
+                console.error(`Manual sync: form ${fs.formLabel} failed:`, fs.error)
+              } else if (fs.rowsSkipped > 0) {
+                console.warn(`Manual sync: ${fs.rowsSkipped} ${fs.formLabel} submission(s) dropped`)
+              }
+            }
           }
         } catch (e) {
           console.error('Post-sync form submissions failed:', e)
