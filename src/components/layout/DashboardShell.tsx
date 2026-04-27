@@ -11,10 +11,15 @@ import Sidebar from './Sidebar'
  * and the responsive split between "persistent sidebar" (md+) and
  * "drawer + top bar" (<md).
  *
- * Page titles come from a route → label map. The map is local on
- * purpose: routing-time data is the right source for nav labels and
- * we want the same strings the sidebar already uses, but the sidebar
- * doesn't expose them as a public type.
+ * The desktop / mobile decision is driven by a JS media query rather
+ * than Tailwind's `hidden md:flex` utilities. The previous version
+ * was reportedly leaving the sidebar visible on mobile devices; doing
+ * the split in JS removes any ambiguity from Tailwind class generation
+ * or purge behavior. SSR safety: we initialize as desktop=true so the
+ * server render matches the most common client (desktop) and avoids
+ * a hamburger flash on hydration; the effect corrects it on mount.
+ *
+ * Page titles come from a route → label map.
  */
 
 const ROUTE_LABELS: Array<{ prefix: string; label: string }> = [
@@ -37,6 +42,8 @@ function pageTitleFor(pathname: string): string {
   return match?.label ?? 'Shepherdly'
 }
 
+const DESKTOP_MEDIA = '(min-width: 768px)'
+
 export function DashboardShell({
   user,
   children,
@@ -46,15 +53,34 @@ export function DashboardShell({
 }) {
   const pathname = usePathname()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [isDesktop, setIsDesktop] = useState(true)
 
-  // Close the drawer whenever the route changes — otherwise tapping a
-  // nav item leaves it stuck open.
+  useEffect(() => {
+    const mq = window.matchMedia(DESKTOP_MEDIA)
+    setIsDesktop(mq.matches)
+    const onChange = (e: MediaQueryListEvent) => setIsDesktop(e.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
+  // Close the drawer whenever the route changes — tapping a nav item
+  // would otherwise leave it stuck open. Also close it whenever we
+  // cross the breakpoint to desktop.
   useEffect(() => {
     setDrawerOpen(false)
-  }, [pathname])
+  }, [pathname, isDesktop])
 
-  // Body scroll lock while the drawer is open. Match the Modal primitive's
-  // approach so behavior is consistent.
+  // ESC closes the drawer.
+  useEffect(() => {
+    if (!drawerOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawerOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [drawerOpen])
+
+  // Body scroll lock while the drawer is open.
   useEffect(() => {
     if (!drawerOpen) return
     const previous = document.body.style.overflow
@@ -67,27 +93,27 @@ export function DashboardShell({
   const title = pageTitleFor(pathname)
 
   return (
-    <div className="flex h-screen overflow-hidden bg-surface-base">
-      {/* Persistent sidebar on md+. Hidden under the drawer on smaller. */}
-      <div className="hidden md:flex">
-        <Sidebar user={user} />
-      </div>
+    <div className="flex h-screen overflow-hidden" style={{ background: 'var(--background)' }}>
+      {/* Desktop persistent sidebar */}
+      {isDesktop && <Sidebar user={user} />}
 
       {/* Mobile drawer */}
-      {drawerOpen && (
+      {!isDesktop && drawerOpen && (
         <>
           <div
-            className="fixed inset-0 z-40 bg-neutral-900/50 md:hidden"
+            className="fixed inset-0 z-40"
+            style={{ background: 'rgba(17, 24, 39, 0.5)' }}
             onClick={() => setDrawerOpen(false)}
             aria-hidden
           />
-          <div className="fixed inset-y-0 left-0 z-50 flex md:hidden">
+          <div className="fixed inset-y-0 left-0 z-50 flex">
             <Sidebar user={user} />
             <button
               type="button"
               onClick={() => setDrawerOpen(false)}
               aria-label="Close menu"
-              className="absolute -right-12 top-3 rounded-md bg-white/10 p-2 text-white hover:bg-white/20"
+              className="absolute -right-12 top-3 rounded-md p-2 text-white"
+              style={{ background: 'rgba(255,255,255,0.15)' }}
             >
               <X className="size-5" aria-hidden />
             </button>
@@ -96,18 +122,26 @@ export function DashboardShell({
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Top bar — only on <md. Hamburger + current page title. */}
-        <header className="flex h-14 items-center gap-3 border-b border-neutral-200 bg-white px-4 md:hidden">
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            aria-label="Open menu"
-            className="-ml-1 rounded-md p-2 text-neutral-700 hover:bg-neutral-100"
+        {/* Mobile top bar — only when not on desktop */}
+        {!isDesktop && (
+          <header
+            className="flex h-14 items-center gap-3 border-b px-4"
+            style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
           >
-            <Menu className="size-5" aria-hidden />
-          </button>
-          <h1 className="font-serif text-lg leading-none text-neutral-900">{title}</h1>
-        </header>
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open menu"
+              className="-ml-1 rounded-md p-2"
+              style={{ color: 'var(--foreground)' }}
+            >
+              <Menu className="size-5" aria-hidden />
+            </button>
+            <h1 className="font-serif text-lg leading-none" style={{ color: 'var(--foreground)' }}>
+              {title}
+            </h1>
+          </header>
+        )}
 
         <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
       </div>

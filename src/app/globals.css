@@ -69,9 +69,11 @@
   --color-status-joined:  var(--color-green-700);
   --color-status-exited:  var(--color-red-700);
 
-  /* Typography */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-serif: 'Georgia', 'Times New Roman', serif;
+  /* Typography. next/font writes the actual face to --font-inter and
+   * --font-fraunces on <html>; we layer the design tokens on top so
+   * the rest of the codebase can keep using --font-sans / --font-serif. */
+  --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: var(--font-fraunces), 'Georgia', 'Times New Roman', serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
 
   /* Radii */
@@ -157,15 +159,24 @@ body {
   font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  /* Inter stylistic variants — slashed zero (cv11) and disambiguated
+   * 1/I/l (ss01) make numeric tables in /statistics easier to read. */
+  font-feature-settings: 'cv11', 'ss01';
 }
 
 h1, h2, h3, .font-serif {
   font-family: var(--font-serif);
+  /* Fraunces opsz: prefer larger optical sizes for headings so the
+   * letterforms breathe at display sizes. */
+  font-optical-sizing: auto;
 }
 
 button, input, select, textarea, .sans {
   font-family: var(--font-sans);
 }
+
+/* Tabular numerals for numeric columns in stats / dashboard tables.
+ * Apply via the `tabular-nums` Tailwind utility (built into v4). */
 
 /*
  * Visible focus ring on all interactive elements — required for keyboard

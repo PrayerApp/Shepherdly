@@ -78,18 +78,61 @@ function deltaColor(n: number): string {
   return 'var(--foreground-muted)'
 }
 
-function Sparkline({ series }: { series: TypeStat['series'] }) {
-  const data = [...series].reverse().map((s, i) => ({ i, total: s.members + s.leaders }))
+/*
+ * Mini-bar trend used inline on table rows. 5 bars, one per snapshot,
+ * scaled by the max total in the series. Cheaper than rendering an
+ * inline Recharts container per row (which previously re-mounted a
+ * full ResponsiveContainer for every row on every sort).
+ */
+function MiniBars({ series }: { series: TypeStat['series'] }) {
+  const totals = [...series].reverse().map(s => s.members + s.leaders)
+  const max = Math.max(1, ...totals)
   return (
-    <div style={{ width: 100, height: 30 }}>
-      <ResponsiveContainer>
-        <LineChart data={data}>
-          <Line type="monotone" dataKey="total" stroke="var(--primary)" strokeWidth={1.5} dot={false} />
+    <div
+      className="flex items-end gap-0.5"
+      style={{ width: 64, height: 24 }}
+      aria-label={`Trend: ${totals.join(', ')}`}
+    >
+      {totals.map((t, i) => {
+        const h = Math.max(2, Math.round((t / max) * 22))
+        return (
+          <span
+            key={i}
+            className="block w-full rounded-sm"
+            style={{ height: h, background: 'var(--color-green-600)' }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+/*
+ * Larger trend rendered inside an expanded detail row. Recharts here is
+ * fine because it only renders for the currently-expanded row, not
+ * every row on every sort.
+ */
+function ExpandedTrend({ series }: { series: TypeStat['series'] }) {
+  const data = [...series].reverse().map((s, i) => ({
+    i,
+    label: new Date(s.at).toLocaleDateString('en-US', { month: 'short', year: '2-digit' }),
+    total: s.members + s.leaders,
+    members: s.members,
+    leaders: s.leaders,
+  }))
+  return (
+    <div style={{ height: 120 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+          <Line type="monotone" dataKey="total" stroke="var(--color-green-700)" strokeWidth={2} dot />
           <Tooltip
             cursor={false}
-            contentStyle={{ fontSize: 11, padding: '2px 6px' }}
-            formatter={(v: unknown) => [String(v), 'total']}
-            labelFormatter={() => ''}
+            contentStyle={{
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: 12,
+            }}
           />
         </LineChart>
       </ResponsiveContainer>
@@ -109,6 +152,15 @@ function CategoryCard({ label, value, total, color }: { label: string; value: nu
       <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
       </div>
+    </div>
+  )
+}
+
+function DetailMetric({ label, value, color }: { label: string; value: React.ReactNode; color?: string }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-neutral-500">{label}</div>
+      <div className="font-serif text-lg tabular-nums" style={{ color: color ?? 'var(--foreground)' }}>{value}</div>
     </div>
   )
 }
@@ -133,6 +185,10 @@ type ColumnDef = {
   align: 'left' | 'right'
   numeric: boolean
   accessor: (r: TypeStat) => number | string | null
+  /* Tier 1 columns are visible always; tier 2 columns only show in
+   * the expanded detail row. Cuts the always-on column count from 11
+   * to 5 so the table fits without horizontal scroll under 1400px. */
+  tier: 1 | 2
   // Color for numeric display, optional.
   format?: (r: TypeStat) => React.ReactNode
 }
@@ -153,18 +209,21 @@ function ratioNumeric(r: TypeStat): number {
 }
 
 const COLUMNS: ColumnDef[] = [
-  { key: 'typeName', label: 'Type', align: 'left', numeric: false, accessor: r => r.typeName },
-  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, accessor: r => r.contexts },
-  { key: 'staff', label: 'Staff', align: 'right', numeric: true, accessor: r => r.staff },
-  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, accessor: r => r.leaders },
-  { key: 'members', label: 'Members', align: 'right', numeric: true, accessor: r => r.members },
-  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, accessor: ratioNumeric, format: r => formatRatio(r) },
-  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, accessor: r => r.joinedRecent },
-  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, accessor: r => r.exitedRecent },
-  { key: 'delta', label: 'Δ', align: 'right', numeric: true, accessor: r => r.delta },
-  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, accessor: r => r.avgTenureActiveDays ?? -1 },
-  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, accessor: r => r.avgTenureExitedDays ?? -1 },
+  { key: 'typeName', label: 'Type', align: 'left', numeric: false, tier: 1, accessor: r => r.typeName },
+  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, tier: 1, accessor: r => r.contexts },
+  { key: 'staff', label: 'Staff', align: 'right', numeric: true, tier: 1, accessor: r => r.staff },
+  { key: 'members', label: 'Members', align: 'right', numeric: true, tier: 1, accessor: r => r.members },
+  { key: 'delta', label: 'Δ 3mo', align: 'right', numeric: true, tier: 1, accessor: r => r.delta },
+  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, tier: 2, accessor: r => r.leaders },
+  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, tier: 2, accessor: ratioNumeric, format: r => formatRatio(r) },
+  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.joinedRecent },
+  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.exitedRecent },
+  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureActiveDays ?? -1 },
+  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureExitedDays ?? -1 },
 ]
+
+const PRIMARY_COLUMNS = COLUMNS.filter(c => c.tier === 1)
+const DETAIL_COLUMNS = COLUMNS.filter(c => c.tier === 2)
 
 function TypeTable({ title, rows, excluded, sort, onSort }: {
   title: string
@@ -221,15 +280,30 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
 
   const allExcluded = rows.length > 0 && rows.every(r => excluded.has(r.typeId))
 
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggleExpanded = (typeId: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(typeId)) next.delete(typeId)
+      else next.add(typeId)
+      return next
+    })
+  }
+  /* Total cells in a primary row: toggle + PRIMARY_COLUMNS + trend. */
+  const PRIMARY_COL_COUNT = PRIMARY_COLUMNS.length + 2
+
   return (
     <section className="mb-10">
       <h2 className="text-lg font-serif mb-3" style={{ color: 'var(--foreground)' }}>{title}</h2>
       <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
         <table className="w-full text-sm sans">
-          <caption className="sr-only">{title} — sortable; numeric columns are right-aligned. Use the trend column to spot recent changes at a glance.</caption>
+          <caption className="sr-only">
+            {title} — sortable; numeric columns are right-aligned. Click a row to expand additional metrics including leader counts, join/exit rates, and tenure averages.
+          </caption>
           <thead>
             <tr style={{ background: 'var(--muted)' }}>
-              {COLUMNS.map(c => {
+              <th scope="col" className="w-8 px-2 py-2.5" aria-label="Expand row" />
+              {PRIMARY_COLUMNS.map(c => {
                 const isSorted = sort.key === c.key
                 const ariaSort = isSorted
                   ? sort.dir === 'asc' ? 'ascending' : 'descending'
@@ -262,52 +336,86 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
           <tbody>
             {allExcluded ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   All types excluded. Open settings to include some.
                 </td>
               </tr>
             ) : sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   No tracked types yet.
                 </td>
               </tr>
-            ) : sortedRows.map(r => (
-              <tr key={r.typeId} className="border-t" style={{ borderColor: 'var(--border)' }}>
-                <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.leaders)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{formatRatio(r)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--color-status-joined)' }}>{fmtNum(r.joinedRecent)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--color-status-exited)' }}>{fmtNum(r.exitedRecent)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(r.delta) }}>
-                  {r.delta > 0 ? `+${r.delta}` : r.delta}
-                </td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(r.avgTenureActiveDays)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{fmtDays(r.avgTenureExitedDays)}</td>
-                <td className="px-3 py-2.5"><Sparkline series={r.series} /></td>
-              </tr>
-            ))}
+            ) : sortedRows.flatMap(r => {
+              const isExpanded = expanded.has(r.typeId)
+              const out: React.ReactNode[] = [
+                <tr
+                  key={r.typeId}
+                  className="border-t hover:bg-neutral-50/60"
+                  style={{ borderColor: 'var(--border)' }}
+                >
+                  <td className="w-8 px-2 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => toggleExpanded(r.typeId)}
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for ${r.typeName}`}
+                      className="rounded p-1 text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900"
+                    >
+                      <span aria-hidden className="inline-block text-xs leading-none">
+                        {isExpanded ? '▾' : '▸'}
+                      </span>
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(r.delta) }}>
+                    {r.delta > 0 ? `+${r.delta}` : r.delta}
+                  </td>
+                  <td className="px-3 py-2.5"><MiniBars series={r.series} /></td>
+                </tr>,
+              ]
+              if (isExpanded) {
+                out.push(
+                  <tr
+                    key={`${r.typeId}-detail`}
+                    className="border-t"
+                    style={{ borderColor: 'var(--border)', background: 'var(--background-subtle)' }}
+                  >
+                    <td colSpan={PRIMARY_COL_COUNT} className="px-6 py-4">
+                      <div className="grid grid-cols-2 gap-x-8 gap-y-3 md:grid-cols-3 lg:grid-cols-6 mb-4">
+                        <DetailMetric label="Leaders" value={fmtNum(r.leaders)} />
+                        <DetailMetric label="Ratio" value={formatRatio(r)} />
+                        <DetailMetric label="Joined 3mo" value={fmtNum(r.joinedRecent)} color="var(--color-status-joined)" />
+                        <DetailMetric label="Exited 3mo" value={fmtNum(r.exitedRecent)} color="var(--color-status-exited)" />
+                        <DetailMetric label="Avg tenure (active)" value={fmtDays(r.avgTenureActiveDays)} />
+                        <DetailMetric label="Avg tenure (exited)" value={fmtDays(r.avgTenureExitedDays)} />
+                      </div>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">12-month trend</div>
+                        <ExpandedTrend series={r.series} />
+                      </div>
+                    </td>
+                  </tr>,
+                )
+              }
+              return out
+            })}
           </tbody>
           {sortedRows.length > 0 && (
             <tfoot>
               <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
+                <td />
                 <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total (visible)</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
-                <td></td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--color-status-joined)' }}>{fmtNum(totals.joined)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--color-status-exited)' }}>{fmtNum(totals.exited)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(totalDelta) }}>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(totalDelta) }}>
                   {totalDelta > 0 ? `+${totalDelta}` : totalDelta}
                 </td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(totals.avgTenureActive)}</td>
-                <td></td>
-                <td></td>
+                <td />
               </tr>
             </tfoot>
           )}
