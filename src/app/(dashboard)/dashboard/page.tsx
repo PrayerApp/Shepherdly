@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import AttendanceTrend from '@/components/charts/AttendanceTrend'
 import CareCoverage from '@/components/charts/CareCoverage'
+import { ChartCard } from '@/components/ui'
 
 export default async function DashboardPage() {
   const supabase = await createClient()
@@ -113,31 +114,57 @@ export default async function DashboardPage() {
       </div>
 
       {/* Charts */}
-      {(trend && trend.length > 0) && (
-        <div className="rounded-xl border p-6 mb-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
-          <h2 className="font-serif text-lg mb-4" style={{ color: 'var(--foreground)' }}>Attendance Trend</h2>
-          <AttendanceTrend data={trend} />
-        </div>
-      )}
+      <div className="mb-6">
+        <ChartCard
+          title="Attendance Trend"
+          description="Unique attenders and total check-ins per week."
+          ariaLabel="Weekly attendance trend chart"
+          height={280}
+          emptyMessage={!trend || trend.length === 0 ? 'No attendance data yet. Sync from PCO to see trends.' : null}
+          legend={
+            <>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-2.5 rounded-full bg-green-700" aria-hidden /> Unique Attenders
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="size-2.5 rounded-full bg-gold-500" aria-hidden /> Total Check-ins
+              </span>
+            </>
+          }
+        >
+          <AttendanceTrend data={trend ?? []} />
+        </ChartCard>
+      </div>
 
       {coverage && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
-            <h2 className="font-serif text-lg mb-2" style={{ color: 'var(--foreground)' }}>Care Coverage</h2>
+        <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <ChartCard
+            title="Care Coverage"
+            description="Active people who have at least one shepherd."
+            ariaLabel="Care coverage donut chart"
+            height={200}
+            emptyMessage={
+              ((coverage.has_shepherd || 0) + (coverage.unconnected_active || 0)) === 0
+                ? 'No people data yet.'
+                : null
+            }
+            legend={
+              <>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="size-2.5 rounded-full bg-green-700" aria-hidden />
+                  Connected ({coverage.has_shepherd || 0})
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="size-2.5 rounded-full bg-red-500" aria-hidden />
+                  Unconnected ({coverage.unconnected_active || 0})
+                </span>
+              </>
+            }
+          >
             <CareCoverage data={coverage} />
-            <div className="flex justify-center gap-6 mt-2">
-              <div className="flex items-center gap-1.5 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-                <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#2d6047' }} />
-                Connected ({coverage?.has_shepherd || 0})
-              </div>
-              <div className="flex items-center gap-1.5 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-                <div className="w-2.5 h-2.5 rounded-full" style={{ background: '#dc4a4a' }} />
-                Unconnected ({coverage?.unconnected_active || 0})
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
-            <h2 className="font-serif text-lg mb-4" style={{ color: 'var(--foreground)' }}>Quick Stats</h2>
+          </ChartCard>
+          <div className="rounded-card border border-neutral-200 bg-white p-6 shadow-card">
+            <h2 className="mb-4 font-serif text-lg text-neutral-900">Quick Stats</h2>
             <div className="grid grid-cols-3 gap-4">
               <QuickStat label="Total Active" value={coverage.total_active_people || 0} />
               <QuickStat label="Attenders" value={coverage.active_attenders || 0} />
@@ -158,8 +185,8 @@ export default async function DashboardPage() {
             <div className="space-y-2">
               {recentCheckins.map(c => (
                 <a key={c.id} href="/checkins" className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
-                  {c.is_urgent && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: '#dc4a4a' }} />}
-                  {!c.is_urgent && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: c.status === 'resolved' ? '#4a7c59' : '#c17f3e' }} />}
+                  {c.is_urgent && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--color-status-danger)' }} />}
+                  {!c.is_urgent && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: c.status === 'resolved' ? 'var(--color-green-600)' : 'var(--color-role-leader)' }} />}
                   <span className="text-sm sans truncate" style={{ color: 'var(--foreground)' }}>{c.group_name || 'General'}</span>
                   <span className="text-xs sans ml-auto shrink-0" style={{ color: 'var(--foreground-muted)' }}>
                     {new Date(c.report_date || c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
@@ -183,7 +210,7 @@ export default async function DashboardPage() {
             <div className="space-y-2">
               {unconnected.map((p: any) => (
                 <div key={p.id} className="flex items-center gap-3 p-2 rounded-lg">
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: '#dc4a4a' }} />
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--color-status-danger)' }} />
                   <span className="text-sm sans" style={{ color: 'var(--foreground)' }}>{p.name}</span>
                   <span className="text-xs sans ml-auto" style={{ color: 'var(--foreground-muted)' }}>No shepherd assigned</span>
                 </div>
