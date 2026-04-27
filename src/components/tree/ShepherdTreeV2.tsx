@@ -2106,13 +2106,21 @@ export default function ShepherdTreeV2() {
                         : `1px solid ${layer.color.label}22`,
                     outline: isSelected ? `1px solid ${SELECT_OUTLINE}` : undefined,
                     outlineOffset: isSelected ? 1 : undefined,
+                    /*
+                     * Role accent: a 4px-wide left-edge stripe in the
+                     * layer's palette color. Drawn as an inset shadow
+                     * so it doesn't affect layout. Skipped for excluded
+                     * cards because the dashed-faded treatment already
+                     * conveys hidden state and adding a stripe muddies
+                     * the visual.
+                     */
                     boxShadow: pulseKey === k
-                      ? '0 0 0 4px rgba(45,96,71,0.35), 0 2px 8px rgba(0,0,0,0.12)'
+                      ? `inset 4px 0 0 ${layer.color.label}, 0 0 0 4px rgba(45,96,71,0.35), 0 2px 8px rgba(0,0,0,0.12)`
                       : isSelected
-                        ? `0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
+                        ? `inset 4px 0 0 ${layer.color.label}, 0 0 0 2px ${SELECT_OUTLINE}33, 0 1px 4px rgba(0,0,0,0.06)`
                         : isExcluded
                           ? 'none'
-                          : '0 1px 4px rgba(0,0,0,0.06)',
+                          : `inset 4px 0 0 ${layer.color.label}, 0 1px 4px rgba(0,0,0,0.06)`,
                     opacity: isExcluded ? 0.5 : 1,
                     display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
                     boxSizing: 'border-box',
