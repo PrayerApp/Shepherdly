@@ -1,62 +1,151 @@
 @import "tailwindcss";
 
+/*
+ * Shepherdly design tokens. Tailwind v4 reads `@theme` to generate utilities,
+ * so every token defined here becomes available as a class
+ * (e.g. `bg-green-700`, `text-gold-500`, `bg-surface-raised`, `bg-role-staff`,
+ * `shadow-card`, `rounded-card`, `font-serif`).
+ *
+ * One source of truth — components must consume tokens via Tailwind utilities
+ * and not embed raw hex.
+ */
+@theme {
+  /* Greens — primary brand spectrum */
+  --color-green-50:  #f2faf6;
+  --color-green-100: #e6f5ed;
+  --color-green-200: #c3e8d5;
+  --color-green-300: #8fd4ae;
+  --color-green-400: #6ab88e;
+  --color-green-500: #4a9e74;
+  --color-green-600: #3a7d5c;
+  --color-green-700: #2d6047;
+  --color-green-800: #234d38;
+  --color-green-900: #1a3a2a;
+
+  /* Neutrals */
+  --color-neutral-50:  #f9fafb;
+  --color-neutral-100: #f3f4f6;
+  --color-neutral-200: #e5e7eb;
+  --color-neutral-300: #d1d5db;
+  --color-neutral-400: #9ca3af;
+  --color-neutral-500: #6b7280;
+  --color-neutral-600: #4b5563;
+  --color-neutral-700: #374151;
+  --color-neutral-800: #1f2937;
+  --color-neutral-900: #111827;
+
+  /* Gold — accents */
+  --color-gold-100: #fbf3df;
+  --color-gold-200: #f3e2b0;
+  --color-gold-300: #e8cd7b;
+  --color-gold-400: #daa84e;
+  --color-gold-500: #c9943a;
+  --color-gold-600: #a8782a;
+  --color-gold-700: #7d5a23;
+
+  /* Reds — danger */
+  --color-red-50:  #fef2f2;
+  --color-red-100: #fee2e2;
+  --color-red-300: #f7a7a7;
+  --color-red-500: #dc4a4a;
+  --color-red-600: #b73838;
+  --color-red-700: #8a3a3a;
+
+  /* Semantic surfaces */
+  --color-surface-base: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: var(--color-neutral-50);
+
+  /* Role colors — used by the tree and role pills */
+  --color-role-super-admin: var(--color-green-700);
+  --color-role-staff: #3a5f8a;
+  --color-role-coach: #6b4c9e;
+  --color-role-leader: #c17f3e;
+
+  /* Engagement / status — replaces ad-hoc hex in the stats and chart files */
+  --color-status-success: var(--color-green-600);
+  --color-status-warning: var(--color-gold-500);
+  --color-status-danger:  var(--color-red-500);
+  --color-status-joined:  var(--color-green-700);
+  --color-status-exited:  var(--color-red-700);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-serif: 'Georgia', 'Times New Roman', serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-card: 12px;
+
+  /* Shadows — subtle, low-saturation green tint instead of pure black */
+  --shadow-card: 0 1px 3px rgba(26, 58, 42, 0.06), 0 1px 2px rgba(26, 58, 42, 0.04);
+  --shadow-card-lg: 0 4px 12px rgba(26, 58, 42, 0.08), 0 2px 4px rgba(26, 58, 42, 0.04);
+  --shadow-focus: 0 0 0 3px rgba(74, 158, 116, 0.35);
+}
+
+/*
+ * Compatibility layer — pages still read these CSS vars directly via `style={{}}`
+ * and inline color refs. We keep them mapped to the @theme tokens so existing
+ * code keeps working while the hex sweep (Phase 6 E1) migrates pages to utilities.
+ */
 :root {
-  /*
-   * Shepherdly palette — clean & modern, inspired by Faith Church's aesthetic.
-   * Primary green for trust/growth. Neutral whites & soft grays for breathing room.
-   */
-  --green-900: #1a3a2a;
-  --green-800: #234d38;
-  --green-700: #2d6047;
-  --green-600: #3a7d5c;
-  --green-500: #4a9e74;
-  --green-400: #6ab88e;
-  --green-300: #8fd4ae;
-  --green-200: #c3e8d5;
-  --green-100: #e6f5ed;
-  --green-50:  #f2faf6;
+  --background: var(--color-surface-base);
+  --background-subtle: var(--color-surface-sunken);
+  --foreground: var(--color-neutral-900);
+  --foreground-muted: var(--color-neutral-500);
+  --primary: var(--color-green-700);
+  --primary-hover: var(--color-green-800);
+  --primary-light: var(--color-green-100);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-gold-500);
+  --secondary-foreground: #ffffff;
+  --accent: var(--color-gold-500);
+  --accent-foreground: #ffffff;
+  --muted: var(--color-neutral-100);
+  --muted-foreground: var(--color-neutral-500);
+  --success: var(--color-status-success);
+  --danger: var(--color-status-danger);
+  --danger-light: var(--color-red-100);
+  --border: var(--color-neutral-200);
+  --border-light: var(--color-neutral-100);
+  --card: var(--color-surface-raised);
+  --card-shadow: var(--shadow-card);
+  --card-shadow-lg: var(--shadow-card-lg);
+  --sidebar-bg: var(--color-green-900);
 
-  --neutral-900: #111827;
-  --neutral-800: #1f2937;
-  --neutral-700: #374151;
-  --neutral-600: #4b5563;
-  --neutral-500: #6b7280;
-  --neutral-400: #9ca3af;
-  --neutral-300: #d1d5db;
-  --neutral-200: #e5e7eb;
-  --neutral-100: #f3f4f6;
-  --neutral-50:  #f9fafb;
+  --role-super-admin: var(--color-role-super-admin);
+  --role-staff: var(--color-role-staff);
+  --role-coach: var(--color-role-coach);
+  --role-leader: var(--color-role-leader);
 
-  --gold-500: #c9943a;
-  --gold-400: #daa84e;
-
-  --red-500: #dc4a4a;
-  --red-100: #fef2f2;
-
-  /* Semantic tokens */
-  --background: #ffffff;
-  --background-subtle: var(--neutral-50);
-  --foreground: var(--neutral-900);
-  --foreground-muted: var(--neutral-500);
-  --primary: var(--green-700);
-  --primary-hover: var(--green-800);
-  --primary-light: var(--green-100);
-  --accent: var(--gold-500);
-  --success: var(--green-600);
-  --danger: var(--red-500);
-  --danger-light: var(--red-100);
-  --border: var(--neutral-200);
-  --border-light: var(--neutral-100);
-  --card: #ffffff;
-  --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --card-shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --sidebar-bg: var(--green-900);
-
-  /* Role colors */
-  --role-super-admin: var(--green-700);
-  --role-staff: #3a5f8a;
-  --role-coach: #6b4c9e;
-  --role-leader: #c17f3e;
+  /* legacy aliases — kept until phase 6 hex sweep finishes */
+  --green-900: var(--color-green-900);
+  --green-800: var(--color-green-800);
+  --green-700: var(--color-green-700);
+  --green-600: var(--color-green-600);
+  --green-500: var(--color-green-500);
+  --green-400: var(--color-green-400);
+  --green-300: var(--color-green-300);
+  --green-200: var(--color-green-200);
+  --green-100: var(--color-green-100);
+  --green-50:  var(--color-green-50);
+  --neutral-900: var(--color-neutral-900);
+  --neutral-800: var(--color-neutral-800);
+  --neutral-700: var(--color-neutral-700);
+  --neutral-600: var(--color-neutral-600);
+  --neutral-500: var(--color-neutral-500);
+  --neutral-400: var(--color-neutral-400);
+  --neutral-300: var(--color-neutral-300);
+  --neutral-200: var(--color-neutral-200);
+  --neutral-100: var(--color-neutral-100);
+  --neutral-50:  var(--color-neutral-50);
+  --gold-500: var(--color-gold-500);
+  --gold-400: var(--color-gold-400);
+  --red-500: var(--color-red-500);
+  --red-100: var(--color-red-100);
 }
 
 * { box-sizing: border-box; }
@@ -64,26 +153,34 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Serif for headings / display */
 h1, h2, h3, .font-serif {
-  font-family: 'Georgia', 'Times New Roman', serif;
+  font-family: var(--font-serif);
 }
 
-/* Sans-serif for UI */
 button, input, select, textarea, .sans {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--font-sans);
+}
+
+/*
+ * Visible focus ring on all interactive elements — required for keyboard
+ * navigation. Uses the design token so theme changes propagate.
+ */
+:where(button, [role="button"], a, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+  border-radius: var(--radius-sm);
 }
 
 .card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-card);
   padding: 1.5rem;
   box-shadow: var(--card-shadow);
 }
@@ -92,7 +189,7 @@ button, input, select, textarea, .sans {
   background: var(--primary);
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0.6rem 1.2rem;
   font-weight: 600;
   cursor: pointer;
@@ -104,7 +201,7 @@ button, input, select, textarea, .sans {
   background: transparent;
   color: var(--foreground);
   border: 1.5px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0.6rem 1.2rem;
   font-weight: 600;
   cursor: pointer;
