@@ -179,7 +179,7 @@ export default async function DashboardPage() {
 
       {/* Content sections */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
+        <div className="rounded-card border border-neutral-200 bg-white p-6 shadow-card">
           <h2 className="font-serif text-lg mb-4" style={{ color: 'var(--foreground)' }}>Recent Check-ins</h2>
           {recentCheckins && recentCheckins.length > 0 ? (
             <div className="space-y-2">
@@ -204,7 +204,7 @@ export default async function DashboardPage() {
             </div>
           )}
         </div>
-        <div className="rounded-xl border p-6" style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
+        <div className="rounded-card border border-neutral-200 bg-white p-6 shadow-card">
           <h2 className="font-serif text-lg mb-4" style={{ color: 'var(--foreground)' }}>Needs Attention</h2>
           {unconnected && unconnected.length > 0 ? (
             <div className="space-y-2">
@@ -234,8 +234,7 @@ function StatCard({ label, value, icon, color, bgColor }: {
   label: string; value: number | string; icon: React.ReactNode; color: string; bgColor: string
 }) {
   return (
-    <div className="rounded-xl border p-5"
-      style={{ background: 'var(--card)', borderColor: 'var(--border)', boxShadow: 'var(--card-shadow)' }}>
+    <div className="rounded-card border border-neutral-200 bg-white p-5 shadow-card">
       <div className="flex items-start justify-between mb-4">
         <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ background: bgColor, color }}>
           {icon}
