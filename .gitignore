@@ -32,3 +32,9 @@ supabase.env
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code local artefacts
+/.claude/settings.local.json
+/.claude/skills/
+/graphify-out/
+supabase/.temp/

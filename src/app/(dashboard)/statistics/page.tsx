@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { LineChart, Line, ResponsiveContainer, Tooltip } from 'recharts'
+import { Modal } from '@/components/ui'
 
 interface TypeStat {
   typeId: string
@@ -72,23 +73,66 @@ function fmtDays(n: number | null): string {
 }
 
 function deltaColor(n: number): string {
-  if (n > 0) return '#2a6a3a'
-  if (n < 0) return '#8a3a3a'
+  if (n > 0) return 'var(--color-status-joined)'
+  if (n < 0) return 'var(--color-status-exited)'
   return 'var(--foreground-muted)'
 }
 
-function Sparkline({ series }: { series: TypeStat['series'] }) {
-  const data = [...series].reverse().map((s, i) => ({ i, total: s.members + s.leaders }))
+/*
+ * Mini-bar trend used inline on table rows. 5 bars, one per snapshot,
+ * scaled by the max total in the series. Cheaper than rendering an
+ * inline Recharts container per row (which previously re-mounted a
+ * full ResponsiveContainer for every row on every sort).
+ */
+function MiniBars({ series }: { series: TypeStat['series'] }) {
+  const totals = [...series].reverse().map(s => s.members + s.leaders)
+  const max = Math.max(1, ...totals)
   return (
-    <div style={{ width: 100, height: 30 }}>
-      <ResponsiveContainer>
-        <LineChart data={data}>
-          <Line type="monotone" dataKey="total" stroke="var(--primary)" strokeWidth={1.5} dot={false} />
+    <div
+      className="flex items-end gap-0.5"
+      style={{ width: 64, height: 24 }}
+      aria-label={`Trend: ${totals.join(', ')}`}
+    >
+      {totals.map((t, i) => {
+        const h = Math.max(2, Math.round((t / max) * 22))
+        return (
+          <span
+            key={i}
+            className="block w-full rounded-sm"
+            style={{ height: h, background: 'var(--color-green-600)' }}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+/*
+ * Larger trend rendered inside an expanded detail row. Recharts here is
+ * fine because it only renders for the currently-expanded row, not
+ * every row on every sort.
+ */
+function ExpandedTrend({ series }: { series: TypeStat['series'] }) {
+  const data = [...series].reverse().map((s, i) => ({
+    i,
+    label: new Date(s.at).toLocaleDateString('en-US', { month: 'short', year: '2-digit' }),
+    total: s.members + s.leaders,
+    members: s.members,
+    leaders: s.leaders,
+  }))
+  return (
+    <div style={{ height: 120 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 6, right: 12, bottom: 0, left: 0 }}>
+          <Line type="monotone" dataKey="total" stroke="var(--color-green-700)" strokeWidth={2} dot />
           <Tooltip
             cursor={false}
-            contentStyle={{ fontSize: 11, padding: '2px 6px' }}
-            formatter={(v: unknown) => [String(v), 'total']}
-            labelFormatter={() => ''}
+            contentStyle={{
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: 12,
+            }}
           />
         </LineChart>
       </ResponsiveContainer>
@@ -108,6 +152,15 @@ function CategoryCard({ label, value, total, color }: { label: string; value: nu
       <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
       </div>
+    </div>
+  )
+}
+
+function DetailMetric({ label, value, color }: { label: string; value: React.ReactNode; color?: string }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-neutral-500">{label}</div>
+      <div className="font-serif text-lg tabular-nums" style={{ color: color ?? 'var(--foreground)' }}>{value}</div>
     </div>
   )
 }
@@ -132,6 +185,10 @@ type ColumnDef = {
   align: 'left' | 'right'
   numeric: boolean
   accessor: (r: TypeStat) => number | string | null
+  /* Tier 1 columns are visible always; tier 2 columns only show in
+   * the expanded detail row. Cuts the always-on column count from 11
+   * to 5 so the table fits without horizontal scroll under 1400px. */
+  tier: 1 | 2
   // Color for numeric display, optional.
   format?: (r: TypeStat) => React.ReactNode
 }
@@ -152,18 +209,21 @@ function ratioNumeric(r: TypeStat): number {
 }
 
 const COLUMNS: ColumnDef[] = [
-  { key: 'typeName', label: 'Type', align: 'left', numeric: false, accessor: r => r.typeName },
-  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, accessor: r => r.contexts },
-  { key: 'staff', label: 'Staff', align: 'right', numeric: true, accessor: r => r.staff },
-  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, accessor: r => r.leaders },
-  { key: 'members', label: 'Members', align: 'right', numeric: true, accessor: r => r.members },
-  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, accessor: ratioNumeric, format: r => formatRatio(r) },
-  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, accessor: r => r.joinedRecent },
-  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, accessor: r => r.exitedRecent },
-  { key: 'delta', label: 'Δ', align: 'right', numeric: true, accessor: r => r.delta },
-  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, accessor: r => r.avgTenureActiveDays ?? -1 },
-  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, accessor: r => r.avgTenureExitedDays ?? -1 },
+  { key: 'typeName', label: 'Type', align: 'left', numeric: false, tier: 1, accessor: r => r.typeName },
+  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, tier: 1, accessor: r => r.contexts },
+  { key: 'staff', label: 'Staff', align: 'right', numeric: true, tier: 1, accessor: r => r.staff },
+  { key: 'members', label: 'Members', align: 'right', numeric: true, tier: 1, accessor: r => r.members },
+  { key: 'delta', label: 'Δ 3mo', align: 'right', numeric: true, tier: 1, accessor: r => r.delta },
+  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, tier: 2, accessor: r => r.leaders },
+  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, tier: 2, accessor: ratioNumeric, format: r => formatRatio(r) },
+  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.joinedRecent },
+  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.exitedRecent },
+  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureActiveDays ?? -1 },
+  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureExitedDays ?? -1 },
 ]
+
+const PRIMARY_COLUMNS = COLUMNS.filter(c => c.tier === 1)
+const DETAIL_COLUMNS = COLUMNS.filter(c => c.tier === 2)
 
 function TypeTable({ title, rows, excluded, sort, onSort }: {
   title: string
@@ -220,77 +280,142 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
 
   const allExcluded = rows.length > 0 && rows.every(r => excluded.has(r.typeId))
 
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggleExpanded = (typeId: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(typeId)) next.delete(typeId)
+      else next.add(typeId)
+      return next
+    })
+  }
+  /* Total cells in a primary row: toggle + PRIMARY_COLUMNS + trend. */
+  const PRIMARY_COL_COUNT = PRIMARY_COLUMNS.length + 2
+
   return (
     <section className="mb-10">
       <h2 className="text-lg font-serif mb-3" style={{ color: 'var(--foreground)' }}>{title}</h2>
       <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
         <table className="w-full text-sm sans">
+          <caption className="sr-only">
+            {title} — sortable; numeric columns are right-aligned. Click a row to expand additional metrics including leader counts, join/exit rates, and tenure averages.
+          </caption>
           <thead>
             <tr style={{ background: 'var(--muted)' }}>
-              {COLUMNS.map(c => (
-                <th key={c.key}
-                  className={`px-3 py-2.5 font-medium select-none cursor-pointer hover:opacity-80 ${c.align === 'right' ? 'text-right' : 'text-left'}`}
-                  style={{ color: 'var(--foreground-muted)' }}
-                  onClick={() => onSort(c.key)}
-                  title="Click to sort">
-                  {c.label}
-                  {sort.key === c.key && (
-                    <span className="ml-1 text-[10px]">{sort.dir === 'asc' ? '▲' : '▼'}</span>
-                  )}
-                </th>
-              ))}
-              <th className="text-left px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Trend</th>
+              <th scope="col" className="w-8 px-2 py-2.5" aria-label="Expand row" />
+              {PRIMARY_COLUMNS.map(c => {
+                const isSorted = sort.key === c.key
+                const ariaSort = isSorted
+                  ? sort.dir === 'asc' ? 'ascending' : 'descending'
+                  : 'none'
+                return (
+                  <th
+                    key={c.key}
+                    scope="col"
+                    aria-sort={ariaSort}
+                    className={`px-3 py-2.5 font-medium ${c.align === 'right' ? 'text-right' : 'text-left'}`}
+                    style={{ color: 'var(--foreground-muted)' }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onSort(c.key)}
+                      className={`inline-flex items-center gap-1 hover:text-neutral-900 ${c.align === 'right' ? 'flex-row-reverse' : ''}`}
+                      aria-label={`Sort by ${c.label}`}
+                    >
+                      <span>{c.label}</span>
+                      {isSorted && (
+                        <span aria-hidden className="text-[10px]">{sort.dir === 'asc' ? '▲' : '▼'}</span>
+                      )}
+                    </button>
+                  </th>
+                )
+              })}
+              <th scope="col" className="text-left px-3 py-2.5 font-medium" style={{ color: 'var(--foreground-muted)' }}>Trend</th>
             </tr>
           </thead>
           <tbody>
             {allExcluded ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   All types excluded. Open settings to include some.
                 </td>
               </tr>
             ) : sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   No tracked types yet.
                 </td>
               </tr>
-            ) : sortedRows.map(r => (
-              <tr key={r.typeId} className="border-t" style={{ borderColor: 'var(--border)' }}>
-                <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.leaders)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{formatRatio(r)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(r.joinedRecent)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(r.exitedRecent)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(r.delta) }}>
-                  {r.delta > 0 ? `+${r.delta}` : r.delta}
-                </td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(r.avgTenureActiveDays)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground-muted)' }}>{fmtDays(r.avgTenureExitedDays)}</td>
-                <td className="px-3 py-2.5"><Sparkline series={r.series} /></td>
-              </tr>
-            ))}
+            ) : sortedRows.flatMap(r => {
+              const isExpanded = expanded.has(r.typeId)
+              const out: React.ReactNode[] = [
+                <tr
+                  key={r.typeId}
+                  className="border-t hover:bg-neutral-50/60"
+                  style={{ borderColor: 'var(--border)' }}
+                >
+                  <td className="w-8 px-2 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => toggleExpanded(r.typeId)}
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for ${r.typeName}`}
+                      className="rounded p-1 text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900"
+                    >
+                      <span aria-hidden className="inline-block text-xs leading-none">
+                        {isExpanded ? '▾' : '▸'}
+                      </span>
+                    </button>
+                  </td>
+                  <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
+                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(r.delta) }}>
+                    {r.delta > 0 ? `+${r.delta}` : r.delta}
+                  </td>
+                  <td className="px-3 py-2.5"><MiniBars series={r.series} /></td>
+                </tr>,
+              ]
+              if (isExpanded) {
+                out.push(
+                  <tr
+                    key={`${r.typeId}-detail`}
+                    className="border-t"
+                    style={{ borderColor: 'var(--border)', background: 'var(--background-subtle)' }}
+                  >
+                    <td colSpan={PRIMARY_COL_COUNT} className="px-6 py-4">
+                      <div className="grid grid-cols-2 gap-x-8 gap-y-3 md:grid-cols-3 lg:grid-cols-6 mb-4">
+                        <DetailMetric label="Leaders" value={fmtNum(r.leaders)} />
+                        <DetailMetric label="Ratio" value={formatRatio(r)} />
+                        <DetailMetric label="Joined 3mo" value={fmtNum(r.joinedRecent)} color="var(--color-status-joined)" />
+                        <DetailMetric label="Exited 3mo" value={fmtNum(r.exitedRecent)} color="var(--color-status-exited)" />
+                        <DetailMetric label="Avg tenure (active)" value={fmtDays(r.avgTenureActiveDays)} />
+                        <DetailMetric label="Avg tenure (exited)" value={fmtDays(r.avgTenureExitedDays)} />
+                      </div>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">12-month trend</div>
+                        <ExpandedTrend series={r.series} />
+                      </div>
+                    </td>
+                  </tr>,
+                )
+              }
+              return out
+            })}
           </tbody>
           {sortedRows.length > 0 && (
             <tfoot>
               <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
+                <td />
                 <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total (visible)</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
-                <td></td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#2a6a3a' }}>{fmtNum(totals.joined)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: '#8a3a3a' }}>{fmtNum(totals.exited)}</td>
-                <td className="text-right px-3 py-2.5" style={{ color: deltaColor(totalDelta) }}>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(totalDelta) }}>
                   {totalDelta > 0 ? `+${totalDelta}` : totalDelta}
                 </td>
-                <td className="text-right px-3 py-2.5" style={{ color: 'var(--foreground)' }}>{fmtDays(totals.avgTenureActive)}</td>
-                <td></td>
-                <td></td>
+                <td />
               </tr>
             </tfoot>
           )}
@@ -308,7 +433,6 @@ function SettingsModal({ open, onClose, groupTypes, teamTypes, excluded, setExcl
   excluded: ExcludedConfig
   setExcluded: (e: ExcludedConfig) => void
 }) {
-  if (!open) return null
   const toggle = (kind: 'groupTypes' | 'teamTypes', id: string) => {
     const set = new Set(excluded[kind])
     if (set.has(id)) set.delete(id); else set.add(id)
@@ -318,65 +442,71 @@ function SettingsModal({ open, onClose, groupTypes, teamTypes, excluded, setExcl
     setExcluded({ ...excluded, [kind]: exclude ? typeIds : [] })
   }
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.4)' }} onClick={onClose}>
-      <div className="rounded-xl border shadow-lg max-w-2xl w-full max-h-[80vh] overflow-hidden flex flex-col"
-        style={{ background: 'var(--card)', borderColor: 'var(--border)' }}
-        onClick={e => e.stopPropagation()}>
-        <div className="px-5 py-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
-          <h3 className="text-lg font-serif" style={{ color: 'var(--foreground)' }}>Statistics settings</h3>
-          <button onClick={onClose} className="text-sm sans" style={{ color: 'var(--foreground-muted)' }}>Close</button>
-        </div>
-        <div className="overflow-y-auto px-5 py-4 space-y-6">
-          <p className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>
-            Unchecked types are hidden from the tables and totals on this page. Settings are saved in your browser only.
-          </p>
-
-          {[
-            { title: 'Group types', kind: 'groupTypes' as const, types: groupTypes },
-            { title: 'Team service types', kind: 'teamTypes' as const, types: teamTypes },
-          ].map(section => {
-            const allIds = section.types.map(t => t.typeId)
-            const excludedSet = new Set(excluded[section.kind])
-            const allExcluded = allIds.length > 0 && allIds.every(id => excludedSet.has(id))
-            return (
-              <div key={section.kind}>
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="text-sm font-medium sans" style={{ color: 'var(--foreground)' }}>{section.title}</h4>
-                  <div className="text-xs sans space-x-2">
-                    <button className="underline" style={{ color: 'var(--primary)' }}
-                      onClick={() => setAllForKind(section.kind, allIds, false)}>Include all</button>
-                    <button className="underline" style={{ color: 'var(--danger)' }}
-                      onClick={() => setAllForKind(section.kind, allIds, true)}>Exclude all</button>
-                  </div>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Statistics settings"
+      description="Unchecked types are hidden from the tables and totals on this page. Settings are saved in your browser only."
+      size="lg"
+    >
+      <div className="space-y-6">
+        {[
+          { title: 'Group types', kind: 'groupTypes' as const, types: groupTypes },
+          { title: 'Team service types', kind: 'teamTypes' as const, types: teamTypes },
+        ].map(section => {
+          const allIds = section.types.map(t => t.typeId)
+          const excludedSet = new Set(excluded[section.kind])
+          const allExcluded = allIds.length > 0 && allIds.every(id => excludedSet.has(id))
+          return (
+            <div key={section.kind}>
+              <div className="mb-2 flex items-center justify-between">
+                <h4 className="text-sm font-medium text-neutral-900">{section.title}</h4>
+                <div className="space-x-2 text-xs">
+                  <button
+                    type="button"
+                    className="text-green-700 underline hover:text-green-800"
+                    onClick={() => setAllForKind(section.kind, allIds, false)}
+                  >
+                    Include all
+                  </button>
+                  <button
+                    type="button"
+                    className="text-red-500 underline hover:text-red-600"
+                    onClick={() => setAllForKind(section.kind, allIds, true)}
+                  >
+                    Exclude all
+                  </button>
                 </div>
-                {section.types.length === 0 ? (
-                  <p className="text-xs sans" style={{ color: 'var(--foreground-muted)' }}>No types tracked.</p>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-1">
-                    {section.types.map(t => (
-                      <label key={t.typeId} className="flex items-center gap-2 text-sm sans py-1 cursor-pointer">
-                        <input type="checkbox"
-                          checked={!excludedSet.has(t.typeId)}
-                          onChange={() => toggle(section.kind, t.typeId)} />
-                        <span style={{ color: 'var(--foreground)' }}>{t.typeName}</span>
-                        <span className="text-xs" style={{ color: 'var(--foreground-muted)' }}>
-                          ({t.contexts} contexts, {t.members + t.leaders} ppl)
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                )}
-                {allExcluded && section.types.length > 0 && (
-                  <p className="text-xs sans mt-2" style={{ color: 'var(--danger)' }}>
-                    All {section.title.toLowerCase()} excluded.
-                  </p>
-                )}
               </div>
-            )
-          })}
-        </div>
+              {section.types.length === 0 ? (
+                <p className="text-xs text-neutral-500">No types tracked.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-1 md:grid-cols-2">
+                  {section.types.map(t => (
+                    <label key={t.typeId} className="flex cursor-pointer items-center gap-2 py-1 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={!excludedSet.has(t.typeId)}
+                        onChange={() => toggle(section.kind, t.typeId)}
+                      />
+                      <span className="text-neutral-900">{t.typeName}</span>
+                      <span className="text-xs text-neutral-500">
+                        ({t.contexts} contexts, {t.members + t.leaders} ppl)
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {allExcluded && section.types.length > 0 && (
+                <p className="mt-2 text-xs text-red-500">
+                  All {section.title.toLowerCase()} excluded.
+                </p>
+              )}
+            </div>
+          )
+        })}
       </div>
-    </div>
+    </Modal>
   )
 }
 
@@ -427,7 +557,7 @@ export default function StatisticsPage() {
   const excludedTeamSet = useMemo(() => new Set(excluded.teamTypes), [excluded.teamTypes])
 
   if (loading) return <div className="p-8 sans text-sm" style={{ color: 'var(--foreground-muted)' }}>Loading statistics…</div>
-  if (error) return <div className="p-8 sans text-sm" style={{ color: '#8a3a3a' }}>Failed to load: {error}</div>
+  if (error) return <div className="p-8 sans text-sm" style={{ color: 'var(--color-status-exited)' }}>Failed to load: {error}</div>
   if (!data) return null
 
   return (
@@ -454,8 +584,8 @@ export default function StatisticsPage() {
         <h2 className="text-lg font-serif mb-3" style={{ color: 'var(--foreground)' }}>Categories of People</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <CategoryCard label="Total active" value={data.categories.total} total={data.categories.total} color="var(--foreground)" />
-          <CategoryCard label="Shepherded" value={data.categories.shepherded} total={data.categories.total} color="#2a6a3a" />
-          <CategoryCard label="Active" value={data.categories.active} total={data.categories.total} color="#c17f3e" />
+          <CategoryCard label="Shepherded" value={data.categories.shepherded} total={data.categories.total} color="var(--color-status-joined)" />
+          <CategoryCard label="Active" value={data.categories.active} total={data.categories.total} color="var(--color-role-leader)" />
           <CategoryCard label="Present" value={data.categories.present} total={data.categories.total} color="var(--foreground-muted)" />
         </div>
         <p className="mt-3 text-xs sans" style={{ color: 'var(--foreground-muted)' }}>

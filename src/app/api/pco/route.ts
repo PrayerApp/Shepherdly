@@ -378,11 +378,19 @@ export async function POST(request: NextRequest) {
       }
 
       let upserted = 0
+      let skippedFk = 0
       if (rows.length > 0) {
         // Resolve PCO IDs to UUIDs if mappings exist
         let resolvedRows = rows
         if (resource.idMappings && resource.idMappings.length > 0) {
-          resolvedRows = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+          const result = await resolvePcoIds(admin, rows, resource.idMappings, churchId!)
+          resolvedRows = result.resolved
+          skippedFk = result.skipped
+          if (skippedFk > 0) {
+            console.warn(
+              `Manual sync: ${skippedFk} ${resource.table} row(s) dropped due to unresolvable foreign keys`
+            )
+          }
         }
 
         // Add church_id to all rows
@@ -469,7 +477,14 @@ export async function POST(request: NextRequest) {
         try {
           if (credentials?.app_id && credentials?.app_secret) {
             const client = createPcoClient(credentials.app_id, credentials.app_secret)
-            await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+            const formStats = await syncConfiguredForms(admin, client, churchId!, credentials.last_synced_at)
+            for (const fs of formStats) {
+              if (fs.error) {
+                console.error(`Manual sync: form ${fs.formLabel} failed:`, fs.error)
+              } else if (fs.rowsSkipped > 0) {
+                console.warn(`Manual sync: ${fs.rowsSkipped} ${fs.formLabel} submission(s) dropped`)
+              }
+            }
           }
         } catch (e) {
           console.error('Post-sync form submissions failed:', e)

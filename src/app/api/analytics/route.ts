@@ -1,6 +1,11 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 
+const CACHE_HEADERS = {
+  // Materialized views refresh on cron, fine to serve a 60s-old response.
+  'Cache-Control': 'private, max-age=60, stale-while-revalidate=300',
+}
+
 export async function GET(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -30,28 +35,30 @@ export async function GET(request: NextRequest) {
           .limit(20),
       ])
 
-      // Attendance rate per recent event
+      // Single SQL aggregation instead of fetching every attendance row.
       const eventIds = (eventsRes.data || []).map(e => e.id)
-      let eventAttendance: Record<string, number> = {}
+      const eventAttendance: Record<string, number> = {}
       if (eventIds.length > 0) {
-        const { data: att } = await supabase
-          .from('group_event_attendances')
-          .select('event_id')
-          .in('event_id', eventIds)
-          .eq('attended', true)
-        att?.forEach(a => { eventAttendance[a.event_id] = (eventAttendance[a.event_id] || 0) + 1 })
+        const { data: counts } = await supabase
+          .rpc('get_event_attendance_counts', { p_event_ids: eventIds })
+        for (const c of (counts ?? []) as { event_id: string; attendee_count: number }[]) {
+          eventAttendance[c.event_id] = Number(c.attendee_count)
+        }
       }
 
-      const activeMembers = (membersRes.data || []).filter((m: any) => m.is_active !== false)
-      return NextResponse.json({
-        group: groupRes.data,
-        members: membersRes.data || [],
-        activeMemberCount: activeMembers.length,
-        recentEvents: (eventsRes.data || []).map(e => ({
-          ...e,
-          attendeeCount: eventAttendance[e.id] || 0,
-        })),
-      })
+      const activeMembers = (membersRes.data || []).filter((m: { is_active?: boolean }) => m.is_active !== false)
+      return NextResponse.json(
+        {
+          group: groupRes.data,
+          members: membersRes.data || [],
+          activeMemberCount: activeMembers.length,
+          recentEvents: (eventsRes.data || []).map(e => ({
+            ...e,
+            attendeeCount: eventAttendance[e.id] || 0,
+          })),
+        },
+        { headers: CACHE_HEADERS },
+      )
     }
 
     if (detail === 'team') {
@@ -67,15 +74,18 @@ export async function GET(request: NextRequest) {
           .limit(50),
       ])
 
-      const confirmed = (plansRes.data || []).filter((p: any) => p.status === 'C').length
+      const confirmed = (plansRes.data || []).filter((p: { status?: string }) => p.status === 'C').length
       const total = (plansRes.data || []).length
 
-      return NextResponse.json({
-        team: teamRes.data,
-        members: membersRes.data || [],
-        recentSchedules: plansRes.data || [],
-        confirmationRate: total > 0 ? confirmed / total : null,
-      })
+      return NextResponse.json(
+        {
+          team: teamRes.data,
+          members: membersRes.data || [],
+          recentSchedules: plansRes.data || [],
+          confirmationRate: total > 0 ? confirmed / total : null,
+        },
+        { headers: CACHE_HEADERS },
+      )
     }
   }
 
@@ -87,10 +97,13 @@ export async function GET(request: NextRequest) {
     supabase.from('context_summary').select('*'),
   ])
 
-  return NextResponse.json({
-    coverage: coverageRes.data || { total_active: 0, total_attenders: 0, unconnected_active: 0, has_shepherd: 0, connection_percentage: 0 },
-    attendanceTrend: trendRes.data || [],
-    unconnectedPeople: unconnectedRes.data || [],
-    contextSummary: contextRes.data || [],
-  })
+  return NextResponse.json(
+    {
+      coverage: coverageRes.data || { total_active: 0, total_attenders: 0, unconnected_active: 0, has_shepherd: 0, connection_percentage: 0 },
+      attendanceTrend: trendRes.data || [],
+      unconnectedPeople: unconnectedRes.data || [],
+      contextSummary: contextRes.data || [],
+    },
+    { headers: CACHE_HEADERS },
+  )
 }

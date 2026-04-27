@@ -1,4 +1,36 @@
 import { PcoClient } from './pco'
+import { SCHEMAS_BY_TABLE, type PcoTableName } from './pco/schemas'
+
+/*
+ * Validate a PCO list response against the schema registered for this
+ * resource's table. We validate but do NOT throw on failure — a single
+ * field-shape drift from PCO shouldn't take down a nightly sync. Instead
+ * we log a warning and let the sync continue with the unchecked payload;
+ * the per-resource log shows whether validation is succeeding.
+ *
+ * Returns a count of validation issues so the caller can fold it into
+ * its observability output.
+ */
+function validatePcoResponse(
+  table: string,
+  response: { data?: unknown[] } | undefined | null,
+): number {
+  if (!response) return 0
+  const schema = SCHEMAS_BY_TABLE[table as PcoTableName]
+  if (!schema) return 0
+  const result = schema.safeParse(response)
+  if (result.success) return 0
+  const issueCount = result.error.issues.length
+  console.warn(
+    `PCO response failed validation for table '${table}' (${issueCount} issues): ${
+      result.error.issues
+        .slice(0, 3)
+        .map(i => `${i.path.join('.') || '<root>'}: ${i.message}`)
+        .join('; ')
+    }`,
+  )
+  return issueCount
+}
 
 /**
  * PCO Sync resource definitions.
@@ -571,6 +603,7 @@ export async function fetchResourcePage(
   }
 
   const result = await client.get(resource.endpoint, params)
+  validatePcoResponse(resource.table, result)
   const data = result.data || []
   const included = result.included || []
   const filtered = resource.filterRow ? data.filter(resource.filterRow) : data
@@ -672,6 +705,7 @@ export async function fetchNestedPage(
       ...(resource.queryParams || {}),
     })
 
+    validatePcoResponse(resource.table, result)
     const data = result.data || []
     const included = result.included || []
     // Inject parent PCO ID into each row so mapRow can use it
@@ -745,6 +779,7 @@ async function fetchDoublyNestedPage(
       ...(resource.queryParams || {}),
     })
 
+    validatePcoResponse(resource.table, result)
     const data = result.data || []
     const included = result.included || []
     const rows = data.map((item: any) => {
@@ -792,13 +827,18 @@ async function fetchDoublyNestedPage(
  * Resolve PCO IDs to DB UUIDs for all configured mappings.
  * Drops rows where any required FK can't be resolved.
  */
+export interface ResolveResult {
+  resolved: Record<string, any>[]
+  skipped: number
+}
+
 export async function resolvePcoIds(
   admin: any,
   rows: Record<string, any>[],
   mappings: IdMapping[],
   churchId: string,
-): Promise<Record<string, any>[]> {
-  if (mappings.length === 0 || rows.length === 0) return rows
+): Promise<ResolveResult> {
+  if (mappings.length === 0 || rows.length === 0) return { resolved: rows, skipped: 0 }
 
   // Build lookup maps for each mapping
   const lookupMaps: Map<string, Map<string, string>> = new Map()
@@ -831,26 +871,32 @@ export async function resolvePcoIds(
     )
   }
 
-  // Map rows, resolving IDs and dropping unresolvable ones
-  return rows
+  // Map rows, resolving IDs and counting unresolvable ones
+  let skipped = 0
+  const resolved = rows
     .map(row => {
-      const resolved = { ...row }
+      const out = { ...row }
       for (const mapping of mappings) {
         const map = lookupMaps.get(mapping.pcoField)!
         const pcoVal = row[mapping.pcoField]
         if (pcoVal) {
           const uuid = map.get(pcoVal)
-          if (!uuid) return null // can't resolve — drop row
-          resolved[mapping.field] = uuid
+          if (!uuid) {
+            skipped++
+            return null
+          }
+          out[mapping.field] = uuid
         }
         // Remove the temp pco field if it starts with _
         if (mapping.pcoField.startsWith('_')) {
-          delete resolved[mapping.pcoField]
+          delete out[mapping.pcoField]
         }
       }
-      return resolved
+      return out
     })
     .filter(Boolean) as Record<string, any>[]
+
+  return { resolved, skipped }
 }
 
 // ── Post-sync FK linking ────────────────────────────────────
@@ -1028,10 +1074,26 @@ type FormConfigRow = {
   is_active: boolean
 }
 
+export interface FormSyncStats {
+  formPcoId: string
+  formLabel: string
+  rowsSeen: number
+  rowsUpserted: number
+  rowsSkipped: number
+  error?: string
+}
+
 /**
  * Sync every active form configured in pco_form_sync_config for the
- * given church. Upserts into pco_form_submissions. Returns count of
- * submissions synced.
+ * given church. Upserts into pco_form_submissions.
+ *
+ * Returns one stats object per form so the caller can write per-form
+ * rows into pco_sync_resource_log — the cron orchestrator does this so
+ * forms get the same observability and resumability treatment as the
+ * declarative SYNC_RESOURCES.
+ *
+ * `skipForms` lets a resumed cron run skip forms whose log row is
+ * already 'success'. Pass form_pco_id values that already completed.
  */
 export async function syncConfiguredForms(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1040,13 +1102,15 @@ export async function syncConfiguredForms(
   churchId: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   lastSyncedAt?: string | null,
-): Promise<number> {
+  options: { skipForms?: Set<string> } = {},
+): Promise<FormSyncStats[]> {
+  const skipForms = options.skipForms ?? new Set<string>()
   const { data: configs } = await admin
     .from('pco_form_sync_config')
     .select('*')
     .eq('church_id', churchId)
     .eq('is_active', true)
-  if (!configs || configs.length === 0) return 0
+  if (!configs || configs.length === 0) return []
 
   // Incremental cutoff: last_synced_at minus 3 months. PCO's Forms API
   // supports updated_at filtering, so we avoid refetching everything.
@@ -1056,96 +1120,126 @@ export async function syncConfiguredForms(
     since = new Date(ts).toISOString()
   }
 
-  let totalSynced = 0
+  const allStats: FormSyncStats[] = []
   for (const cfg of configs as FormConfigRow[]) {
-    const labels = cfg.extract_mode === 'labels'
-      ? await fetchFormFieldLabels(client, cfg.form_pco_id)
-      : null
-
-    const params: Record<string, string> = { per_page: '100' }
-    if (cfg.extract_mode === 'labels') {
-      params['include'] = 'form_submission_values'
-    }
-    if (since) {
-      params['where[updated_at][gte]'] = since
+    const formKey = `pco_form_submissions:${cfg.form_pco_id}`
+    if (skipForms.has(formKey)) {
+      // Already synced this form in the run we're resuming.
+      continue
     }
 
-    let offset = 0
-    while (true) {
-      const page = await client.get(
-        `/people/v2/forms/${cfg.form_pco_id}/form_submissions`,
-        { ...params, offset: String(offset) },
-      )
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const subs = (page.data || []) as any[]
-      if (subs.length === 0) break
+    const stats: FormSyncStats = {
+      formPcoId: cfg.form_pco_id,
+      formLabel: cfg.label,
+      rowsSeen: 0,
+      rowsUpserted: 0,
+      rowsSkipped: 0,
+    }
 
-      // Index included FormSubmissionValue rows by submission id for lookup.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const included: any[] = page.included || []
-      const valuesBySubmission = new Map<string, { fieldId: string; displayValue: string }[]>()
+    try {
+      const labels = cfg.extract_mode === 'labels'
+        ? await fetchFormFieldLabels(client, cfg.form_pco_id)
+        : null
+
+      const params: Record<string, string> = { per_page: '100' }
       if (cfg.extract_mode === 'labels') {
-        for (const v of included) {
-          if (v.type !== 'FormSubmissionValue') continue
-          const subId = v.relationships?.form_submission?.data?.id
-          const fieldId = v.relationships?.form_field?.data?.id
-          if (!subId || !fieldId) continue
-          if (!valuesBySubmission.has(subId)) valuesBySubmission.set(subId, [])
-          valuesBySubmission.get(subId)!.push({
-            fieldId,
-            displayValue: v.attributes?.display_value ?? '',
-          })
-        }
+        params['include'] = 'form_submission_values'
+      }
+      if (since) {
+        params['where[updated_at][gte]'] = since
       }
 
-      // Resolve PCO person_id → internal people.id. Batch lookup.
-      const pcoPersonIds = Array.from(new Set(
-        subs.map(s => s.relationships?.person?.data?.id).filter(Boolean),
-      ))
-      const personIdMap = new Map<string, string>()
-      if (pcoPersonIds.length > 0) {
-        const { data: peopleRows } = await admin
-          .from('people')
-          .select('id, pco_id')
-          .eq('church_id', churchId)
-          .in('pco_id', pcoPersonIds)
-        for (const p of peopleRows || []) personIdMap.set(p.pco_id, p.id)
-      }
+      let offset = 0
+      while (true) {
+        const page = await client.get(
+          `/people/v2/forms/${cfg.form_pco_id}/form_submissions`,
+          { ...params, offset: String(offset) },
+        )
+        validatePcoResponse('pco_form_submissions', page)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const subs = (page.data || []) as any[]
+        stats.rowsSeen += subs.length
+        if (subs.length === 0) break
 
-      const rows = subs.map(s => {
-        const pcoPersonId = s.relationships?.person?.data?.id || null
-        let answers: Record<string, string> | null = null
-        if (cfg.extract_mode === 'labels' && labels) {
-          const vals = valuesBySubmission.get(s.id) || []
-          answers = {}
-          for (const v of vals) {
-            const label = labels.get(v.fieldId) || v.fieldId
-            answers[label] = v.displayValue
+        // Index included FormSubmissionValue rows by submission id for lookup.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const included: any[] = page.included || []
+        const valuesBySubmission = new Map<string, { fieldId: string; displayValue: string }[]>()
+        if (cfg.extract_mode === 'labels') {
+          for (const v of included) {
+            if (v.type !== 'FormSubmissionValue') continue
+            const subId = v.relationships?.form_submission?.data?.id
+            const fieldId = v.relationships?.form_field?.data?.id
+            if (!subId || !fieldId) continue
+            if (!valuesBySubmission.has(subId)) valuesBySubmission.set(subId, [])
+            valuesBySubmission.get(subId)!.push({
+              fieldId,
+              displayValue: v.attributes?.display_value ?? '',
+            })
           }
         }
-        return {
-          pco_id: s.id,
-          form_pco_id: cfg.form_pco_id,
-          form_name: cfg.label,
-          person_id: pcoPersonId ? personIdMap.get(pcoPersonId) || null : null,
-          pco_person_id: pcoPersonId,
-          submitted_at: s.attributes?.created_at || null,
-          verified: s.attributes?.verified ?? false,
-          answers,
-          pco_updated_at: s.attributes?.updated_at || null,
-          church_id: churchId,
+
+        // Resolve PCO person_id → internal people.id. Batch lookup.
+        const pcoPersonIds = Array.from(new Set(
+          subs.map(s => s.relationships?.person?.data?.id).filter(Boolean),
+        ))
+        const personIdMap = new Map<string, string>()
+        if (pcoPersonIds.length > 0) {
+          const { data: peopleRows } = await admin
+            .from('people')
+            .select('id, pco_id')
+            .eq('church_id', churchId)
+            .in('pco_id', pcoPersonIds)
+          for (const p of peopleRows || []) personIdMap.set(p.pco_id, p.id)
         }
-      })
 
-      if (rows.length > 0) {
-        await admin.from('pco_form_submissions').upsert(rows, { onConflict: 'pco_id' })
-        totalSynced += rows.length
+        const rows = subs.map(s => {
+          const pcoPersonId = s.relationships?.person?.data?.id || null
+          // Submissions whose person hasn't been synced yet are dropped
+          // for now — the next run will pick them up once the person
+          // exists. Tracking the count as rowsSkipped surfaces drift in
+          // the per-form log.
+          if (pcoPersonId && !personIdMap.has(pcoPersonId)) {
+            stats.rowsSkipped++
+            return null
+          }
+          let answers: Record<string, string> | null = null
+          if (cfg.extract_mode === 'labels' && labels) {
+            const vals = valuesBySubmission.get(s.id) || []
+            answers = {}
+            for (const v of vals) {
+              const label = labels.get(v.fieldId) || v.fieldId
+              answers[label] = v.displayValue
+            }
+          }
+          return {
+            pco_id: s.id,
+            form_pco_id: cfg.form_pco_id,
+            form_name: cfg.label,
+            person_id: pcoPersonId ? personIdMap.get(pcoPersonId) || null : null,
+            pco_person_id: pcoPersonId,
+            submitted_at: s.attributes?.created_at || null,
+            verified: s.attributes?.verified ?? false,
+            answers,
+            pco_updated_at: s.attributes?.updated_at || null,
+            church_id: churchId,
+          }
+        }).filter((r): r is NonNullable<typeof r> => r !== null)
+
+        if (rows.length > 0) {
+          await admin.from('pco_form_submissions').upsert(rows, { onConflict: 'pco_id' })
+          stats.rowsUpserted += rows.length
+        }
+
+        if (subs.length < 100) break
+        offset += subs.length
       }
-
-      if (subs.length < 100) break
-      offset += subs.length
+    } catch (err) {
+      stats.error = err instanceof Error ? err.message.substring(0, 500) : String(err).substring(0, 500)
     }
+
+    allStats.push(stats)
   }
 
-  return totalSynced
+  return allStats
 }
