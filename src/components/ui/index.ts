@@ -4,3 +4,5 @@ export { Card, CardHeader, CardTitle, CardDescription, type CardProps } from './
 export { Badge, type BadgeProps } from './Badge'
 export { Modal, type ModalProps } from './Modal'
 export { DataTable, type DataTableProps, type ColumnDef } from './DataTable'
+export { SettingsSection, type SettingsSectionProps } from './SettingsSection'
+export { ChartCard, type ChartCardProps } from './ChartCard'
