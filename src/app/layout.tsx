@@ -26,7 +26,10 @@ const fraunces = Fraunces({
   display: 'swap',
   variable: '--font-fraunces',
   weight: 'variable',
-  axes: ['SOFT', 'opsz'],
+  // Only opsz (optical sizing). The SOFT axis was making the
+  // descender on `f` look pinched at body sizes; default styling
+  // reads cleaner.
+  axes: ['opsz'],
 })
 
 export const metadata: Metadata = {

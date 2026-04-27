@@ -45,7 +45,10 @@ type StaffRow = {
   staff_person_ids: string[] | null
 }
 
-type EngagementRow = { status: 'excluded' | 'shepherded' | 'active' | 'present' }
+type EngagementCountRow = {
+  status: 'excluded' | 'shepherded' | 'active' | 'present'
+  count: number
+}
 
 type PersonAnalyticsRow = {
   total_contexts: number | null
@@ -135,7 +138,7 @@ export async function GET() {
     { data: groupTrendRows },
     { data: teamTrendRows },
     { data: staffRows },
-    { data: engagementRows },
+    { data: engagementCounts },
     { data: peopleAnalytics },
   ] = await Promise.all([
     supabase.from('group_type_stats_v').select('*').eq('church_id', churchId),
@@ -143,7 +146,12 @@ export async function GET() {
     supabase.from('group_type_trend_v').select('type_id, offset_idx, snapshot_at, members, leaders').eq('church_id', churchId),
     supabase.from('team_type_trend_v').select('type_id, offset_idx, snapshot_at, members, leaders').eq('church_id', churchId),
     supabase.from('staff_per_type_v').select('kind, type_id, staff_count, staff_person_ids').eq('church_id', churchId),
-    supabase.from('person_engagement_status').select('status').eq('church_id', churchId),
+    /*
+     * Aggregate via RPC. The previous version selected raw rows, which
+     * PostgREST silently capped at 1000 even for a church with ~16k people.
+     * The RPC does the GROUP BY in SQL and returns 4 small rows.
+     */
+    supabase.rpc('get_person_engagement_counts', { p_church_id: churchId }),
     supabase.from('person_analytics').select('total_contexts, group_attendance_rate').eq('church_id', churchId),
   ])
 
@@ -161,14 +169,15 @@ export async function GET() {
     staffByKind('team'),
   )
 
-  // Categories: count rows by status. Engagement view excludes inactive
-  // people and SYSTEM rows already.
+  // Categories: RPC returns one row per status with a count. Engagement
+  // view excludes inactive people and SYSTEM rows already.
   const categories = { total: 0, shepherded: 0, active: 0, present: 0, excluded: 0 }
-  for (const r of (engagementRows ?? []) as EngagementRow[]) {
-    if (r.status === 'excluded') categories.excluded++
-    else if (r.status === 'shepherded') categories.shepherded++
-    else if (r.status === 'active') categories.active++
-    else if (r.status === 'present') categories.present++
+  for (const r of (engagementCounts ?? []) as EngagementCountRow[]) {
+    const c = Number(r.count) || 0
+    if (r.status === 'excluded') categories.excluded = c
+    else if (r.status === 'shepherded') categories.shepherded = c
+    else if (r.status === 'active') categories.active = c
+    else if (r.status === 'present') categories.present = c
   }
   categories.total = categories.shepherded + categories.active + categories.present
 
