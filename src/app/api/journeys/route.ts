@@ -20,11 +20,12 @@ import { NextRequest, NextResponse } from 'next/server'
  * The page color-codes by `type`. Colors are chosen client-side so we
  * don't bake palette decisions into the API.
  *
- * Volume control: by default we return the top N=100 most-active people
- * in the window (most events). The page can ask for a specific person by
- * personId, in which case the cap doesn't apply and we return that one
- * timeline.
+ * Returns every active person who has at least one event in the window,
+ * sorted by event count (most active first). Per-table fetches are bounded
+ * by HARD_LIMIT to keep payloads predictable on large datasets.
  */
+
+const HARD_LIMIT = 100000
 
 const WINDOWS = {
   '3m': 90,
@@ -59,9 +60,6 @@ interface PersonJourney {
   events: JourneyEvent[]
 }
 
-const DEFAULT_LIMIT = 100
-const MAX_LIMIT = 500
-
 export async function GET(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -75,29 +73,19 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams
   const windowParam = params.get('window') as WindowKey | null
   const windowKey: WindowKey = windowParam && windowParam in WINDOWS ? windowParam : '12m'
-  const limit = Math.min(MAX_LIMIT, Math.max(1, Number(params.get('limit')) || DEFAULT_LIMIT))
-  const search = params.get('search')?.trim() ?? ''
-  const personId = params.get('personId')?.trim() ?? ''
 
   const now = Date.now()
   const windowStart = now - WINDOWS[windowKey] * 86400000
   const windowStartIso = new Date(windowStart).toISOString()
 
-  /*
-   * 1. Fetch raw events. Each query is bounded to the window. When
-   *    personId or search is set we restrict the people set first to
-   *    keep payloads manageable.
-   */
+  // 1. Fetch raw events. Each query is bounded to the window and capped
+  //    at HARD_LIMIT to keep payloads predictable.
   const peopleQuery = supabase
     .from('people')
     .select('id, name')
     .eq('church_id', churchId)
     .eq('status', 'active')
-  const peopleScoped = personId
-    ? peopleQuery.eq('id', personId)
-    : search
-      ? peopleQuery.ilike('name', `%${search}%`).limit(MAX_LIMIT)
-      : peopleQuery.limit(2000)
+    .limit(HARD_LIMIT)
 
   const [
     { data: peopleRows },
@@ -115,26 +103,28 @@ export async function GET(request: NextRequest) {
     { data: groups },
     { data: teams },
   ] = await Promise.all([
-    peopleScoped,
+    peopleQuery,
     supabase
       .from('group_memberships')
       .select('person_id, group_id, joined_at, left_at')
       .eq('church_id', churchId)
-      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`),
+      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
+      .limit(HARD_LIMIT),
     supabase
       .from('team_memberships')
       .select('person_id, team_id, joined_at, left_at')
       .eq('church_id', churchId)
-      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`),
-    supabase.from('group_events').select('id, group_id, starts_at').eq('church_id', churchId).gte('starts_at', windowStartIso),
-    supabase.from('group_event_attendances').select('person_id, event_id').eq('church_id', churchId).eq('attended', true),
-    supabase.from('plan_team_members').select('person_id, team_id, plan_id, status').eq('church_id', churchId).eq('status', 'C'),
-    supabase.from('service_plans').select('id, sort_date').eq('church_id', churchId).gte('sort_date', windowStartIso),
-    supabase.from('pco_form_submissions').select('person_id, form_pco_id, submitted_at').eq('church_id', churchId).gte('submitted_at', windowStartIso).not('person_id', 'is', null),
+      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
+      .limit(HARD_LIMIT),
+    supabase.from('group_events').select('id, group_id, starts_at').eq('church_id', churchId).gte('starts_at', windowStartIso).limit(HARD_LIMIT),
+    supabase.from('group_event_attendances').select('person_id, event_id').eq('church_id', churchId).eq('attended', true).limit(HARD_LIMIT),
+    supabase.from('plan_team_members').select('person_id, team_id, plan_id, status').eq('church_id', churchId).eq('status', 'C').limit(HARD_LIMIT),
+    supabase.from('service_plans').select('id, sort_date').eq('church_id', churchId).gte('sort_date', windowStartIso).limit(HARD_LIMIT),
+    supabase.from('pco_form_submissions').select('person_id, form_pco_id, submitted_at').eq('church_id', churchId).gte('submitted_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
     supabase.from('pco_form_sync_config').select('form_pco_id, label, purpose').eq('church_id', churchId).eq('is_active', true),
-    supabase.from('pco_signup_attendees').select('person_id, signup_id, registered_at, active, waitlisted, canceled').eq('church_id', churchId).gte('registered_at', windowStartIso).not('person_id', 'is', null),
+    supabase.from('pco_signup_attendees').select('person_id, signup_id, registered_at, active, waitlisted, canceled').eq('church_id', churchId).gte('registered_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
     supabase.from('pco_signups').select('id, name'),
-    supabase.from('attendance_records').select('person_id, checked_in_at, service_type').eq('church_id', churchId).gte('checked_in_at', windowStartIso).not('person_id', 'is', null).limit(50000),
+    supabase.from('attendance_records').select('person_id, checked_in_at, service_type').eq('church_id', churchId).gte('checked_in_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
     supabase.from('groups').select('id, name'),
     supabase.from('teams').select('id, name'),
   ])
@@ -219,10 +209,9 @@ export async function GET(request: NextRequest) {
   for (const j of personMap.values()) {
     j.events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   }
-  let people = Array.from(personMap.values()).filter(j => j.eventCount > 0)
+  const people = Array.from(personMap.values()).filter(j => j.eventCount > 0)
   people.sort((a, b) => b.eventCount - a.eventCount)
   const totalWithEvents = people.length
-  if (!personId) people = people.slice(0, limit)
 
   return NextResponse.json(
     {

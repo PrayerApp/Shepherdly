@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, Search } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import {
   JourneyDotPlot,
   JOURNEY_TYPE_COLOR,
@@ -39,23 +39,19 @@ export default function JourneysPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [windowKey, setWindowKey] = useState<Payload['window']>('12m')
-  const [searchInput, setSearchInput] = useState('')
-  const [searchActive, setSearchActive] = useState('')
   const [selectedTypes, setSelectedTypes] = useState<Set<JourneyEventType>>(new Set(ALL_TYPES))
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
     setError(null)
-    const params = new URLSearchParams({ window: windowKey })
-    if (searchActive) params.set('search', searchActive)
-    fetch(`/api/journeys?${params}`)
+    fetch(`/api/journeys?window=${windowKey}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => { if (!cancelled) setData(d) })
       .catch(e => { if (!cancelled) setError(e.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [windowKey, searchActive])
+  }, [windowKey])
 
   const toggleType = (t: JourneyEventType) => {
     setSelectedTypes(prev => {
@@ -66,18 +62,10 @@ export default function JourneysPage() {
     })
   }
 
-  const onSubmitSearch = (e: React.FormEvent) => {
-    e.preventDefault()
-    setSearchActive(searchInput.trim())
-  }
-
   const description = useMemo(() => {
     if (!data) return null
-    const cap = searchActive
-      ? `${data.returned} of ${data.totalWithEvents} matching “${searchActive}”`
-      : `Top ${data.returned} most-active of ${data.totalWithEvents} people with events`
-    return cap
-  }, [data, searchActive])
+    return `${data.totalWithEvents.toLocaleString()} people with events in this window, sorted most-active first`
+  }, [data])
 
   return (
     <div className="p-8 max-w-[1300px]">
@@ -110,34 +98,6 @@ export default function JourneysPage() {
             </button>
           )
         })}
-        <form onSubmit={onSubmitSearch} className="ml-auto flex items-center gap-2">
-          <div className="relative">
-            <Search className="absolute left-2 top-1/2 size-4 -translate-y-1/2 text-neutral-400" aria-hidden />
-            <input
-              type="search"
-              value={searchInput}
-              onChange={e => setSearchInput(e.target.value)}
-              placeholder="Search by name…"
-              className="rounded-md border border-neutral-200 bg-white pl-8 pr-3 py-1.5 text-sm w-64"
-              aria-label="Search people by name"
-            />
-          </div>
-          <button
-            type="submit"
-            className="rounded-md border border-neutral-200 bg-white px-3 py-1.5 text-sm hover:bg-neutral-50"
-          >
-            Search
-          </button>
-          {searchActive && (
-            <button
-              type="button"
-              onClick={() => { setSearchInput(''); setSearchActive('') }}
-              className="text-xs text-neutral-500 underline"
-            >
-              Clear
-            </button>
-          )}
-        </form>
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -192,7 +152,7 @@ export default function JourneysPage() {
         <div className="mt-3 space-y-2 text-neutral-600">
           <p>
             Each row is one active person. Dots are placed by date along the
-            shared timeline. Hover a dot for the event label and date.
+            shared timeline.
           </p>
           <p>
             Sources: group_memberships (joined/left), team_memberships (joined/left),
@@ -201,9 +161,9 @@ export default function JourneysPage() {
             not canceled), and attendance_records (PCO check-ins).
           </p>
           <p>
-            Default view shows the 100 most-active people in the selected window.
-            Use the search box to find someone specific; their full timeline appears
-            without the cap.
+            Every active person with at least one event in the window is shown,
+            sorted most-active first. Rows are 2 pixels tall — at this density the
+            chart reads as a skyline of activity rather than a per-person list.
           </p>
         </div>
       </details>
