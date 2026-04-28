@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server'
 /*
  * Journey timeline data for /journeys.
  *
- * One row per person. Each row carries an array of dated events,
+ * One row per active person. Each row carries an array of dated events,
  * coalesced from every signal we currently sync:
  *
  *   group_join          gm.joined_at
@@ -17,15 +17,40 @@ import { NextRequest, NextResponse } from 'next/server'
  *   signup              pco_signup_attendees.registered_at (active or waitlisted)
  *   checkin             attendance_records.checked_in_at
  *
- * The page color-codes by `type`. Colors are chosen client-side so we
- * don't bake palette decisions into the API.
+ * Returns every active person (with eventCount=0 rows for those who have
+ * no signals in the window — the page wants the full roster, not just
+ * the active subset). Sorted most-active first.
  *
- * Returns every active person who has at least one event in the window,
- * sorted by event count (most active first). Per-table fetches are bounded
- * by HARD_LIMIT to keep payloads predictable on large datasets.
+ * Pagination: PostgREST caps single responses at db-max-rows (1000 here),
+ * regardless of .limit(). Every potentially-large query is fetched via
+ * fetchAllPaged so we get the full result set. Without this the chart
+ * would silently truncate to whichever 1000 rows came back first.
+ *
+ * For tables that have no date column to filter by directly
+ * (group_event_attendances, plan_team_members) we use PostgREST nested
+ * selects on their windowed parents (group_events, service_plans) — one
+ * paginated stream pulls every parent in the window with its full set of
+ * children embedded, which is dramatically faster than chunking .in().
  */
 
-const HARD_LIMIT = 100000
+// Pagination round trips can stack up — give the function room to finish
+// before Vercel's default 10s ceiling cuts us off.
+export const maxDuration = 60
+
+const PAGE = 1000
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAllPaged<T>(buildQuery: (from: number, to: number) => any): Promise<T[]> {
+  const out: T[] = []
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await buildQuery(from, from + PAGE - 1)
+    if (error) throw error
+    if (!data || data.length === 0) break
+    out.push(...(data as T[]))
+    if (data.length < PAGE) break
+  }
+  return out
+}
 
 const WINDOWS = {
   '3m': 90,
@@ -60,6 +85,19 @@ interface PersonJourney {
   events: JourneyEvent[]
 }
 
+interface GroupEventWithAtts {
+  id: string
+  group_id: string
+  starts_at: string | null
+  group_event_attendances: { person_id: string; attended: boolean | null }[] | null
+}
+
+interface ServicePlanWithPtm {
+  id: string
+  sort_date: string | null
+  plan_team_members: { person_id: string; team_id: string; status: string }[] | null
+}
+
 export async function GET(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -78,107 +116,103 @@ export async function GET(request: NextRequest) {
   const windowStart = now - WINDOWS[windowKey] * 86400000
   const windowStartIso = new Date(windowStart).toISOString()
 
-  // 1. Fetch raw events. Each query is bounded to the window and capped
-  //    at HARD_LIMIT to keep payloads predictable.
-  const peopleQuery = supabase
-    .from('people')
-    .select('id, name')
-    .eq('church_id', churchId)
-    .eq('status', 'active')
-    .limit(HARD_LIMIT)
-
-  // Wave 1: everything that can be filtered directly by date or has no
-  // dependency on a parent table.
   const [
-    { data: peopleRows },
-    { data: groupMemberships },
-    { data: teamMemberships },
-    { data: groupEvents },
-    { data: servicePlans },
-    { data: formSubmissions },
-    { data: forms },
-    { data: signupAttendees },
-    { data: signups },
-    { data: checkins },
-    { data: groups },
-    { data: teams },
+    peopleRows,
+    groupMemberships,
+    teamMemberships,
+    groupEventsWithAtts,
+    servicePlansWithPtm,
+    formSubmissions,
+    forms,
+    signupAttendees,
+    signups,
+    checkins,
+    groups,
+    teams,
   ] = await Promise.all([
-    peopleQuery,
-    supabase
-      .from('group_memberships')
-      .select('person_id, group_id, joined_at, left_at')
-      .eq('church_id', churchId)
-      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
-      .limit(HARD_LIMIT),
-    supabase
-      .from('team_memberships')
-      .select('person_id, team_id, joined_at, left_at')
-      .eq('church_id', churchId)
-      .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
-      .limit(HARD_LIMIT),
-    supabase.from('group_events').select('id, group_id, starts_at').eq('church_id', churchId).gte('starts_at', windowStartIso).limit(HARD_LIMIT),
-    supabase.from('service_plans').select('id, sort_date').eq('church_id', churchId).gte('sort_date', windowStartIso).limit(HARD_LIMIT),
-    supabase.from('pco_form_submissions').select('person_id, form_pco_id, submitted_at').eq('church_id', churchId).gte('submitted_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
-    supabase.from('pco_form_sync_config').select('form_pco_id, label, purpose').eq('church_id', churchId).eq('is_active', true),
-    supabase.from('pco_signup_attendees').select('person_id, signup_id, registered_at, active, waitlisted, canceled').eq('church_id', churchId).gte('registered_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
-    supabase.from('pco_signups').select('id, name'),
-    supabase.from('attendance_records').select('person_id, checked_in_at, service_type').eq('church_id', churchId).gte('checked_in_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
-    supabase.from('groups').select('id, name'),
-    supabase.from('teams').select('id, name'),
+    fetchAllPaged<{ id: string; name: string }>((from, to) =>
+      supabase.from('people')
+        .select('id, name')
+        .eq('church_id', churchId).eq('status', 'active')
+        .order('id').range(from, to),
+    ),
+    fetchAllPaged<{ person_id: string; group_id: string; joined_at: string | null; left_at: string | null }>((from, to) =>
+      supabase.from('group_memberships')
+        .select('person_id, group_id, joined_at, left_at')
+        .eq('church_id', churchId)
+        .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
+        .order('id').range(from, to),
+    ),
+    fetchAllPaged<{ person_id: string; team_id: string; joined_at: string | null; left_at: string | null }>((from, to) =>
+      supabase.from('team_memberships')
+        .select('person_id, team_id, joined_at, left_at')
+        .eq('church_id', churchId)
+        .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
+        .order('id').range(from, to),
+    ),
+    fetchAllPaged<GroupEventWithAtts>((from, to) =>
+      supabase.from('group_events')
+        .select('id, group_id, starts_at, group_event_attendances(person_id, attended)')
+        .eq('church_id', churchId)
+        .gte('starts_at', windowStartIso)
+        .order('id').range(from, to),
+    ),
+    fetchAllPaged<ServicePlanWithPtm>((from, to) =>
+      supabase.from('service_plans')
+        .select('id, sort_date, plan_team_members(person_id, team_id, status)')
+        .eq('church_id', churchId)
+        .gte('sort_date', windowStartIso)
+        .order('id').range(from, to),
+    ),
+    fetchAllPaged<{ person_id: string; form_pco_id: string; submitted_at: string | null }>((from, to) =>
+      supabase.from('pco_form_submissions')
+        .select('person_id, form_pco_id, submitted_at')
+        .eq('church_id', churchId)
+        .gte('submitted_at', windowStartIso)
+        .not('person_id', 'is', null)
+        .order('submitted_at').range(from, to),
+    ),
+    supabase.from('pco_form_sync_config')
+      .select('form_pco_id, label, purpose')
+      .eq('church_id', churchId).eq('is_active', true)
+      .then(r => (r.data ?? []) as { form_pco_id: string; label: string; purpose: string | null }[]),
+    fetchAllPaged<{ person_id: string; signup_id: string; registered_at: string | null; active: boolean | null; waitlisted: boolean | null; canceled: boolean | null }>((from, to) =>
+      supabase.from('pco_signup_attendees')
+        .select('person_id, signup_id, registered_at, active, waitlisted, canceled')
+        .eq('church_id', churchId)
+        .gte('registered_at', windowStartIso)
+        .not('person_id', 'is', null)
+        .order('registered_at').range(from, to),
+    ),
+    supabase.from('pco_signups').select('id, name')
+      .then(r => (r.data ?? []) as { id: string; name: string | null }[]),
+    fetchAllPaged<{ person_id: string; checked_in_at: string | null; service_type: string | null }>((from, to) =>
+      supabase.from('attendance_records')
+        .select('person_id, checked_in_at, service_type')
+        .eq('church_id', churchId)
+        .gte('checked_in_at', windowStartIso)
+        .not('person_id', 'is', null)
+        .order('checked_in_at').range(from, to),
+    ),
+    supabase.from('groups').select('id, name')
+      .then(r => (r.data ?? []) as { id: string; name: string | null }[]),
+    supabase.from('teams').select('id, name')
+      .then(r => (r.data ?? []) as { id: string; name: string | null }[]),
   ])
 
-  // Wave 2: tables that have no date column we can filter by directly,
-  // so we filter by parent IDs from wave 1. Without this, .limit() would
-  // silently truncate to the first HARD_LIMIT rows in primary-key order
-  // (i.e. oldest first) and recent activity would be invisible.
-  const eventIdList = ((groupEvents ?? []) as { id: string }[]).map(e => e.id)
-  const planIdList = ((servicePlans ?? []) as { id: string }[]).map(p => p.id)
-  const [
-    { data: groupEventAtts },
-    { data: planTeamMembers },
-  ] = await Promise.all([
-    eventIdList.length === 0
-      ? Promise.resolve({ data: [] as { person_id: string; event_id: string }[] })
-      : supabase.from('group_event_attendances')
-          .select('person_id, event_id')
-          .eq('church_id', churchId)
-          .eq('attended', true)
-          .in('event_id', eventIdList)
-          .limit(HARD_LIMIT),
-    planIdList.length === 0
-      ? Promise.resolve({ data: [] as { person_id: string; team_id: string; plan_id: string; status: string }[] })
-      : supabase.from('plan_team_members')
-          .select('person_id, team_id, plan_id, status')
-          .eq('church_id', churchId)
-          .eq('status', 'C')
-          .in('plan_id', planIdList)
-          .limit(HARD_LIMIT),
-  ])
-
-  // 2. Lookup tables.
-  const groupName = new Map<string, string>(((groups ?? []) as { id: string; name: string | null }[]).map(g => [g.id, g.name ?? 'Group']))
-  const teamName = new Map<string, string>(((teams ?? []) as { id: string; name: string | null }[]).map(t => [t.id, t.name ?? 'Team']))
-  const eventGroup = new Map<string, { groupId: string; startsAt: string }>(
-    ((groupEvents ?? []) as { id: string; group_id: string; starts_at: string | null }[])
-      .filter(e => e.starts_at)
-      .map(e => [e.id, { groupId: e.group_id, startsAt: e.starts_at as string }]),
-  )
-  const planDate = new Map<string, string>(
-    ((servicePlans ?? []) as { id: string; sort_date: string | null }[])
-      .filter(p => p.sort_date)
-      .map(p => [p.id, p.sort_date as string]),
-  )
+  // Lookup tables for human-readable event labels.
+  const groupName = new Map<string, string>(groups.map(g => [g.id, g.name ?? 'Group']))
+  const teamName = new Map<string, string>(teams.map(t => [t.id, t.name ?? 'Team']))
   const formLabel = new Map<string, string>(
-    ((forms ?? []) as { form_pco_id: string; label: string; purpose: string | null }[])
-      .map(f => [f.form_pco_id, f.purpose ? `Form: ${cap(f.purpose)}` : `Form: ${f.label}`]),
+    forms.map(f => [f.form_pco_id, f.purpose ? `Form: ${cap(f.purpose)}` : `Form: ${f.label}`]),
   )
   const signupNameMap = new Map<string, string>(
-    ((signups ?? []) as { id: string; name: string | null }[]).map(s => [s.id, truncate(s.name ?? 'Unknown signup', 40)]),
+    signups.map(s => [s.id, truncate(s.name ?? 'Unknown signup', 40)]),
   )
 
-  // 3. Build per-person event lists.
+  // Build per-person event lists.
   const personMap = new Map<string, PersonJourney>()
-  for (const p of (peopleRows ?? []) as { id: string; name: string }[]) {
+  for (const p of peopleRows) {
     personMap.set(p.id, { personId: p.id, personName: p.name, eventCount: 0, events: [] })
   }
   const push = (pid: string, ev: JourneyEvent) => {
@@ -188,7 +222,7 @@ export async function GET(request: NextRequest) {
     j.eventCount++
   }
 
-  for (const m of (groupMemberships ?? []) as { person_id: string; group_id: string; joined_at: string | null; left_at: string | null }[]) {
+  for (const m of groupMemberships) {
     if (m.joined_at && Date.parse(m.joined_at) >= windowStart) {
       push(m.person_id, { at: m.joined_at, type: 'group_join', label: `Joined ${groupName.get(m.group_id) ?? 'group'}` })
     }
@@ -196,7 +230,7 @@ export async function GET(request: NextRequest) {
       push(m.person_id, { at: m.left_at, type: 'group_leave', label: `Left ${groupName.get(m.group_id) ?? 'group'}` })
     }
   }
-  for (const m of (teamMemberships ?? []) as { person_id: string; team_id: string; joined_at: string | null; left_at: string | null }[]) {
+  for (const m of teamMemberships) {
     if (m.joined_at && Date.parse(m.joined_at) >= windowStart) {
       push(m.person_id, { at: m.joined_at, type: 'team_join', label: `Joined ${teamName.get(m.team_id) ?? 'team'}` })
     }
@@ -204,34 +238,38 @@ export async function GET(request: NextRequest) {
       push(m.person_id, { at: m.left_at, type: 'team_leave', label: `Left ${teamName.get(m.team_id) ?? 'team'}` })
     }
   }
-  for (const a of (groupEventAtts ?? []) as { person_id: string; event_id: string }[]) {
-    const ev = eventGroup.get(a.event_id)
-    if (!ev) continue
-    if (Date.parse(ev.startsAt) < windowStart) continue
-    push(a.person_id, { at: ev.startsAt, type: 'group_attendance', label: `Attended ${groupName.get(ev.groupId) ?? 'group'}` })
+  for (const ev of groupEventsWithAtts) {
+    if (!ev.starts_at) continue
+    if (Date.parse(ev.starts_at) < windowStart) continue
+    for (const a of ev.group_event_attendances ?? []) {
+      if (!a.attended) continue
+      push(a.person_id, { at: ev.starts_at, type: 'group_attendance', label: `Attended ${groupName.get(ev.group_id) ?? 'group'}` })
+    }
   }
-  for (const ptm of (planTeamMembers ?? []) as { person_id: string; team_id: string; plan_id: string; status: string }[]) {
-    const date = planDate.get(ptm.plan_id)
-    if (!date) continue
-    if (Date.parse(date) < windowStart) continue
-    push(ptm.person_id, { at: date, type: 'team_serve', label: `Served on ${teamName.get(ptm.team_id) ?? 'team'}` })
+  for (const sp of servicePlansWithPtm) {
+    if (!sp.sort_date) continue
+    if (Date.parse(sp.sort_date) < windowStart) continue
+    for (const ptm of sp.plan_team_members ?? []) {
+      if (ptm.status !== 'C') continue
+      push(ptm.person_id, { at: sp.sort_date, type: 'team_serve', label: `Served on ${teamName.get(ptm.team_id) ?? 'team'}` })
+    }
   }
-  for (const s of (formSubmissions ?? []) as { person_id: string; form_pco_id: string; submitted_at: string | null }[]) {
+  for (const s of formSubmissions) {
     if (!s.submitted_at) continue
     push(s.person_id, { at: s.submitted_at, type: 'form', label: formLabel.get(s.form_pco_id) ?? 'Form' })
   }
-  for (const sa of (signupAttendees ?? []) as { person_id: string; signup_id: string; registered_at: string | null; active: boolean | null; waitlisted: boolean | null; canceled: boolean | null }[]) {
+  for (const sa of signupAttendees) {
     if (!sa.registered_at) continue
     if (sa.canceled) continue
     if (!(sa.active || sa.waitlisted)) continue
     push(sa.person_id, { at: sa.registered_at, type: 'signup', label: `Signup: ${signupNameMap.get(sa.signup_id) ?? 'Unknown'}` })
   }
-  for (const c of (checkins ?? []) as { person_id: string; checked_in_at: string | null; service_type: string | null }[]) {
+  for (const c of checkins) {
     if (!c.checked_in_at) continue
     push(c.person_id, { at: c.checked_in_at, type: 'checkin', label: c.service_type ? `Check-in: ${c.service_type}` : 'Check-in' })
   }
 
-  // 4. Sort each timeline ascending and rank by event count.
+  // Sort each timeline ascending and rank by event count.
   for (const j of personMap.values()) {
     j.events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   }
