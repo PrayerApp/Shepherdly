@@ -32,6 +32,7 @@ const ROUTE_LABELS: Array<{ prefix: string; label: string }> = [
   { prefix: '/mir', label: 'Impact Reports' },
   { prefix: '/statistics', label: 'Statistics' },
   { prefix: '/handoffs', label: 'Handoffs' },
+  { prefix: '/journeys', label: 'Journeys' },
   { prefix: '/settings/users', label: 'Manage Users' },
   { prefix: '/settings/pco', label: 'PCO Connection' },
   { prefix: '/settings/group-types', label: 'Group Types' },

@@ -30,6 +30,7 @@ const NAV_ITEMS = [
   { href: '/mir', label: 'Impact Reports', icon: MirIcon },
   { href: '/statistics', label: 'Statistics', icon: StatsIcon },
   { href: '/handoffs', label: 'Handoffs', icon: HandoffsIcon },
+  { href: '/journeys', label: 'Journeys', icon: JourneysIcon },
 ]
 
 const SETTINGS_ITEMS = [
@@ -191,6 +192,10 @@ function StatsIcon({ size }: { size: number }) {
 function HandoffsIcon({ size }: { size: number }) {
   // Two arrows merging — visualizes flow / handoff
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7h7l4 5h7"/><path d="M3 17h7l4-5"/><polyline points="17 9 21 12 17 15"/></svg>
+}
+function JourneysIcon({ size }: { size: number }) {
+  // Dots along a baseline — represents per-person event timeline
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><circle cx="6" cy="12" r="1.5" fill="currentColor"/><circle cx="11" cy="12" r="1.5" fill="currentColor"/><circle cx="15" cy="12" r="1.5" fill="currentColor"/><circle cx="19" cy="12" r="1.5" fill="currentColor"/></svg>
 }
 function SignOutIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
