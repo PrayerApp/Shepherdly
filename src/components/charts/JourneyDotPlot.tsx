@@ -94,10 +94,13 @@ export function JourneyDotPlot({
 
   const filtered = useMemo(() => {
     if (!selectedTypes) return people
+    // Keep every row, even if no events match the selected types — the
+    // page wants the full active-person roster, with empty rows reading
+    // as "no recorded activity in this window."
     return people.map(p => ({
       ...p,
       events: p.events.filter(e => selectedTypes.has(e.type)),
-    })).filter(p => p.events.length > 0)
+    }))
   }, [people, selectedTypes])
 
   const chunks = useMemo(() => {

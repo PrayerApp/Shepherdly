@@ -313,7 +313,7 @@ export async function GET(request: NextRequest) {
      * Post-sync: recompute last_activity_at for every membership and
      * mark stale ones inactive. PCO doesn't expose left_at on group
      * or team memberships, so a person who hasn't attended a group
-     * meeting or accepted a serving slot in 12+ months stays "active"
+     * meeting or accepted a serving slot in 6+ months stays "active"
      * in our mirror unless we close them out by recency. Resumed
      * runs skip this for the same reason markDepartedMemberships is
      * skipped — local seen-sets aren't authoritative across runs.
@@ -322,12 +322,12 @@ export async function GET(request: NextRequest) {
       try {
         await admin.rpc('refresh_membership_activity')
         const { data: deactivated } = await admin.rpc('mark_inactive_by_activity', {
-          p_inactive_days: 365,
+          p_inactive_days: 180,
           p_grace_days: 90,
         })
         for (const row of (deactivated ?? []) as { table_name: string; deactivated: number }[]) {
           if (row.deactivated > 0) {
-            console.log(`Cron: marked ${row.deactivated} ${row.table_name} inactive (no activity in 365d)`)
+            console.log(`Cron: marked ${row.deactivated} ${row.table_name} inactive (no activity in 180d)`)
           }
         }
       } catch (e) {

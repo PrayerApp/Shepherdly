@@ -16,6 +16,7 @@ interface Payload {
   generatedAt: string
   windowStart: string
   windowEnd: string
+  total: number
   totalWithEvents: number
   returned: number
   people: PersonJourney[]
@@ -64,7 +65,9 @@ export default function JourneysPage() {
 
   const description = useMemo(() => {
     if (!data) return null
-    return `${data.totalWithEvents.toLocaleString()} people with events in this window, sorted most-active first`
+    const total = (data.total ?? data.totalWithEvents).toLocaleString()
+    const withEvents = data.totalWithEvents.toLocaleString()
+    return `${total} active people — ${withEvents} with events in this window, sorted most-active first`
   }, [data])
 
   return (

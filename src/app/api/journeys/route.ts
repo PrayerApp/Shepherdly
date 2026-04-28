@@ -87,13 +87,13 @@ export async function GET(request: NextRequest) {
     .eq('status', 'active')
     .limit(HARD_LIMIT)
 
+  // Wave 1: everything that can be filtered directly by date or has no
+  // dependency on a parent table.
   const [
     { data: peopleRows },
     { data: groupMemberships },
     { data: teamMemberships },
     { data: groupEvents },
-    { data: groupEventAtts },
-    { data: planTeamMembers },
     { data: servicePlans },
     { data: formSubmissions },
     { data: forms },
@@ -117,8 +117,6 @@ export async function GET(request: NextRequest) {
       .or(`joined_at.gte.${windowStartIso},left_at.gte.${windowStartIso}`)
       .limit(HARD_LIMIT),
     supabase.from('group_events').select('id, group_id, starts_at').eq('church_id', churchId).gte('starts_at', windowStartIso).limit(HARD_LIMIT),
-    supabase.from('group_event_attendances').select('person_id, event_id').eq('church_id', churchId).eq('attended', true).limit(HARD_LIMIT),
-    supabase.from('plan_team_members').select('person_id, team_id, plan_id, status').eq('church_id', churchId).eq('status', 'C').limit(HARD_LIMIT),
     supabase.from('service_plans').select('id, sort_date').eq('church_id', churchId).gte('sort_date', windowStartIso).limit(HARD_LIMIT),
     supabase.from('pco_form_submissions').select('person_id, form_pco_id, submitted_at').eq('church_id', churchId).gte('submitted_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
     supabase.from('pco_form_sync_config').select('form_pco_id, label, purpose').eq('church_id', churchId).eq('is_active', true),
@@ -127,6 +125,34 @@ export async function GET(request: NextRequest) {
     supabase.from('attendance_records').select('person_id, checked_in_at, service_type').eq('church_id', churchId).gte('checked_in_at', windowStartIso).not('person_id', 'is', null).limit(HARD_LIMIT),
     supabase.from('groups').select('id, name'),
     supabase.from('teams').select('id, name'),
+  ])
+
+  // Wave 2: tables that have no date column we can filter by directly,
+  // so we filter by parent IDs from wave 1. Without this, .limit() would
+  // silently truncate to the first HARD_LIMIT rows in primary-key order
+  // (i.e. oldest first) and recent activity would be invisible.
+  const eventIdList = ((groupEvents ?? []) as { id: string }[]).map(e => e.id)
+  const planIdList = ((servicePlans ?? []) as { id: string }[]).map(p => p.id)
+  const [
+    { data: groupEventAtts },
+    { data: planTeamMembers },
+  ] = await Promise.all([
+    eventIdList.length === 0
+      ? Promise.resolve({ data: [] as { person_id: string; event_id: string }[] })
+      : supabase.from('group_event_attendances')
+          .select('person_id, event_id')
+          .eq('church_id', churchId)
+          .eq('attended', true)
+          .in('event_id', eventIdList)
+          .limit(HARD_LIMIT),
+    planIdList.length === 0
+      ? Promise.resolve({ data: [] as { person_id: string; team_id: string; plan_id: string; status: string }[] })
+      : supabase.from('plan_team_members')
+          .select('person_id, team_id, plan_id, status')
+          .eq('church_id', churchId)
+          .eq('status', 'C')
+          .in('plan_id', planIdList)
+          .limit(HARD_LIMIT),
   ])
 
   // 2. Lookup tables.
@@ -209,9 +235,11 @@ export async function GET(request: NextRequest) {
   for (const j of personMap.values()) {
     j.events.sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
   }
-  const people = Array.from(personMap.values()).filter(j => j.eventCount > 0)
+  // Return every active person, even those with no events in this window
+  // — empty rows convey "no recorded activity" at a glance.
+  const people = Array.from(personMap.values())
   people.sort((a, b) => b.eventCount - a.eventCount)
-  const totalWithEvents = people.length
+  const totalWithEvents = people.filter(p => p.eventCount > 0).length
 
   return NextResponse.json(
     {
@@ -220,6 +248,7 @@ export async function GET(request: NextRequest) {
       generatedAt: new Date().toISOString(),
       windowStart: new Date(windowStart).toISOString(),
       windowEnd: new Date(now).toISOString(),
+      total: people.length,
       totalWithEvents,
       returned: people.length,
       people,
