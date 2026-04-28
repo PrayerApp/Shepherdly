@@ -35,6 +35,9 @@ interface StatsPayload {
   categories: { total: number; shepherded: number; active: number; present: number; excluded: number }
   groupsByType: TypeStat[]
   teamsByType: TypeStat[]
+  /* Per-service-type list of individual-team rows for the teams-table
+   * expand-on-click drill-down. Same TypeStat shape as the parent. */
+  teamsByServiceType?: Record<string, TypeStat[]>
   totals: { groups: Totals; teams: Totals }
   ratios: { groupLeaderToMember: number | null; teamLeaderToMember: number | null }
   perPerson: { avgContexts: number | null; avgGroupAttendanceRate: number | null }
@@ -185,10 +188,6 @@ type ColumnDef = {
   align: 'left' | 'right'
   numeric: boolean
   accessor: (r: TypeStat) => number | string | null
-  /* Tier 1 columns are visible always; tier 2 columns only show in
-   * the expanded detail row. Cuts the always-on column count from 11
-   * to 5 so the table fits without horizontal scroll under 1400px. */
-  tier: 1 | 2
   // Color for numeric display, optional.
   format?: (r: TypeStat) => React.ReactNode
 }
@@ -209,28 +208,34 @@ function ratioNumeric(r: TypeStat): number {
 }
 
 const COLUMNS: ColumnDef[] = [
-  { key: 'typeName', label: 'Type', align: 'left', numeric: false, tier: 1, accessor: r => r.typeName },
-  { key: 'contexts', label: 'Contexts', align: 'right', numeric: true, tier: 1, accessor: r => r.contexts },
-  { key: 'staff', label: 'Staff', align: 'right', numeric: true, tier: 1, accessor: r => r.staff },
-  { key: 'members', label: 'Members', align: 'right', numeric: true, tier: 1, accessor: r => r.members },
-  { key: 'delta', label: 'Δ 3mo', align: 'right', numeric: true, tier: 1, accessor: r => r.delta },
-  { key: 'leaders', label: 'Leaders', align: 'right', numeric: true, tier: 2, accessor: r => r.leaders },
-  { key: 'ratio', label: 'Ratio', align: 'right', numeric: true, tier: 2, accessor: ratioNumeric, format: r => formatRatio(r) },
-  { key: 'joinedRecent', label: 'Joined 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.joinedRecent },
-  { key: 'exitedRecent', label: 'Exited 3mo', align: 'right', numeric: true, tier: 2, accessor: r => r.exitedRecent },
-  { key: 'tenureActive', label: 'Avg tenure (active)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureActiveDays ?? -1 },
-  { key: 'tenureExited', label: 'Avg tenure (exited)', align: 'right', numeric: true, tier: 2, accessor: r => r.avgTenureExitedDays ?? -1 },
+  { key: 'typeName',     label: 'Type',          align: 'left',  numeric: false, accessor: r => r.typeName },
+  { key: 'contexts',     label: 'Contexts',      align: 'right', numeric: true,  accessor: r => r.contexts },
+  { key: 'staff',        label: 'Staff',         align: 'right', numeric: true,  accessor: r => r.staff },
+  { key: 'leaders',      label: 'Leaders',       align: 'right', numeric: true,  accessor: r => r.leaders },
+  { key: 'members',      label: 'Members',       align: 'right', numeric: true,  accessor: r => r.members },
+  { key: 'ratio',        label: 'L:M ratio',     align: 'right', numeric: true,  accessor: ratioNumeric, format: r => formatRatio(r) },
+  { key: 'joinedRecent', label: 'Joined 3mo',    align: 'right', numeric: true,  accessor: r => r.joinedRecent },
+  { key: 'exitedRecent', label: 'Exited 3mo',    align: 'right', numeric: true,  accessor: r => r.exitedRecent },
+  { key: 'delta',        label: 'Δ',             align: 'right', numeric: true,  accessor: r => r.delta },
+  { key: 'tenureActive', label: 'Avg tenure',    align: 'right', numeric: true,  accessor: r => r.avgTenureActiveDays ?? -1 },
+  { key: 'tenureExited', label: 'Tenure exited', align: 'right', numeric: true,  accessor: r => r.avgTenureExitedDays ?? -1 },
 ]
 
-const PRIMARY_COLUMNS = COLUMNS.filter(c => c.tier === 1)
-const DETAIL_COLUMNS = COLUMNS.filter(c => c.tier === 2)
-
-function TypeTable({ title, rows, excluded, sort, onSort }: {
+function TypeTable({ title, rows, excluded, sort, onSort, expandable, subRows }: {
   title: string
   rows: TypeStat[]
   excluded: Set<string>
   sort: { key: SortKey; dir: SortDir }
   onSort: (key: SortKey) => void
+  /* When true, the leftmost column is an expand toggle and rows can
+   * disclose per-context detail rows from `subRows`. Used for the
+   * Teams table where each service_type contains multiple individual
+   * teams, each worth seeing on its own. The Groups table sets this
+   * false because every column the user cares about is already inline. */
+  expandable?: boolean
+  /* Per-typeId list of nested rows. Each entry has the same TypeStat
+   * shape as a parent but represents one individual team/group. */
+  subRows?: Record<string, TypeStat[]>
 }) {
   const visibleRows = useMemo(() => rows.filter(r => !excluded.has(r.typeId)), [rows, excluded])
 
@@ -253,9 +258,7 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
   // staff person who shepherds multiple visible types is counted
   // once per type — the page-level Totals object is the deduped
   // figure. Avg-tenure rolls up via a weighted average using
-  // (members + leaders) as the weight, which approximates the true
-  // average tenure across visible memberships without requiring raw
-  // membership rows on the client.
+  // (members + leaders) as the weight.
   const totals = useMemo(() => {
     let contexts = 0, staff = 0, members = 0, leaders = 0
     let joined = 0, exited = 0
@@ -289,21 +292,65 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
       return next
     })
   }
-  /* Total cells in a primary row: toggle + PRIMARY_COLUMNS + trend. */
-  const PRIMARY_COL_COUNT = PRIMARY_COLUMNS.length + 2
+  /* Total td-cells per row: optional toggle + every COLUMN + trend. */
+  const ROW_COL_COUNT = COLUMNS.length + 1 + (expandable ? 1 : 0)
+
+  const renderCells = (r: TypeStat, isSub: boolean) => (
+    <>
+      {COLUMNS.map(c => {
+        if (c.key === 'typeName') {
+          return (
+            <td key={c.key} className={`px-4 py-2 ${isSub ? 'pl-8' : ''}`} style={{ color: isSub ? 'var(--foreground-muted)' : 'var(--foreground)' }}>
+              {r.typeName}
+            </td>
+          )
+        }
+        if (c.key === 'delta') {
+          return (
+            <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: deltaColor(r.delta) }}>
+              {r.delta > 0 ? `+${r.delta}` : r.delta}
+            </td>
+          )
+        }
+        if (c.key === 'tenureActive') {
+          return <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtDays(r.avgTenureActiveDays)}</td>
+        }
+        if (c.key === 'tenureExited') {
+          return <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--foreground-muted)' }}>{fmtDays(r.avgTenureExitedDays)}</td>
+        }
+        if (c.key === 'ratio') {
+          return <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--foreground-muted)' }}>{formatRatio(r)}</td>
+        }
+        if (c.key === 'joinedRecent') {
+          return <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--color-status-joined)' }}>{fmtNum(r.joinedRecent)}</td>
+        }
+        if (c.key === 'exitedRecent') {
+          return <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--color-status-exited)' }}>{fmtNum(r.exitedRecent)}</td>
+        }
+        const v = c.accessor(r) as number
+        return (
+          <td key={c.key} className="text-right px-3 py-2 tabular-nums" style={{ color: 'var(--foreground)' }}>
+            {fmtNum(v)}
+          </td>
+        )
+      })}
+      <td className="px-3 py-2"><MiniBars series={r.series} /></td>
+    </>
+  )
 
   return (
     <section className="mb-10">
       <h2 className="text-lg font-serif mb-3" style={{ color: 'var(--foreground)' }}>{title}</h2>
-      <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
-        <table className="w-full text-sm sans">
+      <div className="rounded-card border overflow-x-auto" style={{ background: 'var(--card)', borderColor: 'var(--border)' }}>
+        <table className="w-full min-w-[1100px] text-sm sans">
           <caption className="sr-only">
-            {title} — sortable; numeric columns are right-aligned. Click a row to expand additional metrics including leader counts, join/exit rates, and tenure averages.
+            {title} — sortable; numeric columns are right-aligned.
+            {expandable ? ' Click a row to see each individual context underneath.' : ''}
           </caption>
           <thead>
             <tr style={{ background: 'var(--muted)' }}>
-              <th scope="col" className="w-8 px-2 py-2.5" aria-label="Expand row" />
-              {PRIMARY_COLUMNS.map(c => {
+              {expandable && <th scope="col" className="w-8 px-2 py-2.5" aria-label="Expand row" />}
+              {COLUMNS.map(c => {
                 const isSorted = sort.key === c.key
                 const ariaSort = isSorted
                   ? sort.dir === 'asc' ? 'ascending' : 'descending'
@@ -313,7 +360,7 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
                     key={c.key}
                     scope="col"
                     aria-sort={ariaSort}
-                    className={`px-3 py-2.5 font-medium ${c.align === 'right' ? 'text-right' : 'text-left'}`}
+                    className={`px-3 py-2.5 font-medium whitespace-nowrap ${c.align === 'right' ? 'text-right' : 'text-left'}`}
                     style={{ color: 'var(--foreground-muted)' }}
                   >
                     <button
@@ -336,70 +383,58 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
           <tbody>
             {allExcluded ? (
               <tr>
-                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={ROW_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   All types excluded. Open settings to include some.
                 </td>
               </tr>
             ) : sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={PRIMARY_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
+                <td colSpan={ROW_COL_COUNT} className="text-center py-6" style={{ color: 'var(--foreground-muted)' }}>
                   No tracked types yet.
                 </td>
               </tr>
             ) : sortedRows.flatMap(r => {
               const isExpanded = expanded.has(r.typeId)
+              const sub = subRows?.[r.typeId] ?? []
               const out: React.ReactNode[] = [
                 <tr
                   key={r.typeId}
                   className="border-t hover:bg-neutral-50/60"
                   style={{ borderColor: 'var(--border)' }}
                 >
-                  <td className="w-8 px-2 py-2.5">
-                    <button
-                      type="button"
-                      onClick={() => toggleExpanded(r.typeId)}
-                      aria-expanded={isExpanded}
-                      aria-label={`${isExpanded ? 'Collapse' : 'Expand'} details for ${r.typeName}`}
-                      className="rounded p-1 text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900"
-                    >
-                      <span aria-hidden className="inline-block text-xs leading-none">
-                        {isExpanded ? '▾' : '▸'}
-                      </span>
-                    </button>
-                  </td>
-                  <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>{r.typeName}</td>
-                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.contexts)}</td>
-                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.staff)}</td>
-                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(r.members)}</td>
-                  <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(r.delta) }}>
-                    {r.delta > 0 ? `+${r.delta}` : r.delta}
-                  </td>
-                  <td className="px-3 py-2.5"><MiniBars series={r.series} /></td>
+                  {expandable && (
+                    <td className="w-8 px-2 py-2">
+                      {sub.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(r.typeId)}
+                          aria-expanded={isExpanded}
+                          aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${r.typeName} contexts`}
+                          className="rounded p-1 text-neutral-500 hover:bg-neutral-200/50 hover:text-neutral-900"
+                        >
+                          <span aria-hidden className="inline-block text-xs leading-none">
+                            {isExpanded ? '▾' : '▸'}
+                          </span>
+                        </button>
+                      ) : null}
+                    </td>
+                  )}
+                  {renderCells(r, false)}
                 </tr>,
               ]
-              if (isExpanded) {
-                out.push(
-                  <tr
-                    key={`${r.typeId}-detail`}
-                    className="border-t"
-                    style={{ borderColor: 'var(--border)', background: 'var(--background-subtle)' }}
-                  >
-                    <td colSpan={PRIMARY_COL_COUNT} className="px-6 py-4">
-                      <div className="grid grid-cols-2 gap-x-8 gap-y-3 md:grid-cols-3 lg:grid-cols-6 mb-4">
-                        <DetailMetric label="Leaders" value={fmtNum(r.leaders)} />
-                        <DetailMetric label="Ratio" value={formatRatio(r)} />
-                        <DetailMetric label="Joined 3mo" value={fmtNum(r.joinedRecent)} color="var(--color-status-joined)" />
-                        <DetailMetric label="Exited 3mo" value={fmtNum(r.exitedRecent)} color="var(--color-status-exited)" />
-                        <DetailMetric label="Avg tenure (active)" value={fmtDays(r.avgTenureActiveDays)} />
-                        <DetailMetric label="Avg tenure (exited)" value={fmtDays(r.avgTenureExitedDays)} />
-                      </div>
-                      <div>
-                        <div className="text-[11px] uppercase tracking-wider text-neutral-500 mb-1">12-month trend</div>
-                        <ExpandedTrend series={r.series} />
-                      </div>
-                    </td>
-                  </tr>,
-                )
+              if (expandable && isExpanded) {
+                for (const s of sub) {
+                  out.push(
+                    <tr
+                      key={`${r.typeId}-${s.typeId}`}
+                      className="border-t"
+                      style={{ borderColor: 'var(--border)', background: 'var(--background-subtle)' }}
+                    >
+                      <td className="w-8 px-2 py-2" />
+                      {renderCells(s, true)}
+                    </tr>
+                  )
+                }
               }
               return out
             })}
@@ -407,14 +442,20 @@ function TypeTable({ title, rows, excluded, sort, onSort }: {
           {sortedRows.length > 0 && (
             <tfoot>
               <tr style={{ background: 'var(--muted)', fontWeight: 500 }}>
-                <td />
+                {expandable && <td />}
                 <td className="px-4 py-2.5" style={{ color: 'var(--foreground)' }}>Total (visible)</td>
                 <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.contexts)}</td>
                 <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.staff)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.leaders)}</td>
                 <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtNum(totals.members)}</td>
+                <td />
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--color-status-joined)' }}>{fmtNum(totals.joined)}</td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--color-status-exited)' }}>{fmtNum(totals.exited)}</td>
                 <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: deltaColor(totalDelta) }}>
                   {totalDelta > 0 ? `+${totalDelta}` : totalDelta}
                 </td>
+                <td className="text-right px-3 py-2.5 tabular-nums" style={{ color: 'var(--foreground)' }}>{fmtDays(totals.avgTenureActive)}</td>
+                <td />
                 <td />
               </tr>
             </tfoot>
@@ -619,6 +660,8 @@ export default function StatisticsPage() {
         excluded={excludedTeamSet}
         sort={teamSort}
         onSort={toggleSort(setTeamSort)}
+        expandable
+        subRows={data.teamsByServiceType}
       />
 
       <p className="text-xs sans mt-6" style={{ color: 'var(--foreground-muted)' }}>

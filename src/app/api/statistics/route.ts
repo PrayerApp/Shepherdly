@@ -140,6 +140,8 @@ export async function GET() {
     { data: staffRows },
     { data: engagementCounts },
     { data: peopleAnalytics },
+    { data: perTeamStatsRows },
+    { data: perTeamTrendRows },
   ] = await Promise.all([
     supabase.from('group_type_stats_v').select('*').eq('church_id', churchId),
     supabase.from('team_type_stats_v').select('*').eq('church_id', churchId),
@@ -153,6 +155,12 @@ export async function GET() {
      */
     supabase.rpc('get_person_engagement_counts', { p_church_id: churchId }),
     supabase.from('person_analytics').select('total_contexts, group_attendance_rate').eq('church_id', churchId),
+    /* Per-team detail (one row per team, not per service_type) for the
+     * /statistics teams-table expand-row drill-down. */
+    supabase.from('team_stats_v')
+      .select('team_id, team_name, type_id, type_name, contexts, members, leaders, joined_recent, exited_recent, avg_tenure_active_days, avg_tenure_exited_days')
+      .eq('church_id', churchId),
+    supabase.from('team_trend_v').select('team_id, offset_idx, snapshot_at, members, leaders').eq('church_id', churchId),
   ])
 
   const staffByKind = (kind: 'group' | 'team') =>
@@ -221,6 +229,46 @@ export async function GET() {
     },
   }
 
+  /*
+   * Per-team rows keyed by service_type so the UI can render
+   * teamsByServiceType[type_id] inside an expanded row.
+   */
+  const trendByTeam = new Map<string, TrendRow[]>()
+  for (const t of (perTeamTrendRows ?? []) as { team_id: string; offset_idx: number; snapshot_at: string; members: number; leaders: number }[]) {
+    const key = t.team_id
+    const list = trendByTeam.get(key) ?? []
+    list.push({ type_id: key, offset_idx: t.offset_idx, snapshot_at: t.snapshot_at, members: t.members, leaders: t.leaders })
+    trendByTeam.set(key, list)
+  }
+  type PerTeamRow = TypeStatsRow & { team_id: string; team_name: string }
+  const teamsByServiceType: Record<string, ResponseTypeStat[]> = {}
+  for (const r of (perTeamStatsRows ?? []) as PerTeamRow[] & { team_id: string; team_name: string; type_id: string }[]) {
+    if (!Object.prototype.hasOwnProperty.call(teamsByServiceType, r.type_id)) {
+      teamsByServiceType[r.type_id] = []
+    }
+    const series = (trendByTeam.get(r.team_id) ?? [])
+      .sort((a, b) => a.offset_idx - b.offset_idx)
+      .map(p => ({ at: p.snapshot_at, members: p.members, leaders: p.leaders }))
+    teamsByServiceType[r.type_id].push({
+      typeId: r.team_id,
+      typeName: r.team_name,
+      contexts: r.contexts,
+      staff: 0, // staff is computed at type-level only
+      members: r.members,
+      leaders: r.leaders,
+      joinedRecent: r.joined_recent,
+      exitedRecent: r.exited_recent,
+      delta: r.joined_recent - r.exited_recent,
+      series,
+      avgTenureActiveDays: r.avg_tenure_active_days,
+      avgTenureExitedDays: r.avg_tenure_exited_days,
+    })
+  }
+  /* Sort per-type lists by current membership descending. */
+  for (const key of Object.keys(teamsByServiceType)) {
+    teamsByServiceType[key].sort((a, b) => b.members + b.leaders - (a.members + a.leaders))
+  }
+
   return NextResponse.json(
     {
       measurementDays: MEASUREMENT_DAYS,
@@ -229,6 +277,7 @@ export async function GET() {
       categories,
       groupsByType: groupStats,
       teamsByType: teamStats,
+      teamsByServiceType,
       totals,
       ratios: {
         groupLeaderToMember: totals.groups.members > 0
