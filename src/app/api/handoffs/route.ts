@@ -230,6 +230,18 @@ export async function GET(request: NextRequest) {
     return { id: `team_type:${stid}`, label: `Team: ${name}`, kind: 'team_type' }
   }
 
+  // For the EXIT sankey only, the same group/team type can appear as
+  // both a source (people leaving it) and a target (people landing in
+  // it after leaving somewhere else). Without namespacing, that creates
+  // a cycle and d3-sankey throws "circular link". Source-side and
+  // target-side nodes share a label but get distinct ids, which is
+  // standard bipartite-Sankey practice.
+  const exitNodeAs = (m: MembershipRow, role: 'from' | 'to'): SankeyNode | null => {
+    const base = labelForContext(m)
+    if (!base) return null
+    return { ...base, id: `exit_${role}:${base.id}` }
+  }
+
   // 6. Build entry sankey.
   const entryLinks = new Map<string, number>()
   const entryNodeIds = new Set<string>()
@@ -269,7 +281,7 @@ export async function GET(request: NextRequest) {
     if (!m.left_at) continue
     const leftAt = Date.parse(m.left_at)
     if (leftAt < windowStart) continue
-    const source = labelForContext(m)
+    const source = exitNodeAs(m, 'from')
     if (!source) continue
     registerNode(source)
 
@@ -284,7 +296,7 @@ export async function GET(request: NextRequest) {
     if (future.length === 0) {
       target = INACTIVE_NODE
     } else {
-      target = labelForContext(future[0])
+      target = exitNodeAs(future[0], 'to')
     }
     if (!target) continue
     registerNode(target)
