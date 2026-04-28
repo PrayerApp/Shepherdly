@@ -29,6 +29,7 @@ const NAV_ITEMS = [
   { href: '/surveys', label: 'Surveys', icon: SurveyIcon },
   { href: '/mir', label: 'Impact Reports', icon: MirIcon },
   { href: '/statistics', label: 'Statistics', icon: StatsIcon },
+  { href: '/handoffs', label: 'Handoffs', icon: HandoffsIcon },
 ]
 
 const SETTINGS_ITEMS = [
@@ -186,6 +187,10 @@ function UnassignedIcon({ size }: { size: number }) {
 }
 function StatsIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>
+}
+function HandoffsIcon({ size }: { size: number }) {
+  // Two arrows merging — visualizes flow / handoff
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7h7l4 5h7"/><path d="M3 17h7l4-5"/><polyline points="17 9 21 12 17 15"/></svg>
 }
 function SignOutIcon({ size }: { size: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>

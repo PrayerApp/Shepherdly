@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { ChevronDown } from 'lucide-react'
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -54,7 +55,28 @@ export default function PcoSyncPanel() {
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [debugData, setDebugData] = useState<any>(null)
   const [debugLoading, setDebugLoading] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const abortRef = useRef(false)
+
+  // Click-outside closer for the secondary actions menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -332,21 +354,66 @@ export default function PcoSyncPanel() {
           </p>
         </div>
         {!syncing ? (
-          <div className="flex gap-2">
-            <button onClick={handleDebug} disabled={debugLoading}
-              className="text-xs sans px-3 py-2 rounded-lg border"
-              style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)' }}>
-              {debugLoading ? 'Testing…' : 'Debug'}
-            </button>
-            <button onClick={() => handleSync(false)} className="btn-primary text-sm sans flex items-center gap-2">
+          <div ref={menuRef} className="relative inline-flex">
+            {/*
+             * Split-button pattern. Primary action ("Sync Now") is the
+             * obvious thing 99% of users want. Secondary actions
+             * ("Full sync", "Debug connection") live in a dropdown so
+             * the chrome stays clean — they're rare, not for daily use.
+             */}
+            <button
+              type="button"
+              onClick={() => handleSync(false)}
+              className="btn-primary text-sm sans flex items-center gap-2 rounded-r-none"
+            >
               <SyncIcon />
               Sync Now
             </button>
-            <button onClick={() => handleSync(true)}
-              className="text-xs sans px-3 py-2 rounded-lg border"
-              style={{ borderColor: 'var(--border)', color: 'var(--foreground-muted)' }}>
-              Force Full Sync
+            <button
+              type="button"
+              onClick={() => setMenuOpen(o => !o)}
+              aria-label="Sync options"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              className="btn-primary px-2 rounded-l-none border-l border-white/20"
+            >
+              <ChevronDown className="size-4" aria-hidden />
             </button>
+
+            {menuOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full mt-1 w-64 rounded-lg border bg-white shadow-lg overflow-hidden z-20"
+                style={{ borderColor: 'var(--border)' }}
+              >
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => { setMenuOpen(false); handleSync(true) }}
+                  className="w-full text-left px-4 py-2.5 hover:bg-neutral-50 sans"
+                >
+                  <div className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>Full sync</div>
+                  <div className="text-xs" style={{ color: 'var(--foreground-muted)' }}>
+                    Re-fetch every record, ignoring cached cooldowns.
+                  </div>
+                </button>
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => { setMenuOpen(false); handleDebug() }}
+                  disabled={debugLoading}
+                  className="w-full text-left px-4 py-2.5 hover:bg-neutral-50 sans border-t"
+                  style={{ borderColor: 'var(--border)' }}
+                >
+                  <div className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
+                    {debugLoading ? 'Testing connection…' : 'Debug connection'}
+                  </div>
+                  <div className="text-xs" style={{ color: 'var(--foreground-muted)' }}>
+                    Verify credentials and read PCO counts without writing.
+                  </div>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <button onClick={handleCancel}
