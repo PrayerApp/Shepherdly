@@ -44,6 +44,43 @@ interface LinkDatum extends SankeyExtraProperties {
   value: number
 }
 
+/*
+ * d3-sankey throws "circular link" if the link graph isn't a DAG. The
+ * server keeps source and target ids in disjoint namespaces so cycles
+ * shouldn't reach us, but a stale browser cache or unforeseen data
+ * shape can still produce one. Walk the graph DFS, drop any back-edge
+ * that would close a cycle, and warn — better a slightly-incomplete
+ * diagram than a hard render crash.
+ */
+function dropCycles(nodes: SankeyNodeIn[], links: SankeyLinkIn[]): SankeyLinkIn[] {
+  const adj = new Map<string, { target: string; key: string }[]>()
+  for (const l of links) {
+    const key = `${l.source}>>${l.target}`
+    if (!adj.has(l.source)) adj.set(l.source, [])
+    adj.get(l.source)!.push({ target: l.target, key })
+  }
+  const WHITE = 0, GRAY = 1, BLACK = 2
+  const color = new Map<string, number>()
+  for (const n of nodes) color.set(n.id, WHITE)
+  const dropped = new Set<string>()
+  const visit = (u: string) => {
+    color.set(u, GRAY)
+    for (const { target, key } of adj.get(u) ?? []) {
+      const c = color.get(target) ?? WHITE
+      if (c === GRAY) dropped.add(key)
+      else if (c === WHITE) visit(target)
+    }
+    color.set(u, BLACK)
+  }
+  for (const n of nodes) {
+    if ((color.get(n.id) ?? WHITE) === WHITE) visit(n.id)
+  }
+  if (dropped.size > 0) {
+    console.warn(`HandoffSankey: dropped ${dropped.size} cyclic link(s)`)
+  }
+  return links.filter(l => !dropped.has(`${l.source}>>${l.target}`))
+}
+
 const KIND_COLOR: Record<SankeyNodeIn['kind'], string> = {
   input: 'var(--color-gold-500)',
   group_type: 'var(--color-green-700)',
@@ -66,8 +103,10 @@ export function HandoffSankey({
   const [hoverLinkKey, setHoverLinkKey] = useState<string | null>(null)
   const [width, setWidth] = useState(800)
 
+  const safeLinks = useMemo(() => dropCycles(nodes, links), [nodes, links])
+
   const layout = useMemo(() => {
-    if (nodes.length === 0 || links.length === 0) return null
+    if (nodes.length === 0 || safeLinks.length === 0) return null
     const generator = sankey<NodeDatum, LinkDatum>()
       .nodeId(d => d.id)
       .nodeAlign(sankeyJustify)
@@ -76,10 +115,10 @@ export function HandoffSankey({
       .extent([[8, 8], [width - 8, height - 8]])
     const graph = generator({
       nodes: nodes.map(n => ({ ...n })),
-      links: links.map(l => ({ ...l })),
+      links: safeLinks.map(l => ({ ...l })),
     })
     return graph
-  }, [nodes, links, width, height])
+  }, [nodes, safeLinks, width, height])
 
   if (!layout) {
     return (
