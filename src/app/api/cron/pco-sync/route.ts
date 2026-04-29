@@ -333,6 +333,21 @@ export async function GET(request: NextRequest) {
       } catch (e) {
         console.error('Cron: activity-based inactive sweep failed:', e)
       }
+
+      // Person-level calculated-active sweep. Threshold lives in
+      // app_settings.calculated_inactive_threshold_months (default 18).
+      // Different from the membership-level sweep above: this rule
+      // also factors in own profile age and household-adult activity,
+      // and produces the people.is_calculated_active flag that gates
+      // shepherding stats across the rest of the app.
+      try {
+        const { data: counts } = await admin.rpc('refresh_calculated_active')
+        for (const row of (counts ?? []) as { active_count: number; inactive_count: number }[]) {
+          console.log(`Cron: calculated-active sweep — ${row.active_count} active, ${row.inactive_count} inactive`)
+        }
+      } catch (e) {
+        console.error('Cron: calculated-active sweep failed:', e)
+      }
     }
 
     // Post-sync: regenerate auto-connect tree edges

@@ -114,12 +114,27 @@ export const SYNC_RESOURCES: SyncResource[] = [
     supportsUpdatedSince: true,
     syncStrategy: 'upsert',
     onConflict: 'pco_id',
+    // Pull household linkage so calculated-active can find a person's
+    // spouse/co-resident adults. Linkage is sparse without ?include=
+    // — the spec only guarantees populated relationship data when the
+    // related resource is included.
+    queryParams: { 'include': 'households' },
     mapRow: (p) => ({
       pco_id: p.id,
       name: [p.attributes.first_name, p.attributes.last_name].filter(Boolean).join(' ') || 'Unknown',
       membership_type: p.attributes.membership || 'attender',
       status: p.attributes.status || 'active',
       is_leader: false,
+      is_child: p.attributes.child === true,
+      pco_created_at: p.attributes.created_at || null,
+      // PCO People returns households as a to-many relationship. We
+      // take the first one — most adults have a single household, and
+      // the calculated-active rule only needs *any* adult in *some*
+      // household to determine the spouse-equivalent. Edge cases (a
+      // person in multiple households, e.g. divorced parents) get the
+      // first household PCO returns; refining to the "primary"
+      // membership would require a separate household_memberships sync.
+      household_pco_id: p.relationships?.households?.data?.[0]?.id || null,
     }),
   },
 
@@ -283,12 +298,17 @@ export const SYNC_RESOURCES: SyncResource[] = [
       pco_id: c.id,
       pco_event_id: c.id,
       pco_person_id: c.relationships?.person?.data?.id || null,
+      // Guardian who brought the person being checked in. For kids
+      // this is typically a parent — counts as PCO activity for that
+      // adult under the calculated-active rule.
+      pco_checked_in_by_person_id: c.relationships?.checked_in_by?.data?.id || null,
       event_date: c.attributes.created_at?.substring(0, 10) || null,
       service_type: null,
       checked_in_at: c.attributes.created_at || null,
     }),
     idMappings: [
       { field: 'person_id', pcoField: 'pco_person_id', table: 'people' },
+      { field: 'checked_in_by_person_id', pcoField: 'pco_checked_in_by_person_id', table: 'people' },
     ],
   },
 

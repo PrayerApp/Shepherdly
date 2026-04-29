@@ -24,9 +24,13 @@ export async function GET(request: NextRequest) {
     if (detail === 'group') {
       const [groupRes, membersRes, eventsRes] = await Promise.all([
         supabase.from('groups').select('id, name, group_type, description').eq('id', contextId).single(),
+        // !inner + filter on people.is_calculated_active drops memberships
+        // whose person is calc-inactive — keeps the group detail view's
+        // member count consistent with the rest of the site.
         supabase.from('group_memberships')
-          .select('person_id, role, joined_at, is_active, people(id, name)')
+          .select('person_id, role, joined_at, is_active, people!inner(id, name)')
           .eq('group_id', contextId)
+          .eq('people.is_calculated_active', true)
           .order('joined_at', { ascending: false }),
         supabase.from('group_events')
           .select('id, name, starts_at')
@@ -65,8 +69,9 @@ export async function GET(request: NextRequest) {
       const [teamRes, membersRes, plansRes] = await Promise.all([
         supabase.from('teams').select('id, name, team_type').eq('id', contextId).single(),
         supabase.from('team_memberships')
-          .select('person_id, role, people(id, name)')
-          .eq('team_id', contextId),
+          .select('person_id, role, people!inner(id, name)')
+          .eq('team_id', contextId)
+          .eq('people.is_calculated_active', true),
         supabase.from('plan_team_members')
           .select('person_id, status, plan_id, position_name, service_plans(sort_date, title)')
           .eq('team_id', contextId)

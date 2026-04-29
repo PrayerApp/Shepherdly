@@ -97,7 +97,12 @@ export async function GET(request: NextRequest) {
   const inputLookbackStartIso = new Date(windowStart - INPUT_LOOKBACK_DAYS * 86400000).toISOString()
 
   // 1. Fetch source data in parallel.
+  // activePeopleRows is the calculated-active subset: anyone whose
+  // person_id isn't here is excluded from every count below. This
+  // matches the site-wide rule that shepherding stats only see active
+  // people.
   const [
+    { data: activePeopleRows },
     { data: groupMembershipsRaw },
     { data: teamMembershipsRaw },
     { data: groups },
@@ -109,6 +114,9 @@ export async function GET(request: NextRequest) {
     { data: signups },
     { data: signupAttendees },
   ] = await Promise.all([
+    supabase.from('people').select('id')
+      .eq('church_id', churchId)
+      .eq('is_calculated_active', true),
     supabase
       .from('group_memberships')
       .select('person_id, group_id, joined_at, left_at, is_active')
@@ -135,6 +143,10 @@ export async function GET(request: NextRequest) {
       .not('person_id', 'is', null),
   ])
 
+  // Active-person gate. Membership rows for inactive people get
+  // dropped before they can contribute to any sankey link.
+  const activePersonIds = new Set<string>(((activePeopleRows ?? []) as { id: string }[]).map(p => p.id))
+
   // 2. Lookup tables.
   const groupTypeId = new Map<string, string>()
   for (const g of (groups ?? []) as { id: string; group_type_id: string | null }[]) {
@@ -159,10 +171,12 @@ export async function GET(request: NextRequest) {
       .map(s => [s.id, s.name ?? 'Unknown signup']),
   )
 
-  // 3. Per-person sorted input-signal lists.
+  // 3. Per-person sorted input-signal lists. Inactive persons are
+  // filtered up front so they can't contribute to entry/exit links.
   const inputsByPerson = new Map<string, InputSignal[]>()
   for (const s of (formSubmissions ?? []) as { person_id: string; form_pco_id: string; submitted_at: string | null }[]) {
     if (!s.submitted_at) continue
+    if (!activePersonIds.has(s.person_id)) continue
     const label = formLabelByPcoId.get(s.form_pco_id) ?? 'Form: Other'
     pushInto(inputsByPerson, s.person_id, { at: Date.parse(s.submitted_at), label })
   }
@@ -170,6 +184,7 @@ export async function GET(request: NextRequest) {
     if (!a.registered_at) continue
     if (a.canceled) continue
     if (!(a.active || a.waitlisted)) continue
+    if (!activePersonIds.has(a.person_id)) continue
     const name = signupName.get(a.signup_id) ?? 'Unknown'
     pushInto(inputsByPerson, a.person_id, { at: Date.parse(a.registered_at), label: `Signup: ${truncate(name, 32)}` })
   }
@@ -178,6 +193,7 @@ export async function GET(request: NextRequest) {
   // 4. Combine memberships into a single per-person sorted list of joins.
   const allMemberships: MembershipRow[] = []
   for (const m of (groupMembershipsRaw ?? []) as { person_id: string; group_id: string; joined_at: string | null; left_at: string | null; is_active: boolean }[]) {
+    if (!activePersonIds.has(m.person_id)) continue
     allMemberships.push({
       person_id: m.person_id,
       context_id: m.group_id,
@@ -188,6 +204,7 @@ export async function GET(request: NextRequest) {
     })
   }
   for (const m of (teamMembershipsRaw ?? []) as { person_id: string; team_id: string; joined_at: string | null; left_at: string | null; is_active: boolean }[]) {
+    if (!activePersonIds.has(m.person_id)) continue
     allMemberships.push({
       person_id: m.person_id,
       context_id: m.team_id,

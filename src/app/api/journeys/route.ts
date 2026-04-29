@@ -133,7 +133,9 @@ export async function GET(request: NextRequest) {
     fetchAllPaged<{ id: string; name: string }>((from, to) =>
       supabase.from('people')
         .select('id, name')
-        .eq('church_id', churchId).eq('status', 'active')
+        .eq('church_id', churchId)
+        .eq('status', 'active')
+        .eq('is_calculated_active', true)
         .order('id').range(from, to),
     ),
     fetchAllPaged<{ person_id: string; group_id: string; joined_at: string | null; left_at: string | null }>((from, to) =>

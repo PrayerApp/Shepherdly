@@ -258,6 +258,7 @@ export async function GET() {
     const { data } = await admin.from('people')
       .select('id, name, pco_id, status, membership_type, is_staff, is_lead_pastor, is_leader')
       .in('id', batch)
+      .eq('is_calculated_active', true)
     if (data) people.push(...data)
   }
 
